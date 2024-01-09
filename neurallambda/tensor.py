@@ -132,7 +132,10 @@ for expected_ix, tag in enumerate(tag_names):
     assert tag_names[expected_ix] == vec_to_tag(tag_to_vec[tag])
 
 
-# Var
+##########
+# String Encodings
+
+# Letters
 chars = 'a b c d e f g h i j k l m n o p q r s t u v w x y z A B C D E F G H I J K L M N O P Q R S T U V W X Y Z 0 1 2 3 4 5 6 7 8 9'.split(' ')
 char_to_int_ = {c: i for i, c in enumerate(chars)}
 def char_to_int(c):

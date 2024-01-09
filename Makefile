@@ -4,6 +4,10 @@
 #
 ##################################################
 
+.PHONY: run
+run:
+	PYTHONPATH=. python example/t01_sandbox.py
+
 .PHONY: test
 test:
 	PYTHONPATH=. pytest
