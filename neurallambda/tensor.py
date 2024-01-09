@@ -8,12 +8,13 @@ from torch import einsum, tensor, allclose
 from typing import Dict, Union, List, Tuple
 from typing import Union, List, Any, Type
 import neurallambda.hypercomplex as H
+import neurallambda.language as L
 import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import neurallambda.memory as mem
-from neurallambda.config import Number, N
+import neurallambda.memory as M
+
 
 ###########
 # PROBE TOOLS
@@ -91,8 +92,6 @@ def kv_insert(state_k, state_v, k, x, eps=1e-8, cos_sim_keys=True):
 ##################################################
 # Compile Memory to Tensors
 
-
-
 ##########
 
 tag_names = [
@@ -127,9 +126,6 @@ unary_tags   = {'Var', 'ArithOp', 'Car', 'Cdr'}
 binary_tags  = {'App', 'Fn', 'Defn', 'Cons'}
 
 
-# assure sorting
-for expected_ix, tag in enumerate(tag_names):
-    assert tag_names[expected_ix] == vec_to_tag(tag_to_vec[tag])
 
 
 ##########
@@ -141,17 +137,14 @@ char_to_int_ = {c: i for i, c in enumerate(chars)}
 def char_to_int(c):
     if c in char_to_int_:
         return char_to_int_[c]
-    return -666
+    return -666  # an error, but still an int
 
 int_to_char_ = {i: c for i, c in enumerate(chars)}
 def int_to_char(i):
     if i in int_to_char_:
         return int_to_char_[i]
-    return '#'
+    return '#'  # an error, but still a char
 
-for c in chars:
-    d = int_to_char(unproject_int(project_int(char_to_int(c))))
-    assert c == d
 
 # ArithOp
 arithops = '+ - / *'.split(' ')
@@ -162,23 +155,24 @@ int_to_arithop = {i: c for i, c in enumerate(arithops)}
 ##########
 # Compile to NeuralLambdas
 
-def compile_neurallambdas(mem: Dict[mem.Address, Any]):
+def compile_neurallambdas(mem: Dict[M.Address, Any], number_system, n_addresses, vec_size, device, batch_size):
     ''' Given dictionary of memory `mem`, build tensor set representing the neurallamda. '''
-    addresses = N.randn((BATCH_SIZE, N_ADDRESSES, VEC_SIZE)).to(DEVICE)
-    tags  = torch.zeros((BATCH_SIZE, N_ADDRESSES, VEC_SIZE, N.dim), device=DEVICE) + zero_vec
-    col1 = torch.zeros((BATCH_SIZE, N_ADDRESSES, VEC_SIZE, N.dim), device=DEVICE) + zero_vec
-    col2 = torch.zeros((BATCH_SIZE, N_ADDRESSES, VEC_SIZE, N.dim), device=DEVICE) + zero_vec
+    N = number_system
+    addresses = N.randn((batch_size, n_addresses, vec_size)).to(device)
+    tags  = torch.zeros((batch_size, n_addresses, vec_size, N.dim), device=device) + zero_vec
+    col1 = torch.zeros((batch_size, n_addresses, vec_size, N.dim), device=device) + zero_vec
+    col2 = torch.zeros((batch_size, n_addresses, vec_size, N.dim), device=device) + zero_vec
     blocks = sorted(mem.items(), key=lambda item: item[0].i)
     for addr, block in blocks:
         tags[:, addr.i] = tag_to_vec[block[0]]
 
         # Column 1
-        if len(block) >= 2 and isinstance(block[1], mem.Address):
+        if len(block) >= 2 and isinstance(block[1], M.Address):
             term1_addr = block[1]
             col1[:, addr.i] = addresses[:, term1_addr.i]
 
         # Column 2
-        if len(block) >= 3 and isinstance(block[2], mem.Address):
+        if len(block) >= 3 and isinstance(block[2], M.Address):
             term2_addr = block[2]
             col2[:, addr.i] = addresses[:, term2_addr.i]
 
@@ -200,17 +194,170 @@ def compile_neurallambdas(mem: Dict[mem.Address, Any]):
     return addresses, tags, col1, col2
 
 
-def string_to_neurallambda(s: str):
-    parser = Lark(grammar, start='start', parser='lalr')
-    transformer = LambdaTransformer()
-    tree = parser.parse(s)
-    ast = transformer.transform(tree)
-    mem = terms_to_memory(ast)
-    return compile_neurallambdas(mem)
+def string_to_neurallambda(s: str, number_system, n_addresses, vec_size, device, batch_size):
+    ''' This is probably mostly for demonstration and testing purposes. '''
+    ast = L.string_to_terms(s)
+    mem = M.terms_to_memory(ast)
+    return compile_neurallambdas(mem, number_system, n_addresses, vec_size, device, batch_size)
 
 
 ##########
-# Decompile Neural Lambdas
+#
+
+class Neurallambda:
+    """
+
+
+    TODO:
+
+    - Init NL
+    - Load memory (non differentiable step at least)
+
+    - Initialize for Beta Reduction (IR, Stack)
+    - Step Beta Reduction
+
+
+    """
+
+    def __init__(self, n_addresses, vec_size, n_stack, gc_steps, number_system, device):
+        self.n_addresses = n_addresses
+        self.vec_size = vec_size
+        self.n_stack = n_stack
+        self.gc_steps = gc_steps
+        self.number_system = number_system
+        self.N = number_system # convenient shorthand
+        self.device = device
+
+        #####
+        # Projecting Ints
+        #
+        #   If we, linearly projected ints, they would be very susceptible to
+        #   noise, and then project back to the wrong int. Instead, we assign
+        #   each int its own random vec, which is uncorrelated with neighboring
+        #   vecs, and then project-unproject is robust to noise.
+        self.int_range_start = -200
+        self.int_range_end   =  200
+
+        # A matrix where each row ix represents the VEC_SIZE int
+        self.int_vecs = torch.stack([
+            self.N.randn((vec_size,))
+            for _ in range(self.int_range_start, self.int_range_end + 1)
+        ]).to(self.device)
+        self.int_vecs_mat = self.N.to_mat(self.int_vecs)  # matrix form (ie of complex numbers)
+
+        #####
+        # Projecting Symbols
+
+        # we can't cos_sim with zeroes, so here's a nice "Zero" vector
+        # zero_vec = torch.zeros((BATCH_SIZE, vec_size, N.dim), device=self.device) + 1e-1
+        self.zero_vec = torch.zeros((vec_size, self.N.dim), device=self.device) + 1e-1
+        self.zero_vec_mat = self.N.to_mat(self.zero_vec)  # matrix form of complex numbers
+
+        # a dense vector embedding for each tag
+        self.tag_to_vec = {
+            tag: self.N.randn((vec_size,)).to(self.device) if tag != 'NULL' else self.zero_vec
+            for tag in tag_names
+        }
+
+        self.tag_vecs = torch.stack([v for v in self.tag_to_vec.values()])
+        self.tag_vecs_mat = self.N.to_mat(self.tag_vecs)
+
+        self.app_tag_vec  = self.N.to_mat(self.tag_to_vec['App'])
+        self.fn_tag_vec   = self.N.to_mat(self.tag_to_vec['Fn'])
+        self.defn_tag_vec = self.N.to_mat(self.tag_to_vec['Defn'])
+
+        # Base types
+        self.var_tag_vec      = self.N.to_mat(self.tag_to_vec['Var'])
+        self.intlit_tag_vec   = self.N.to_mat(self.tag_to_vec['IntLit'])
+        self.empty_tag_vec    = self.N.to_mat(self.tag_to_vec['Empty'])
+        self.arithop_tag_vec  = self.N.to_mat(self.tag_to_vec['ArithOp'])
+        self.truelit_tag_vec  = self.N.to_mat(self.tag_to_vec['TrueLit'])
+        self.falselit_tag_vec = self.N.to_mat(self.tag_to_vec['FalseLit'])
+        self.base_types_vecs = torch.stack([
+            self.var_tag_vec,
+            self.intlit_tag_vec,
+            self.empty_tag_vec,
+            self.arithop_tag_vec,
+            self.truelit_tag_vec,
+            self.falselit_tag_vec,
+        ])
+
+
+    ##########
+    # Projecting Ints
+    #
+    # We keep a different random projection for each int so they unproject neatly
+    # (robust to noise) to the original int.
+
+    def project_int(self, integer):
+        """Projects an integer to a vector space."""
+        index = integer - self.int_range_start
+        return self.int_vecs[index]
+
+    def unproject_int(self, vector):
+        """Unprojects a vector from the vector space back to an integer.
+
+        Assumes matrix formatted `vector`.
+        """
+        H.assert_is_probably_not_mat_form(vector)
+        cs = H.cosine_similarity(self.N.to_mat(vector).unsqueeze(0), self.int_vecs_mat, dim=1)
+        max_index = torch.argmax(cs).item()
+        return max_index + self.int_range_start
+
+
+    ##########
+    # Projecting Symbols
+
+    def vec_to_tag(self, vec):
+        ''' return the most similar (cos_sim) tag index for a given vec.
+
+        Expects `vec` in hypercomplex's matrix format.
+        '''
+        H.assert_is_probably_not_mat_form(vec)
+        if vec.ndim == 1 + 1:  # +1 for hypercomplex
+            sim = H.cosine_similarity(self.N.to_mat(vec), self.tag_vecs_mat, dim=1)
+            return tag_names[sim.argmax().item()]
+        elif vec.ndim == 2 + 1:  # +1 for hypercomplex
+            out = []
+            for v in vec:
+                out.append(vec_to_tag(v))
+            return out
+
+    def vec_to_address(self, vec, addresses):
+        ''' return the most similar (cos_sim) tag index for a given vec.
+
+        Args:
+          vec: ndarray([address_size])
+          addresses: ndarray([batch?, n_addresses, address_size])
+        '''
+        H.assert_is_probably_not_mat_form(vec)
+        H.assert_is_probably_not_mat_form(addresses)
+        if addresses.ndim == 2 + 1:  # static addresses per all batches + hypercomplex mat
+            sim = H.cosine_similarity(self.N.to_mat(vec), self.N.to_mat(addresses), dim=1)
+            return sim.argmax().item()
+
+        if addresses.ndim == 3 + 1:  # different addresses per batch + hypercomplex mat
+            sim = H.cosine_similarity(self.N.to_mat(vec), self.N.to_mat(addresses), dim=2)
+            return sim.argmax().item()
+
+
+
+    def initialize_beta_reduction(self):
+        pass
+
+    def initialize(self):
+        pass
+
+    def initialize(self):
+        pass
+
+    def initialize(self):
+        pass
+
+
+
+##########
+# Decompile Neural Lambdas back to Mem
 
 def read_col(tag, vec, addresses):
     ''' Project a neurallambda `vec` back to the machine language. A `tag` determines how it should be read. '''
@@ -236,9 +383,9 @@ def read_col(tag, vec, addresses):
         return ('NULL', )
 
     # Address
-    return mem.Address(vec_to_address(vec, addresses))
+    return M.Address(vec_to_address(vec, addresses))
 
-def neurallambda_to_mem(addresses, tags, col1, col2, n_ixs) -> Dict[mem.Address, Any]:
+def neurallambda_to_mem(addresses, tags, col1, col2, n_ixs) -> Dict[M.Address, Any]:
     ''' Reverse engineer the tensor set of a neurallambda back into a dictionary mem. '''
     H.assert_is_probably_not_mat_form(addresses)
     H.assert_is_probably_not_mat_form(tags)
@@ -248,7 +395,7 @@ def neurallambda_to_mem(addresses, tags, col1, col2, n_ixs) -> Dict[mem.Address,
     if tags.ndim == 2 + 1:  # non-batched, add 1 hypercomplex dim
         recon_mem = {}
         for i in range(n_ixs):
-            ai = mem.Address(i)
+            ai = M.Address(i)
             t = vec_to_tag(tags[i])
 
             if t == 'NULL':
@@ -286,7 +433,7 @@ def neurallambda_to_mem(addresses, tags, col1, col2, n_ixs) -> Dict[mem.Address,
     raise ValueError(f"Saw neurallambda's tags with unexpected shape: {tags.shape}")
 
 
-##############################
+##################################################
 # Beta Reduction of NeuralLambdas
 
 '''.
@@ -341,8 +488,8 @@ When / how to process `is_reduced`
 '''
 
 
-##########
-# Reduction Functions
+##################################################
+# Beta Reduction
 
 def assert_mat_form(x):
     ''' Not guaranteed, but, hopefully catches bad dims '''
@@ -689,153 +836,3 @@ def reduce(at_addr,
     ir2 = ir2.clip(0, 1)
 
     return tags, col1, col2, ir1, ir2
-
-
-
-##################################################
-#
-
-class Neurallambda:
-    """
-
-
-    TODO:
-
-    - Init NL
-    - Load memory (non differentiable step at least)
-
-    - Initialize for Beta Reduction (IR, Stack)
-    - Step Beta Reduction
-
-
-    """
-
-    def __init__(self, n_addresses, vec_size, n_stack, gc_steps, number_system):
-        self.n_addresses = n_addresses
-        self.vec_size = vec_size
-        self.n_stack = n_stack
-        self.gc_steps = gc_steps
-        self.number_system = number_system
-
-
-        #####
-        # Projecting Ints
-        #
-        #   If we, linearly projected ints, they would be very susceptible to
-        #   noise, and then project back to the wrong int. Instead, we assign
-        #   each int its own random vec, which is uncorrelated with neighboring
-        #   vecs, and then project-unproject is robust to noise.
-        self.int_range_start = -200
-        self.int_range_end   =  200
-
-        # A matrix where each row ix represents the VEC_SIZE int
-        int_vecs = torch.stack([N.randn((VEC_SIZE,)) for _ in range(self.int_range_start, self.int_range_end + 1)]).to(DEVICE)
-        int_vecs_mat = N.to_mat(int_vecs)  # matrix form (ie of complex numbers)
-
-        #####
-        # Projecting Symbols
-
-        # we can't cos_sim with zeroes, so here's a nice "Zero" vector
-        zero_vec = torch.zeros((BATCH_SIZE, VEC_SIZE, N.dim), device=DEVICE) + 1e-1
-        zero_vec_mat = N.to_mat(zero_vec)  # matrix form of complex numbers
-
-        # a dense vector embedding for each tag
-        tag_to_vec = {
-            tag: N.randn((VEC_SIZE,)).to(DEVICE) if tag != 'NULL' else zero_vec[0]
-            for tag in tag_names
-        }
-
-        tag_vecs = torch.stack([v for v in tag_to_vec.values()])
-        tag_vecs_mat = N.to_mat(tag_vecs)
-
-        app_tag_vec  = N.to_mat(tag_to_vec['App'])
-        fn_tag_vec   = N.to_mat(tag_to_vec['Fn'])
-        defn_tag_vec = N.to_mat(tag_to_vec['Defn'])
-
-        # Base types
-        var_tag_vec      = N.to_mat(tag_to_vec['Var'])
-        intlit_tag_vec   = N.to_mat(tag_to_vec['IntLit'])
-        empty_tag_vec    = N.to_mat(tag_to_vec['Empty'])
-        arithop_tag_vec  = N.to_mat(tag_to_vec['ArithOp'])
-        truelit_tag_vec  = N.to_mat(tag_to_vec['TrueLit'])
-        falselit_tag_vec = N.to_mat(tag_to_vec['FalseLit'])
-        base_types_vecs = torch.stack([
-            var_tag_vec,
-            intlit_tag_vec,
-            empty_tag_vec,
-            arithop_tag_vec,
-            truelit_tag_vec,
-            falselit_tag_vec,
-        ])
-
-
-    ##########
-    # Projecting Ints
-    #
-    # We keep a different random projection for each int so they unproject neatly
-    # (robust to noise) to the original int.
-
-    def project_int(self, integer):
-        """Projects an integer to a vector space."""
-        index = integer - self.int_range_start
-        return int_vecs[index]
-
-    def unproject_int(self, vector):
-        """Unprojects a vector from the vector space back to an integer.
-
-        Assumes matrix formatted `vector`.
-        """
-        H.assert_is_probably_not_mat_form(vector)
-        cs = H.cosine_similarity(N.to_mat(vector).unsqueeze(0), int_vecs_mat, dim=1)
-        max_index = torch.argmax(cs).item()
-        return max_index + self.int_range_start
-
-
-    ##########
-    # Projecting Symbols
-
-    def vec_to_tag(self, vec):
-        ''' return the most similar (cos_sim) tag index for a given vec.
-
-        Expects `vec` in hypercomplex's matrix format.
-        '''
-        H.assert_is_probably_not_mat_form(vec)
-        if vec.ndim == 1 + 1:  # +1 for hypercomplex
-            sim = H.cosine_similarity(N.to_mat(vec), tag_vecs_mat, dim=1)
-            return tag_names[sim.argmax().item()]
-        elif vec.ndim == 2 + 1:  # +1 for hypercomplex
-            out = []
-            for v in vec:
-                out.append(vec_to_tag(v))
-            return out
-
-    def vec_to_address(self, vec, addresses):
-        ''' return the most similar (cos_sim) tag index for a given vec.
-
-        Args:
-          vec: ndarray([address_size])
-          addresses: ndarray([batch?, n_addresses, address_size])
-        '''
-        H.assert_is_probably_not_mat_form(vec)
-        H.assert_is_probably_not_mat_form(addresses)
-        if addresses.ndim == 2 + 1:  # static addresses per all batches + hypercomplex mat
-            sim = H.cosine_similarity(N.to_mat(vec), N.to_mat(addresses), dim=1)
-            return sim.argmax().item()
-
-        if addresses.ndim == 3 + 1:  # different addresses per batch + hypercomplex mat
-            sim = H.cosine_similarity(N.to_mat(vec), N.to_mat(addresses), dim=2)
-            return sim.argmax().item()
-
-
-
-    def initialize_beta_reduction(self):
-        pass
-
-    def initialize(self):
-        pass
-
-    def initialize(self):
-        pass
-
-    def initialize(self):
-        pass

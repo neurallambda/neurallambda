@@ -236,6 +236,12 @@ class LambdaTransformer(Transformer):
        return ListP(children[0])
 
 
+def string_to_terms(s):
+    parser = Lark(grammar, start='start', parser='lalr')
+    transformer = LambdaTransformer()
+    tree = parser.parse(s)
+    return transformer.transform(tree)
+
 ##################################################
 # Pretty Printer
 #

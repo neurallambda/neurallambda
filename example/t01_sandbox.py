@@ -182,6 +182,7 @@ N_STACK     = 16  # Stack size
 VEC_SIZE    = 2048  # Size of addresses and values
 N_ADDRESSES = 24  # Memory size
 BATCH_SIZE  = 1
+N = H.Complex # number system
 
 # Garbage collection (overwrites memory locations with `zero_vec`)
 GC_STEPS = 1
@@ -311,7 +312,14 @@ def step_neurallambda(total_steps, start_address, addresses, tags, col1, col2, g
 
 ##########
 
-addresses, tags, col1, col2 = nl.string_to_neurallambda(x)
+addresses, tags, col1, col2 = nl.string_to_neurallambda(
+    x,
+    number_system=N,
+    n_addresses=N_ADDRESSES,
+    vec_size=VEC_SIZE,
+    device=DEVICE,
+    batch_size=BATCH_SIZE,
+)
 start_ix = 0
 start_address = N.to_mat(addresses[:, start_ix])
 

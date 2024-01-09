@@ -12,10 +12,13 @@ run:
 test:
 	PYTHONPATH=. pytest
 
+
 .PHONY: watch
 watch:
-	inotifywait -r -e modify,move,create,delete "neurallambda/" "test/" --format '%w%f' --quiet --timefmt "%H:%M:%S" --include "$$({*.py}|{*_test.py})$$" | \
-	while read DIRECTORY FILE; do \
-		echo "File $$FILE modified in $$DIRECTORY at $$TIME"; \
-		PYTHONPATH=. pytest; \
+	inotifywait -r -m -e modify,move,create,delete "neurallambda/" "test/" --format '%w%f' --quiet | \
+	while read FILE; do \
+		if echo "$$FILE" | grep -qE '\.py$$' && ! echo "$$FILE" | grep -qE '\.#'; then \
+			echo "Python file changed: $$FILE"; \
+			PYTHONPATH=. pytest; \
+		fi; \
 	done
