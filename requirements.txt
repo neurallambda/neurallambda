@@ -1,0 +1,9 @@
+# Deps
+torch
+numpy
+lark
+
+
+# Testing
+pytest
+matplotlib
