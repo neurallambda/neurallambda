@@ -162,8 +162,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import neurallambda.stack as ns
-import neurallambda.tensor as nl
+import neurallambda.language as L
+import neurallambda.stack as S
+import neurallambda.tensor as T
+import neurallambda.memory as M
+
 
 torch.set_printoptions(precision=3, sci_mode=False)
 
@@ -179,13 +182,13 @@ print('\n'*200)
 # Params
 
 N_STACK     = 16  # Stack size
-VEC_SIZE    = 2048  # Size of addresses and values
+VEC_SIZE    = 4096  # Size of addresses and values
 N_ADDRESSES = 24  # Memory size
 BATCH_SIZE  = 1
 N = H.Complex # number system
 
 # Garbage collection (overwrites memory locations with `zero_vec`)
-GC_STEPS = 1
+GC_STEPS = 2
 
 
 ##################################################
@@ -194,12 +197,12 @@ GC_STEPS = 1
 # A curious person may enjoy playing with each different small program, and
 # watching how it gets reduced step by step.
 
-# # Trivial
-# x, total_steps = "((fn [x] x) 42)", 7
+# Trivial
+x, total_steps = "((fn [x] x) 42)", 7
 
 
-# Simple Fn Application: -> '(1 13)
-x, total_steps = "((fn [x] '(1 x)) 13)", 13
+# # Simple Fn Application: -> '(1 13)
+# x, total_steps = "((fn [x] '(1 x)) 13)", 13
 
 
 # # Multi application: -> '(1 2 3)
@@ -241,63 +244,75 @@ x, total_steps = "((fn [x] '(1 x)) 13)", 13
 ##################################################
 # Go!
 
-def step_neurallambda(total_steps, start_address, addresses, tags, col1, col2, gc):
+def step_neurallambda(nl, n_stack, start_address, total_steps, gc_steps):
     '''Given a neurallambda, step its betareduction `total_steps` forward. This
     function will create some a helper stack, and some other helper
     functions.'''
 
-    # `is_reduced` for columns 1 and 2
-    ir1 = torch.zeros((BATCH_SIZE, N_ADDRESSES)).to(DEVICE)
-    ir2 = torch.zeros((BATCH_SIZE, N_ADDRESSES)).to(DEVICE)
+    nb = T.Neuralbeta(nl, n_stack)
+    nb.push_address(start_address)
 
-    # stack
-    stack = ns.Stack(N_STACK, VEC_SIZE, initial_sharpen=100)
-    stack.init(BATCH_SIZE, DEVICE)
+    nl.to_mat()
 
-    # Convert
-    addresses = N.to_mat(addresses)
-    tags = N.to_mat(tags)
-    col1 = N.to_mat(col1)
-    col2 = N.to_mat(col2)
+    # addresses = nl.addresses
+    # tags = nl.tags
+    # col1 = nl.col1
+    # col2 = nl.col2
 
-    #####
-    # Setup Stack. Initialize by pushing ix=0
-    should_push    = torch.ones((BATCH_SIZE,), device=DEVICE)
-    should_pop     = torch.zeros((BATCH_SIZE,), device=DEVICE)
-    should_null_op = torch.zeros((BATCH_SIZE,), device=DEVICE)
 
-    stack(should_push,
-          should_pop,
-          should_null_op,
-          start_address,
-    )
+    # # `is_reduced` for columns 1 and 2
+    # ir1 = torch.zeros((BATCH_SIZE, N_ADDRESSES)).to(DEVICE)
+    # ir2 = torch.zeros((BATCH_SIZE, N_ADDRESSES)).to(DEVICE)
+
+    # # stack
+    # stack = S.Stack(N_STACK, VEC_SIZE, number_system=nl.number_system, device=DEVICE, initial_sharpen=100)
+    # stack.init(BATCH_SIZE)
+
+    # # Convert
+    # addresses = N.to_mat(addresses)
+    # tags = N.to_mat(tags)
+    # col1 = N.to_mat(col1)
+    # col2 = N.to_mat(col2)
+
+    # #####
+    # # Setup Stack. Initialize by pushing ix=0
+    # should_push    = torch.ones((BATCH_SIZE,), device=DEVICE)
+    # should_pop     = torch.zeros((BATCH_SIZE,), device=DEVICE)
+    # should_null_op = torch.zeros((BATCH_SIZE,), device=DEVICE)
+
+    # stack(should_push,
+    #       should_pop,
+    #       should_null_op,
+    #       start_address,
+    # )
 
     debug_ixs = []
 
     for step in range(total_steps):
 
         # The address chosen to be reduced next
-        at_addr = stack.read()
+        at_addr = nb.stack.read()
 
         # Perform one step of reduction.
-        tags, col1, col2, ir1, ir2 = reduce(at_addr, addresses, tags, col1, col2, ir1, ir2, gc=GC_STEPS, stack=stack)
+        tags, col1, col2, ir1, ir2 = nb.reduce_step(at_addr, gc_steps)
 
         ##########
         # Debug
-        ix = vec_to_address(N.from_mat(at_addr), N.from_mat(addresses))
+        ix = nl.vec_to_address(N.from_mat(at_addr), N.from_mat(nl.addresses))
         print()
         print(f'STEP {step} @ix={ix} ----------')
         debug_ixs.append(ix)
-        recon_mem = neurallambda_to_mem(
-            N.from_mat(addresses),
-            N.from_mat(tags),
-            N.from_mat(col1),
-            N.from_mat(col2),
+        recon_mem = T.neurallambda_to_mem(
+            nl,
+            N.from_mat(nl.addresses),
+            N.from_mat(nl.tags),
+            N.from_mat(nl.col1),
+            N.from_mat(nl.col2),
             n_ixs=N_ADDRESSES,
         )
 
         # Print human-readable memory
-        pm(recon_mem[0], ir1[0], ir2[0])
+        M.print_mem(recon_mem[0], nb.ir1[0], nb.ir2[0])
 
         ##########
         # Debug Stack
@@ -305,24 +320,43 @@ def step_neurallambda(total_steps, start_address, addresses, tags, col1, col2, g
 
     print()
     print('ixs visited: ', debug_ixs)
-    print('FINAL REDUCTION: ', pretty_print(memory_to_terms(recon_mem[0], A(0),
-                                             resugar_app=False,
-                                             resugar_fn=False,
-                                             )))
+    print('FINAL REDUCTION: ', L.pretty_print(
+        M.memory_to_terms(recon_mem[0], M.Address(0),
+                          resugar_app=False,
+                          resugar_fn=False,
+                          )))
+    return nb
 
 ##########
 
-addresses, tags, col1, col2 = nl.string_to_neurallambda(
+nl = T.string_to_neurallambda(
     x,
     number_system=N,
+    batch_size=BATCH_SIZE,
     n_addresses=N_ADDRESSES,
     vec_size=VEC_SIZE,
+    zero_vec_bias=1e-1,
     device=DEVICE,
-    batch_size=BATCH_SIZE,
 )
 start_ix = 0
-start_address = N.to_mat(addresses[:, start_ix])
+start_address = N.to_mat(nl.addresses[:, start_ix])
 
 with torch.no_grad():
 # with torch.enable_grad():
-    step_neurallambda(total_steps, start_address, addresses, tags, col1, col2, gc=GC_STEPS)
+    nb = step_neurallambda(
+        nl,
+        N_STACK,
+        start_address,
+        total_steps,
+        gc_steps=GC_STEPS
+    )
+
+S.pp_stack(nb.stack, nl)
+
+'''
+
+  S.pp_sim_addresses(stack_ix, stack_val, zero_vec_mat, addresses)
+
+  S.pp_stack(nb.stack, nb.nl.addresses)
+
+'''

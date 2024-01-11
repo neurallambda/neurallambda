@@ -1,4 +1,7 @@
 
+# Misc
+neurallambda_*.zip
+
 # Python
 .env/
 venv/

@@ -12,16 +12,20 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from neurallambda.util import transform_runs
+import neurallambda.debug as D
 
 class Stack(nn.Module):
     ''' NOTE: einsum's have "qr" for making use of matrix-form complex numbers '''
 
-    def __init__(self, n_stack, vec_size, init_offset=1e-3, initial_sharpen=10):
+    def __init__(self, n_stack, vec_size, number_system, device, init_offset=1e-3, initial_sharpen=10):
         super(Stack, self).__init__()
         self.init_offset = init_offset
         self.n_stack = n_stack
         self.vec_size = vec_size
-        self.sharpen_k = nn.Parameter(torch.tensor([initial_sharpen], dtype=torch.float32, device=DEVICE))
+        self.number_system = number_system
+        self.N = number_system # convenient shorthand
+        self.device = device
+        self.sharpen_k = nn.Parameter(torch.tensor([initial_sharpen], dtype=torch.float32, device=self.device))
         self.stacks = None # run init to populate
         self.pointers = None # run init to populate
 
@@ -94,48 +98,59 @@ class Stack(nn.Module):
         new_p = torch.roll(self.pointers, shifts=-1)
         return new_stack, new_p, out
 
-    def init(self, batch_size, device):
-        self.pointers = torch.zeros((batch_size, self.n_stack), device=device)
+    def init(self, batch_size):
+        self.pointers = torch.zeros((batch_size, self.n_stack), device=self.device)
         self.pointers[:, 0] = 1 # start stack pointer at ix=0
-        self.stacks = torch.zeros((batch_size, self.n_stack, self.vec_size, N.dim, N.dim), device=device) + self.init_offset
-        self.zero_vec = torch.zeros((batch_size, self.vec_size, N.dim, N.dim), device=device) + self.init_offset
+        self.stacks = torch.zeros(
+            (batch_size,
+             self.n_stack,
+             self.vec_size,
+             self.N.dim,
+             self.N.dim), device=self.device) + self.init_offset
+        self.zero_vec = torch.zeros(
+            (batch_size,
+             self.vec_size,
+             self.N.dim,
+             self.N.dim), device=self.device) + self.init_offset
 
 
 
 ##################################################
 # Pretty printer debugging tools
 
-def pp_sim_addresses(stack_ix, stack_val, zero_vec_mat, addresses):
+def pp_sim_addresses(nl, stack_ix, stack_val, zero_vec_mat, addresses):
     txts = []
-    null_sim = H.cosine_similarity(N.to_mat(stack_val), zero_vec_mat[0], dim=0)
-    txts.append(colorize(f'NULL', value=null_sim.item()))
+    null_sim = H.cosine_similarity(nl.N.to_mat(stack_val), nl.zero_vec_mat[0], dim=0)
+    txts.append(D.colorize(f'NULL', value=null_sim.item()))
     for i, a in enumerate(addresses):
-        sim = H.cosine_similarity(N.to_mat(stack_val), a, dim=0)
-        txt = colorize(f'{i:> 2d} ', value=sim.item())
+        sim = H.cosine_similarity(nl.N.to_mat(stack_val), a, dim=0)
+        txt = D.colorize(f'{i:> 2d} ', value=sim.item())
         txts.append(txt)
     return (stack_ix, null_sim, txts)
 
 
-def pp_stack(stack, addresses):
+def pp_stack(stack, nl):
     ''' Color the indexes in the stack according to the pointer. Calculate a
     similarity between the address at the pointer and every other address in
     `addresses` (and Null). Color code the print out according to
     similarity.
 
     '''
+    addresses = nl.addresses
+
     NULL_SIM = 0.5 # If stack_val is sim to zero_vec more than this, we'll
                    # collapse its display
     BATCH_I = 0
     print()
     print('STACK:')
 
-    ss = N.from_mat(stack.stacks[BATCH_I])  # [batch, stack_size, vec_size, complex, complex]
+    ss = nl.N.from_mat(stack.stacks[BATCH_I])  # [batch, stack_size, vec_size, complex, complex]
     pp = stack.pointers[BATCH_I] # [batch, stack_size]
     BATCH_I = 0
 
     similarities = [] # [(pointer_p, stack_ix, null_sim, txt)]
     for stack_ix, (stack_val, p) in enumerate(zip(ss, pp)):
-        similarities.append((p,) + pp_sim_addresses(stack_ix, stack_val, zero_vec_mat, addresses[BATCH_I]))
+        similarities.append((p,) + pp_sim_addresses(nl, stack_ix, stack_val, nl.zero_vec_mat, addresses[BATCH_I]))
 
     similarities = transform_runs(
         similarities,
@@ -145,7 +160,7 @@ def pp_stack(stack, addresses):
 
     for p, stack_ix, n, t in similarities:
         if p is not None:
-            ix_txt = colorize(f'{stack_ix:> 2d}', value=p.item())
+            ix_txt = D.colorize(f'{stack_ix:> 2d}', value=p.item())
             print(f'{ix_txt} = {"".join(t)}')
         else:
             print(t)

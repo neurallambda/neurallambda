@@ -32,6 +32,7 @@ VALUES: A 1-, 2-, or 3-ary tuple called `Block` (see definition for
 from dataclasses import dataclass
 from typing import Dict, Union, List, Tuple, Union, List, Any, Type
 from neurallambda.language import *
+import neurallambda.debug as D
 
 
 ####################
@@ -493,7 +494,7 @@ def str_tup(tup, left_is_reduced, right_is_reduced):
     yet, and green if they have been reduced.'''
     s = "("
     for i, (t, ir_color) in enumerate(zip(tup, [None, left_is_reduced.item(), right_is_reduced.item()])):
-        s += colorize(str(t), value=ir_color)
+        s += D.colorize(str(t), value=ir_color)
         # br()
 
         # add commas

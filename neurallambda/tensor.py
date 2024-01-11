@@ -14,12 +14,36 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import neurallambda.memory as M
+import neurallambda.stack as S
 
 
 ###########
 # PROBE TOOLS
 
 da = lambda at_addr: vec_to_address(N.from_mat(at_addr[0]), N.from_mat(addresses))
+
+
+##########
+# Misc
+
+def assert_mat_form(x):
+    ''' Not guaranteed, but, hopefully catches bad dims '''
+    assert x.shape[-1] == x.shape[-2], f'hypercomplex number must be in matrix format (ie shape=[..., 2, 2]), but has shape={x.shape}'
+    assert x.shape[-1] in {1, 2, 4}, f'hypercomplex number in matrix form should have dim in (1, 2, 4), but has shape={x.shape}'
+
+
+def address_similarity(address, addresses):
+    assert_mat_form(address)
+    assert_mat_form(addresses)
+
+    ##########
+    # Cos Sim Solution
+    if len(addresses.shape) == 2 + 2: # no batches + hypercomplex mat
+        cs = H.cosine_similarity(address, addresses, dim=1)
+        return cs
+    elif len(addresses.shape) == 3 + 2:  # each batch has own addresses + hypercomplex mat
+        cs = H.cosine_similarity(address, addresses, dim=2)
+        return cs
 
 
 ##################################################
@@ -152,61 +176,86 @@ arithop_to_int = {c: i for i, c in enumerate(arithops)}
 int_to_arithop = {i: c for i, c in enumerate(arithops)}
 
 
-##########
-# Compile to NeuralLambdas
+##################################################
+# NeuralLambdas
 
-def compile_neurallambdas(mem: Dict[M.Address, Any], number_system, n_addresses, vec_size, device, batch_size):
-    ''' Given dictionary of memory `mem`, build tensor set representing the neurallamda. '''
+
+##########
+# Builders
+
+def build_empty_neurallambda(number_system, batch_size, n_addresses, vec_size, zero_vec_bias, device):
+
     N = number_system
     addresses = N.randn((batch_size, n_addresses, vec_size)).to(device)
-    tags  = torch.zeros((batch_size, n_addresses, vec_size, N.dim), device=device) + zero_vec
-    col1 = torch.zeros((batch_size, n_addresses, vec_size, N.dim), device=device) + zero_vec
-    col2 = torch.zeros((batch_size, n_addresses, vec_size, N.dim), device=device) + zero_vec
+    tags  = torch.zeros((batch_size, n_addresses, vec_size, N.dim), device=device) + zero_vec_bias
+    col1 = torch.zeros((batch_size, n_addresses, vec_size, N.dim), device=device) + zero_vec_bias
+    col2 = torch.zeros((batch_size, n_addresses, vec_size, N.dim), device=device) + zero_vec_bias
+
+    return Neurallambda(addresses, tags, col1, col2, number_system, zero_vec_bias, device)
+
+def build_neurallambdas(mem: Dict[M.Address, Any], number_system, batch_size, n_addresses, vec_size, zero_vec_bias, device):
+    '''Given dictionary of memory `mem`, build a Neurallambda
+
+    Args:
+      mem:
+
+      number_system:
+
+      batch_size:
+
+      n_addresses:
+
+      vec_size:
+
+      zero_vec_bias: if a memory location is empty, we'll define a vector of
+        this value to indicate "zero". This is because if it were actually all
+        zeros, cos_sim with it is undefined.
+
+    '''
+    nl = build_empty_neurallambda(number_system, batch_size, n_addresses, vec_size, zero_vec_bias, device)
     blocks = sorted(mem.items(), key=lambda item: item[0].i)
     for addr, block in blocks:
-        tags[:, addr.i] = tag_to_vec[block[0]]
+        nl.tags[:, addr.i] = nl.tag_to_vec[block[0]]
 
         # Column 1
         if len(block) >= 2 and isinstance(block[1], M.Address):
             term1_addr = block[1]
-            col1[:, addr.i] = addresses[:, term1_addr.i]
+            nl.col1[:, addr.i] = nl.addresses[:, term1_addr.i]
 
         # Column 2
         if len(block) >= 3 and isinstance(block[2], M.Address):
             term2_addr = block[2]
-            col2[:, addr.i] = addresses[:, term2_addr.i]
+            nl.col2[:, addr.i] = nl.addresses[:, term2_addr.i]
 
         # IntLit
         if len(block) >= 2 and block[0] == 'IntLit':
             val = block[1]
-            col1[:, addr.i] = project_int(val)
+            nl.col1[:, addr.i] = nl.project_int(val)
 
         # Var
         if len(block) >= 2 and block[0] == 'Var':
             val = block[1]
-            col1[:, addr.i] = project_int(char_to_int(val))
+            nl.col1[:, addr.i] = nl.project_int(char_to_int(val))
 
         # ArithOp
         if len(block) >= 2 and block[0] == 'ArithOp':
             val = block[1]
-            col1[:, addr.i] = project_int(arithop_to_int[val])
+            nl.col1[:, addr.i] = nl.project_int(arithop_to_int[val])
 
-    return addresses, tags, col1, col2
+    return nl
 
-
-def string_to_neurallambda(s: str, number_system, n_addresses, vec_size, device, batch_size):
+def string_to_neurallambda(s: str, number_system, batch_size, n_addresses, vec_size, zero_vec_bias, device):
     ''' This is probably mostly for demonstration and testing purposes. '''
     ast = L.string_to_terms(s)
     mem = M.terms_to_memory(ast)
-    return compile_neurallambdas(mem, number_system, n_addresses, vec_size, device, batch_size)
+    return build_neurallambdas(mem, number_system, batch_size, n_addresses, vec_size, zero_vec_bias, device)
 
 
 ##########
-#
+# Neurallambda Class
 
 class Neurallambda:
     """
-
 
     TODO:
 
@@ -216,14 +265,17 @@ class Neurallambda:
     - Initialize for Beta Reduction (IR, Stack)
     - Step Beta Reduction
 
-
     """
 
-    def __init__(self, n_addresses, vec_size, n_stack, gc_steps, number_system, device):
-        self.n_addresses = n_addresses
-        self.vec_size = vec_size
-        self.n_stack = n_stack
-        self.gc_steps = gc_steps
+    # def __init__(self, n_addresses, vec_size, n_stack, gc_steps, number_system, device):
+    def __init__(self, addresses, tags, col1, col2, number_system, zero_vec_bias, device):
+        self.addresses = addresses
+        self.tags = tags
+        self.col1 = col1
+        self.col2 = col2
+
+        self.batch_size, self.n_addresses, self.vec_size, _ = addresses.shape
+
         self.number_system = number_system
         self.N = number_system # convenient shorthand
         self.device = device
@@ -240,7 +292,7 @@ class Neurallambda:
 
         # A matrix where each row ix represents the VEC_SIZE int
         self.int_vecs = torch.stack([
-            self.N.randn((vec_size,))
+            self.N.randn((self.vec_size,))
             for _ in range(self.int_range_start, self.int_range_end + 1)
         ]).to(self.device)
         self.int_vecs_mat = self.N.to_mat(self.int_vecs)  # matrix form (ie of complex numbers)
@@ -250,12 +302,12 @@ class Neurallambda:
 
         # we can't cos_sim with zeroes, so here's a nice "Zero" vector
         # zero_vec = torch.zeros((BATCH_SIZE, vec_size, N.dim), device=self.device) + 1e-1
-        self.zero_vec = torch.zeros((vec_size, self.N.dim), device=self.device) + 1e-1
+        self.zero_vec = torch.zeros((self.vec_size, self.N.dim), device=self.device) + zero_vec_bias
         self.zero_vec_mat = self.N.to_mat(self.zero_vec)  # matrix form of complex numbers
 
         # a dense vector embedding for each tag
         self.tag_to_vec = {
-            tag: self.N.randn((vec_size,)).to(self.device) if tag != 'NULL' else self.zero_vec
+            tag: self.N.randn((self.vec_size,)).to(self.device) if tag != 'NULL' else self.zero_vec
             for tag in tag_names
         }
 
@@ -282,6 +334,20 @@ class Neurallambda:
             self.falselit_tag_vec,
         ])
 
+
+    def to_mat(self):
+        # Convert to matrix form
+        self.addresses = self.N.to_mat(self.addresses)
+        self.tags = self.N.to_mat(self.tags)
+        self.col1 = self.N.to_mat(self.col1)
+        self.col2 = self.N.to_mat(self.col2)
+
+    def from_mat(self):
+        # Convert from matrix form
+        self.addresses = self.N.from_mat(self.addresses)
+        self.tags = self.N.from_mat(self.tags)
+        self.col1 = self.N.from_mat(self.col1)
+        self.col2 = self.N.from_mat(self.col2)
 
     ##########
     # Projecting Ints
@@ -340,53 +406,56 @@ class Neurallambda:
             sim = H.cosine_similarity(self.N.to_mat(vec), self.N.to_mat(addresses), dim=2)
             return sim.argmax().item()
 
+    def is_base_type(self, x):
+        ''' A Base type is that without any Addresses within it, eg Var, IntLit,
+        Empty, etc. First dim of `x` is `batch_dim`.
 
+        Args:
+          x: shape=[BATCH, VEC_SIZE] in hypercomplex matrix format
 
-    def initialize_beta_reduction(self):
-        pass
-
-    def initialize(self):
-        pass
-
-    def initialize(self):
-        pass
-
-    def initialize(self):
-        pass
-
+        Warning: values can exceed (-1, 1)
+        '''
+        sims = H.cosine_similarity(
+            x.unsqueeze(1),
+            self.base_types_vecs.unsqueeze(0),
+            dim=2).clip(0, 1).sum(dim=1)
+        return sims
 
 
 ##########
 # Decompile Neural Lambdas back to Mem
 
-def read_col(tag, vec, addresses):
+def read_col(nl, tag, vec, addresses):
     ''' Project a neurallambda `vec` back to the machine language. A `tag` determines how it should be read. '''
     H.assert_is_probably_not_mat_form(vec)
     H.assert_is_probably_not_mat_form(addresses)
 
     if tag == 'IntLit':
-        return unproject_int(vec)
+        return nl.unproject_int(vec)
     elif tag == 'Var':
-        return int_to_char(unproject_int(vec))
+        return int_to_char(nl.unproject_int(vec))
     elif tag == 'ArithOp':
-        return int_to_arithop[unproject_int(vec)]
+        return int_to_arithop[nl.unproject_int(vec)]
     elif tag in {'TrueLit', 'FalseLit'}:
         return zero_vec
     elif tag == 'Empty':
         return zero_vec
 
     # NULL
-    z = zero_vec if zero_vec.ndim == 1 else zero_vec[0] # single batch
-    z = N.to_mat(z)
-    c = H.cosine_similarity(N.to_mat(vec), z, dim=0)
+    z = nl.zero_vec if nl.zero_vec.ndim == 1 else nl.zero_vec[0] # single batch
+    z = nl.N.to_mat(z)
+    c = H.cosine_similarity(nl.N.to_mat(vec), z, dim=0)
     if c  > 0.5:
         return ('NULL', )
 
     # Address
-    return M.Address(vec_to_address(vec, addresses))
+    return M.Address(nl.vec_to_address(vec, addresses))
 
-def neurallambda_to_mem(addresses, tags, col1, col2, n_ixs) -> Dict[M.Address, Any]:
-    ''' Reverse engineer the tensor set of a neurallambda back into a dictionary mem. '''
+def neurallambda_to_mem(nl, addresses, tags, col1, col2, n_ixs) -> Dict[M.Address, Any]:
+    ''' Reverse engineer the tensor set of a neurallambda back into a dictionary mem.
+
+    TODO: it's such laziness to pass nl and its weights separately
+    '''
     H.assert_is_probably_not_mat_form(addresses)
     H.assert_is_probably_not_mat_form(tags)
     H.assert_is_probably_not_mat_form(col1)
@@ -396,7 +465,7 @@ def neurallambda_to_mem(addresses, tags, col1, col2, n_ixs) -> Dict[M.Address, A
         recon_mem = {}
         for i in range(n_ixs):
             ai = M.Address(i)
-            t = vec_to_tag(tags[i])
+            t = nl.vec_to_tag(tags[i])
 
             if t == 'NULL':
                 recon_mem[ai] = (t,)
@@ -408,13 +477,13 @@ def neurallambda_to_mem(addresses, tags, col1, col2, n_ixs) -> Dict[M.Address, A
 
             # UNARY or LITERAL
             if t in literal_tags or t in unary_tags:
-                v = read_col(t, col1[i], addresses)
+                v = read_col(nl, t, col1[i], addresses)
                 recon_mem[ai] = (t, v)
 
             # BINARY
             if t in binary_tags:
-                v1 = read_col(t, col1[i], addresses)
-                v2 = read_col(t, col2[i], addresses)
+                v1 = read_col(nl, t, col1[i], addresses)
+                v2 = read_col(nl, t, col2[i], addresses)
                 recon_mem[ai] = (t, v1, v2)
         return recon_mem
 
@@ -423,18 +492,19 @@ def neurallambda_to_mem(addresses, tags, col1, col2, n_ixs) -> Dict[M.Address, A
 
         if addresses.ndim == 2 + 1:  # static addresses per all batches, add 1 hypercomplex dim
             for t, c1, c2 in zip(tags, col1, col2):
-                out.append(neurallambda_to_mem(addresses, t, c1, c2, n_ixs))
+                out.append(neurallambda_to_mem(nl, addresses, t, c1, c2, n_ixs))
 
         elif addresses.ndim == 3 + 1:  # different addresses per batch, add 1 hypercomplex dim
             for a, t, c1, c2 in zip(addresses, tags, col1, col2):
-                out.append(neurallambda_to_mem(a, t, c1, c2, n_ixs))
+                out.append(neurallambda_to_mem(nl, a, t, c1, c2, n_ixs))
 
         return out
     raise ValueError(f"Saw neurallambda's tags with unexpected shape: {tags.shape}")
 
 
+
 ##################################################
-# Beta Reduction of NeuralLambdas
+# Neuralbeta: A Neurallambda equipped with beta reduction stuff
 
 '''.
 
@@ -488,28 +558,6 @@ When / how to process `is_reduced`
 '''
 
 
-##################################################
-# Beta Reduction
-
-def assert_mat_form(x):
-    ''' Not guaranteed, but, hopefully catches bad dims '''
-    assert x.shape[-1] == x.shape[-2], f'hypercomplex number must be in matrix format (ie shape=[..., 2, 2]), but has shape={x.shape}'
-    assert x.shape[-1] in {1, 2, 4}, f'hypercomplex number in matrix form should have dim in (1, 2, 4), but has shape={x.shape}'
-
-
-def address_similarity(address, addresses):
-    assert_mat_form(address)
-    assert_mat_form(addresses)
-
-    ##########
-    # Cos Sim Solution
-    if len(addresses.shape) == 2 + 2: # no batches + hypercomplex mat
-        cs = H.cosine_similarity(address, addresses, dim=1)
-        return cs
-    elif len(addresses.shape) == 3 + 2:  # each batch has own addresses + hypercomplex mat
-        cs = H.cosine_similarity(address, addresses, dim=2)
-        return cs
-
 
 def select_address(address, addresses, list_of_values):
     ''' Given an address, and a bunch of addresses-values, get each value at the
@@ -529,7 +577,7 @@ def select_address(address, addresses, list_of_values):
     return out
 
 
-def reduce_app_fn(at_addr, addresses, tags, col1, col2, gc=True):
+def reduce_app_fn(at_addr, nl, gc_steps:int):
     '''Reduce ((fn [x] x) y)  --to-->  y
 
     This assumes you know that the tag at `at_addr` is App, and the
@@ -541,16 +589,23 @@ def reduce_app_fn(at_addr, addresses, tags, col1, col2, gc=True):
 
     Args:
       at_addr: ndarray([batch, vec_size])
-      addresses: ndarray([batch, n_addresses, vec_size])
-      tags, col1, col2: <same shape as addresses>
+      gc_steps: how many steps of garbage collection?
 
     TODO: OPTIM address lookup cos-sim stuff could be reused across kv_inserts
     '''
+
+    addresses = nl.addresses
+    tags = nl.tags
+    col1 = nl.col1
+    col2 = nl.col2
+    zero_vec_mat = nl.zero_vec_mat.unsqueeze(0)
+
     assert_mat_form(at_addr)
     assert_mat_form(addresses)
     assert_mat_form(tags)
     assert_mat_form(col1)
     assert_mat_form(col2)
+
 
     fn_addr, arg_addr = select_address(at_addr, addresses, [col1, col2])
     fn_tag, param_addr, body_addr = select_address(fn_addr, addresses, [tags, col1, col2])
@@ -592,7 +647,7 @@ def reduce_app_fn(at_addr, addresses, tags, col1, col2, gc=True):
     # WARN: multiple passes can help get it right, but, too many hurts it. Also,
     #       this must be expensive/detrimental for backprop.
 
-    for _ in range(GC_STEPS):
+    for _ in range(gc_steps):
         # Erase Fn
         tags = kv_insert(addresses, tags, fn_addr, zero_vec_mat)
         col1 = kv_insert(addresses, col1, fn_addr, zero_vec_mat)
@@ -610,28 +665,16 @@ def reduce_app_fn(at_addr, addresses, tags, col1, col2, gc=True):
     return tags, col1, col2
 
 
-def is_base_type(x):
-    ''' A Base type is that without any Addresses within it, eg Var, IntLit,
-    Empty, etc. First dim of `x` is `batch_dim`.
+def reduce_step(
+        at_addr,
+        nl,
 
-    Args:
-      x: shape=[BATCH, VEC_SIZE] in hypercomplex matrix format
-
-    Warning: values can exceed (-1, 1)
-    '''
-    sims = H.cosine_similarity(
-        x.unsqueeze(1),
-        base_types_vecs.unsqueeze(0),
-        dim=2).clip(0, 1).sum(dim=1)
-    return sims
-
-
-def reduce(at_addr,
-           addresses, tags, col1, col2,
-           ir1, ir2, # `is_reduced` col1 and col2
-           gc:bool,  # should it garbage collect?
-           stack,
-           ):
+        # Neuralbeta
+        ir1,
+        ir2,
+        stack,
+        gc_steps:int
+):
     '''How to Reduce a Neurallambda?
 
     HIGH LEVEL:
@@ -671,11 +714,20 @@ def reduce(at_addr,
         2. an approach where base types are never marked as `is_reduced`, but when
            they're found, all references to them are marked as reduced.
     '''
+
+    # convenient rebind
+    addresses = nl.addresses
+    tags = nl.tags
+    col1 = nl.col1
+    col2 = nl.col2
+    zero_vec_mat = nl.zero_vec_mat.unsqueeze(0)
+
     H.assert_is_probably_mat_form(at_addr)
     H.assert_is_probably_mat_form(addresses)
     H.assert_is_probably_mat_form(tags)
     H.assert_is_probably_mat_form(col1)
     H.assert_is_probably_mat_form(col2)
+
 
     # unpack stuff at `at_addr`
     head_tag, col1_addr, col2_addr = select_address(at_addr, addresses, [tags, col1, col2])
@@ -700,15 +752,15 @@ def reduce(at_addr,
     #   the incorrect cases towards 0.
 
     # Base
-    is_base_head = is_base_type(head_tag).clip(0, 1)
+    is_base_head = nl.is_base_type(head_tag).clip(0, 1)
 
     # App-Fn
     col1_tag, = select_address(col1_addr, addresses, [tags])
     is_app_fn = (
         # head_tag, col1_tag:  ndarray([batch, vec_size])
         # app_tag_vec:  ndarray([vec_size])
-        H.cosine_similarity(head_tag, app_tag_vec.unsqueeze(0), dim=1) * # head =? App
-        H.cosine_similarity(col1_tag, fn_tag_vec.unsqueeze(0), dim=1)  # left term =? Fn
+        H.cosine_similarity(head_tag, nl.app_tag_vec.unsqueeze(0), dim=1) * # head =? App
+        H.cosine_similarity(col1_tag, nl.fn_tag_vec.unsqueeze(0), dim=1)  # left term =? Fn
     ).clip(0, 1) # shape=[batch]
 
     # Which reduction step is right?
@@ -749,7 +801,7 @@ def reduce(at_addr,
     #
     # New values. Scale result of `reduce_app_fn` based on whether that rule
     # should have applied
-    n_tags, n_col1, n_col2  = reduce_app_fn(at_addr, addresses, tags, col1, col2, gc=gc)
+    n_tags, n_col1, n_col2  = reduce_app_fn(at_addr, nl, gc_steps=gc_steps)
     tags = tags * (1 - red_app_fn) + red_app_fn * n_tags
     col1 = col1 * (1 - red_app_fn) + red_app_fn * n_col1
     col2 = col2 * (1 - red_app_fn) + red_app_fn * n_col2
@@ -836,3 +888,55 @@ def reduce(at_addr,
     ir2 = ir2.clip(0, 1)
 
     return tags, col1, col2, ir1, ir2
+
+
+class Neuralbeta:
+    def __init__(self, nl, n_stack):
+        INITIAL_SHARPEN = 100 # sharpening stack selection mechanism
+
+        self.n_stack = n_stack
+        self.nl = nl
+
+        # `is_reduced` tracks a bool at each address for columns 1 and 2 of
+        # whether or not they're reduced already
+        self.ir1 = torch.zeros((nl.batch_size, nl.n_addresses)).to(nl.device)
+        self.ir2 = torch.zeros((nl.batch_size, nl.n_addresses)).to(nl.device)
+
+        # Neuralstack, to keep track of where to reduce next
+        self.stack = S.Stack(
+            n_stack,
+            nl.vec_size,
+            number_system=nl.number_system,
+            device=nl.device,
+            initial_sharpen=INITIAL_SHARPEN
+        )
+        self.stack.init(nl.batch_size)
+
+    def push_address(self, address):
+        #####
+        # Setup Stack. Initialize by pushing ix=0
+        should_push    = torch.ones((self.nl.batch_size,), device=self.stack.device)
+        should_pop     = torch.zeros((self.nl.batch_size,), device=self.stack.device)
+        should_null_op = torch.zeros((self.nl.batch_size,), device=self.stack.device)
+
+        self.stack(
+            should_push,
+            should_pop,
+            should_null_op,
+            address,
+        )
+
+    def select_address(self, address, list_of_values):
+        return select_address(address, self.nl.addresses, list_of_values)
+
+    def reduce_step(self, at_addr, gc_steps:int):
+        return reduce_step(
+            at_addr,
+            self.nl,
+
+            # Neuralbeta
+            self.ir1,
+            self.ir2,
+            self.stack,
+            gc_steps,
+        )
