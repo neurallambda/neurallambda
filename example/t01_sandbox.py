@@ -174,7 +174,7 @@ SEED = 42
 DEVICE = 'cpu'
 torch.manual_seed(SEED)
 random.seed(SEED)
-br = breakpoint
+br = breakpoint  # convenience
 print('\n'*200)
 
 
@@ -197,12 +197,12 @@ GC_STEPS = 2
 # A curious person may enjoy playing with each different small program, and
 # watching how it gets reduced step by step.
 
-# Trivial
-x, total_steps = "((fn [x] x) 42)", 7
+# # Trivial
+# x, total_steps = "((fn [x] x) 42)", 7
 
 
-# # Simple Fn Application: -> '(1 13)
-# x, total_steps = "((fn [x] '(1 x)) 13)", 13
+# Simple Fn Application: -> '(1 13)
+x, total_steps = "((fn [x] '(1 x)) 13)", 13
 
 
 # # Multi application: -> '(1 2 3)
@@ -294,7 +294,13 @@ def step_neurallambda(nl, n_stack, start_address, total_steps, gc_steps):
         at_addr = nb.stack.read()
 
         # Perform one step of reduction.
-        tags, col1, col2, ir1, ir2 = nb.reduce_step(at_addr, gc_steps)
+        # tags, col1, col2, ir1, ir2 = nb.reduce_step(at_addr, gc_steps)
+        nb.reduce_step(at_addr, gc_steps)
+        tags = nb.nl.tags
+        col1 = nb.nl.col1
+        col2 = nb.nl.col2
+        ir1 = nb.ir1
+        ir2 = nb.ir2
 
         ##########
         # Debug

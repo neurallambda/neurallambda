@@ -721,6 +721,8 @@ def reduce_step(
     col1 = nl.col1
     col2 = nl.col2
     zero_vec_mat = nl.zero_vec_mat.unsqueeze(0)
+    # batch_size = addresses.shape[0]
+    # zero_vec_mat = nl.zero_vec_mat.unsqueeze(0).expand(batch_size, -1, -1, -1)
 
     H.assert_is_probably_mat_form(at_addr)
     H.assert_is_probably_mat_form(addresses)
@@ -930,7 +932,7 @@ class Neuralbeta:
         return select_address(address, self.nl.addresses, list_of_values)
 
     def reduce_step(self, at_addr, gc_steps:int):
-        return reduce_step(
+        tags, col1, col2, ir1, ir2 = reduce_step(
             at_addr,
             self.nl,
 
@@ -940,3 +942,9 @@ class Neuralbeta:
             self.stack,
             gc_steps,
         )
+        self.nl.tags = tags
+        self.nl.col1 = col1
+        self.nl.col2 = col2
+        self.ir1 = ir1
+        self.ir2 = ir2
+        return None

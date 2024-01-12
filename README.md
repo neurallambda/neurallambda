@@ -75,6 +75,8 @@ Demonstration:
 
 * Robustify:
   * Clean:
+    * `batch_size` is passed around poorly
+    * `device` is passed around poorly
     * neurallambda_to_mem currently has nl passed, along with it's weights, separately
       * and: read_col
       * and: stack pretty_print fns
