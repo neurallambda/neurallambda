@@ -52,7 +52,7 @@ Demonstration:
   * Explain hypercomplex: Reals weren't training via backprop, Complex, and Quaternions were.
 
 * NeuralX ("neural" is such a great prefix)
-  * Neuralqueue, NeuralFSM, NeuralPDA, Neurallist, Neuraltree, Neuralgraph, simplified Find+Replace
+  * Neurallatch, Neuralqueue, NeuralFSM, NeuralPDA, Neurallist, Neuraltree, Neuralgraph, simplified Find+Replace
 
 * Empirical validation:
   * Test on simple RNNs
@@ -80,6 +80,7 @@ Demonstration:
     * neurallambda_to_mem currently has nl passed, along with it's weights, separately
       * and: read_col
       * and: stack pretty_print fns
+    * Move symbolics stuff out of Neurallambda into a "Symbol" class?
   * Collect assumptions made throughout and test:
     * hypercomplex
     * converting from mat form of hypercomplex back to vec form
@@ -91,3 +92,11 @@ Demonstration:
 ```sh
 zip -r "neurallambda_$(date +"%Y-%m-%d_%H-%M-%S").zip" . -x "*__pycache__*" -x ".pytest_cache/*" -x ".env/*" -x ".git/*" -x "neurallambda*.zip"
 ``
+
+
+## Tickets
+
+- [ ] Clean up how classes initialize and handle batch_size, dtype, and device
+  - [ ] Stack
+  - [ ] Neurallambda
+  - [ ] Neuralbeta

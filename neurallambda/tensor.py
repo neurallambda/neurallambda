@@ -255,19 +255,46 @@ def string_to_neurallambda(s: str, number_system, batch_size, n_addresses, vec_s
 # Neurallambda Class
 
 class Neurallambda:
+    """A Neurallambda is a datastructure that supports a graph of tagged nodes made
+    up of sum types and product types, IE an Abstract Syntax Tree. It is made
+    out of tensors.
+
+    So for instance, you can encode this program in a neurallambda:
+
+    ((fn [x y z] '(x y z)) 1 2 3)
+
+    And then restore it from the tensor representation all the way back to a
+    pretty-printed string. More importantly, while it's a tensor, you can
+    compute on it, such as doing the beta-reduction step of the Lambda Calculus.
+
+    Using the Neuralbeta class, the program above can be reduced to:
+
+    '(1 2 3)
+
+    This list of numbers is fully encoded within tensors, but again, can be read
+    back out into a human interpretable, pretty-printed program.
+
+
+    On Symbols:
+
+    How can a discrete symbol live within a tensor, you might ask? Research on
+    Vector Symbolic Architectures (VSA), and Holographic Reduced Representations
+    (HRR) informs this decision. In short, symbols can be jammed into vectors
+    and it works great. Any 2 vectors drawn randomly are pseudo-orthogonal,
+    meaning, they are very (very) likely to be nearly orthogonal. This allows us
+    to use cosine similarity between 2 vectors to see if they represent the same
+    symbol. Neat stuff happens in VSAs. For instance, an element-wise sum of 2
+    symbols allows them to live in superposition, within one vector of the same
+    size as the original vectors. This is lossy, but not too bad, and there are
+    strategies for cleaning these up as well, to restore fidelity. Computations
+    can also happen within these superposed states, and, well, VSAs may well be
+    worth ones time to dig into more thoroughly elsewhere.
+
+    Here, we barely use insights from VSAs to merely treat vectors as symbols,
+    and where the encoded symbol can be computed upon, and reconstructed.
+
     """
 
-    TODO:
-
-    - Init NL
-    - Load memory (non differentiable step at least)
-
-    - Initialize for Beta Reduction (IR, Stack)
-    - Step Beta Reduction
-
-    """
-
-    # def __init__(self, n_addresses, vec_size, n_stack, gc_steps, number_system, device):
     def __init__(self, addresses, tags, col1, col2, number_system, zero_vec_bias, device):
         self.addresses = addresses
         self.tags = tags
@@ -277,7 +304,7 @@ class Neurallambda:
         self.batch_size, self.n_addresses, self.vec_size, _ = addresses.shape
 
         self.number_system = number_system
-        self.N = number_system # convenient shorthand
+        N = number_system # convenient shorthand
         self.device = device
 
         #####
@@ -292,39 +319,39 @@ class Neurallambda:
 
         # A matrix where each row ix represents the VEC_SIZE int
         self.int_vecs = torch.stack([
-            self.N.randn((self.vec_size,))
+            N.randn((self.vec_size,))
             for _ in range(self.int_range_start, self.int_range_end + 1)
         ]).to(self.device)
-        self.int_vecs_mat = self.N.to_mat(self.int_vecs)  # matrix form (ie of complex numbers)
+        self.int_vecs_mat = N.to_mat(self.int_vecs)  # matrix form (ie of complex numbers)
 
         #####
         # Projecting Symbols
 
         # we can't cos_sim with zeroes, so here's a nice "Zero" vector
         # zero_vec = torch.zeros((BATCH_SIZE, vec_size, N.dim), device=self.device) + 1e-1
-        self.zero_vec = torch.zeros((self.vec_size, self.N.dim), device=self.device) + zero_vec_bias
-        self.zero_vec_mat = self.N.to_mat(self.zero_vec)  # matrix form of complex numbers
+        self.zero_vec = torch.zeros((self.vec_size, N.dim), device=self.device) + zero_vec_bias
+        self.zero_vec_mat = N.to_mat(self.zero_vec)  # matrix form of complex numbers
 
         # a dense vector embedding for each tag
         self.tag_to_vec = {
-            tag: self.N.randn((self.vec_size,)).to(self.device) if tag != 'NULL' else self.zero_vec
+            tag: N.randn((self.vec_size,)).to(self.device) if tag != 'NULL' else self.zero_vec
             for tag in tag_names
         }
 
         self.tag_vecs = torch.stack([v for v in self.tag_to_vec.values()])
-        self.tag_vecs_mat = self.N.to_mat(self.tag_vecs)
+        self.tag_vecs_mat = N.to_mat(self.tag_vecs)
 
-        self.app_tag_vec  = self.N.to_mat(self.tag_to_vec['App'])
-        self.fn_tag_vec   = self.N.to_mat(self.tag_to_vec['Fn'])
-        self.defn_tag_vec = self.N.to_mat(self.tag_to_vec['Defn'])
+        self.app_tag_vec  = N.to_mat(self.tag_to_vec['App'])
+        self.fn_tag_vec   = N.to_mat(self.tag_to_vec['Fn'])
+        self.defn_tag_vec = N.to_mat(self.tag_to_vec['Defn'])
 
         # Base types
-        self.var_tag_vec      = self.N.to_mat(self.tag_to_vec['Var'])
-        self.intlit_tag_vec   = self.N.to_mat(self.tag_to_vec['IntLit'])
-        self.empty_tag_vec    = self.N.to_mat(self.tag_to_vec['Empty'])
-        self.arithop_tag_vec  = self.N.to_mat(self.tag_to_vec['ArithOp'])
-        self.truelit_tag_vec  = self.N.to_mat(self.tag_to_vec['TrueLit'])
-        self.falselit_tag_vec = self.N.to_mat(self.tag_to_vec['FalseLit'])
+        self.var_tag_vec      = N.to_mat(self.tag_to_vec['Var'])
+        self.intlit_tag_vec   = N.to_mat(self.tag_to_vec['IntLit'])
+        self.empty_tag_vec    = N.to_mat(self.tag_to_vec['Empty'])
+        self.arithop_tag_vec  = N.to_mat(self.tag_to_vec['ArithOp'])
+        self.truelit_tag_vec  = N.to_mat(self.tag_to_vec['TrueLit'])
+        self.falselit_tag_vec = N.to_mat(self.tag_to_vec['FalseLit'])
         self.base_types_vecs = torch.stack([
             self.var_tag_vec,
             self.intlit_tag_vec,
@@ -334,20 +361,21 @@ class Neurallambda:
             self.falselit_tag_vec,
         ])
 
-
     def to_mat(self):
-        # Convert to matrix form
-        self.addresses = self.N.to_mat(self.addresses)
-        self.tags = self.N.to_mat(self.tags)
-        self.col1 = self.N.to_mat(self.col1)
-        self.col2 = self.N.to_mat(self.col2)
+        ''' Convert to matrix form of a hypercomplex number. '''
+        N = self.number_system
+        self.addresses = N.to_mat(self.addresses)
+        self.tags = N.to_mat(self.tags)
+        self.col1 = N.to_mat(self.col1)
+        self.col2 = N.to_mat(self.col2)
 
     def from_mat(self):
-        # Convert from matrix form
-        self.addresses = self.N.from_mat(self.addresses)
-        self.tags = self.N.from_mat(self.tags)
-        self.col1 = self.N.from_mat(self.col1)
-        self.col2 = self.N.from_mat(self.col2)
+        ''' Convert from matrix form to vector form of a hypercomplex number. '''
+        N = self.number_system
+        self.addresses = N.from_mat(self.addresses)
+        self.tags = N.from_mat(self.tags)
+        self.col1 = N.from_mat(self.col1)
+        self.col2 = N.from_mat(self.col2)
 
     ##########
     # Projecting Ints
@@ -366,10 +394,10 @@ class Neurallambda:
         Assumes matrix formatted `vector`.
         """
         H.assert_is_probably_not_mat_form(vector)
-        cs = H.cosine_similarity(self.N.to_mat(vector).unsqueeze(0), self.int_vecs_mat, dim=1)
+        N = self.number_system
+        cs = H.cosine_similarity(N.to_mat(vector).unsqueeze(0), self.int_vecs_mat, dim=1)
         max_index = torch.argmax(cs).item()
         return max_index + self.int_range_start
-
 
     ##########
     # Projecting Symbols
@@ -380,8 +408,9 @@ class Neurallambda:
         Expects `vec` in hypercomplex's matrix format.
         '''
         H.assert_is_probably_not_mat_form(vec)
+        N = self.number_system
         if vec.ndim == 1 + 1:  # +1 for hypercomplex
-            sim = H.cosine_similarity(self.N.to_mat(vec), self.tag_vecs_mat, dim=1)
+            sim = H.cosine_similarity(N.to_mat(vec), self.tag_vecs_mat, dim=1)
             return tag_names[sim.argmax().item()]
         elif vec.ndim == 2 + 1:  # +1 for hypercomplex
             out = []
@@ -398,12 +427,13 @@ class Neurallambda:
         '''
         H.assert_is_probably_not_mat_form(vec)
         H.assert_is_probably_not_mat_form(addresses)
+        N = self.number_system
         if addresses.ndim == 2 + 1:  # static addresses per all batches + hypercomplex mat
-            sim = H.cosine_similarity(self.N.to_mat(vec), self.N.to_mat(addresses), dim=1)
+            sim = H.cosine_similarity(N.to_mat(vec), N.to_mat(addresses), dim=1)
             return sim.argmax().item()
 
         if addresses.ndim == 3 + 1:  # different addresses per batch + hypercomplex mat
-            sim = H.cosine_similarity(self.N.to_mat(vec), self.N.to_mat(addresses), dim=2)
+            sim = H.cosine_similarity(N.to_mat(vec), N.to_mat(addresses), dim=2)
             return sim.argmax().item()
 
     def is_base_type(self, x):
@@ -429,6 +459,7 @@ def read_col(nl, tag, vec, addresses):
     ''' Project a neurallambda `vec` back to the machine language. A `tag` determines how it should be read. '''
     H.assert_is_probably_not_mat_form(vec)
     H.assert_is_probably_not_mat_form(addresses)
+    N = nl.number_system
 
     if tag == 'IntLit':
         return nl.unproject_int(vec)
@@ -443,8 +474,8 @@ def read_col(nl, tag, vec, addresses):
 
     # NULL
     z = nl.zero_vec if nl.zero_vec.ndim == 1 else nl.zero_vec[0] # single batch
-    z = nl.N.to_mat(z)
-    c = H.cosine_similarity(nl.N.to_mat(vec), z, dim=0)
+    z = N.to_mat(z)
+    c = H.cosine_similarity(N.to_mat(vec), z, dim=0)
     if c  > 0.5:
         return ('NULL', )
 
@@ -502,17 +533,12 @@ def neurallambda_to_mem(nl, addresses, tags, col1, col2, n_ixs) -> Dict[M.Addres
     raise ValueError(f"Saw neurallambda's tags with unexpected shape: {tags.shape}")
 
 
-
 ##################################################
 # Neuralbeta: A Neurallambda equipped with beta reduction stuff
 
 '''.
 
 BRAINSTORMING how to reduce Neurallambdas?:
-
-- 2 pass. First traverse tree, push everything into a stack. Second, pop from
-  stack only, and reduce as you go. I think this wouldn't support online
-  recursion.
 
 - [X] Online traversal issue: If you see a base type, pop the stack. The next
   address likely references that base type, so, push it's location back onto the
@@ -522,10 +548,14 @@ BRAINSTORMING how to reduce Neurallambdas?:
   col2. It doesn't mark a term, it marks references to terms, as to whether
   they're reduced.
 
+- 2 pass. First traverse tree, push everything into a stack. Second, pop from
+  stack only, and reduce as you go. I think this wouldn't support online
+  recursion.
+
 - solution? instead of 2 new tensors, how about superposing an address with
   "is_reduced" or "is_not_reduced"?  How to update that value? add the negative,
   scaled by cossim? Look out for addresses that have been noised, because the
-  original superposed value will have drifted. (NOTE: Tried, too noisy)
+  original superposed value will have drifted. (NOTE: Tried, too noisy/lossy)
 
 
 BRAINSTORMING how to tag `is_(not_)reduced`:
@@ -537,25 +567,28 @@ How to store `is_reduced`:
         - or one index on the address tensor devoted to `is_(not_)reduced`
 
     - Superposition of address and an `is_(not_)reduced` tag. In experiments,
-      the superposed vecs got too noisy too fast.
+      the superposed vecs got too noisy too fast. With Error Correction, this
+      idea might be worth revisiting. The generalized version of it says that
+      you could congeal any info into one superposed vector, and that could be
+      useful.
 
-    - 2 orthogonal sets of address ints. EG replace A(1) with orthogonal vec IsReducedA(1)
+    - 2 orthogonal sets of address ints. EG replace A(1) with orthogonal vec
+      IsReducedA(1)
 
     - Separate cones of vector space: `is_reduced` could be same address * -1
 
     - Rotate points above / below a hyperplane (requires ensuring that all
       integers are above some hyperplane
 
-    - Store in magnitude of vectors
+    - Store "is_reduced" in magnitude of vectors
 
 
 When / how to process `is_reduced`
 
     - when non-app-fn reduction happens, peek ahead to see if they're reduced?
 
-    - [X] when we've descended to a base type, it `is_reduced`, and we update
-      every reference to this address simultaneously
-'''
+    - [X] when we've descended to a base type, we know it `is_reduced`, and we
+      update every reference to this address simultaneously '''
 
 
 
@@ -605,7 +638,6 @@ def reduce_app_fn(at_addr, nl, gc_steps:int):
     assert_mat_form(tags)
     assert_mat_form(col1)
     assert_mat_form(col2)
-
 
     fn_addr, arg_addr = select_address(at_addr, addresses, [col1, col2])
     fn_tag, param_addr, body_addr = select_address(fn_addr, addresses, [tags, col1, col2])
@@ -915,12 +947,10 @@ class Neuralbeta:
         self.stack.init(nl.batch_size)
 
     def push_address(self, address):
-        #####
-        # Setup Stack. Initialize by pushing ix=0
+        ''' Push an address onto the stack. '''
         should_push    = torch.ones((self.nl.batch_size,), device=self.stack.device)
         should_pop     = torch.zeros((self.nl.batch_size,), device=self.stack.device)
         should_null_op = torch.zeros((self.nl.batch_size,), device=self.stack.device)
-
         self.stack(
             should_push,
             should_pop,
@@ -947,4 +977,4 @@ class Neuralbeta:
         self.nl.col2 = col2
         self.ir1 = ir1
         self.ir2 = ir2
-        return None
+        return None # this function mutates class's state

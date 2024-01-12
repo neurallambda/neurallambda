@@ -119,11 +119,12 @@ class Stack(nn.Module):
 # Pretty printer debugging tools
 
 def pp_sim_addresses(nl, stack_ix, stack_val, zero_vec_mat, addresses):
+    N = nl.number_system
     txts = []
-    null_sim = H.cosine_similarity(nl.N.to_mat(stack_val), nl.zero_vec_mat[0], dim=0)
+    null_sim = H.cosine_similarity(N.to_mat(stack_val), nl.zero_vec_mat[0], dim=0)
     txts.append(D.colorize(f'NULL', value=null_sim.item()))
     for i, a in enumerate(addresses):
-        sim = H.cosine_similarity(nl.N.to_mat(stack_val), a, dim=0)
+        sim = H.cosine_similarity(N.to_mat(stack_val), a, dim=0)
         txt = D.colorize(f'{i:> 2d} ', value=sim.item())
         txts.append(txt)
     return (stack_ix, null_sim, txts)
@@ -134,9 +135,9 @@ def pp_stack(stack, nl):
     similarity between the address at the pointer and every other address in
     `addresses` (and Null). Color code the print out according to
     similarity.
-
     '''
     addresses = nl.addresses
+    N = nl.number_system
 
     NULL_SIM = 0.5 # If stack_val is sim to zero_vec more than this, we'll
                    # collapse its display
@@ -144,7 +145,7 @@ def pp_stack(stack, nl):
     print()
     print('STACK:')
 
-    ss = nl.N.from_mat(stack.stacks[BATCH_I])  # [batch, stack_size, vec_size, complex, complex]
+    ss = N.from_mat(stack.stacks[BATCH_I])  # [batch, stack_size, vec_size, complex, complex]
     pp = stack.pointers[BATCH_I] # [batch, stack_size]
     BATCH_I = 0
 
