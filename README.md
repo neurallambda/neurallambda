@@ -61,7 +61,15 @@ Demonstration:
 * Misc:
   * Improve test coverage
   * Does my computational hierarchy map back to the Chomsky hierarchy?
-  * Try other machines/turing machines than lambda calc: combinators, a ticker tape model, FSMs, PDAs,
+  * Try other machines/turing machines than lambda calc:
+    * combinatory logic, eg SKI
+    * a ticker tape model
+    * Typed Lambda Calc!?
+    * FSMs
+    * PDAs
+    * PDA w 2 stacks is turing complete, I think
+    * PDA w queue instead of stack is also turing complete, I think
+    * More: post machines, tag systems, register machines, a myriad of Cellular Automata
   * Loading memory: is there a nice differentiable way to read memory out from a bank of programs (akin to token embeddings, but, program embeddings here).
 
 * Error correcting of neuralsymbols (eg tags, integers, addresses)
@@ -69,7 +77,7 @@ Demonstration:
   * Brute force: `without_grad` just replace symbols from LUT. This wouldn't work for training though.
 
 * Optimizations:
-  * Profile, for starters
+  * Based on profiling, memory looks good, cosine_similarity is slooow, predominantly because of a hypercomplex.dot_product, and hypercomplex.hadamard.
   * Get a Linear Algebra pro to help fuse things down
   * There are some memory explosions some of the cos-sims, can we optimize?
 
@@ -82,21 +90,54 @@ Demonstration:
       * and: stack pretty_print fns
     * Move symbolics stuff out of Neurallambda into a "Symbol" class?
   * Collect assumptions made throughout and test:
-    * hypercomplex
+    * hypercomplex. If this isn't paying for itself, rip it out of the repo.
     * converting from mat form of hypercomplex back to vec form
     * same vec_size across addresses, tags, col1, col2
+    * This neuralstack vs others?
 
 
 ## Zip Repo
 
 ```sh
 zip -r "neurallambda_$(date +"%Y-%m-%d_%H-%M-%S").zip" . -x "*__pycache__*" -x ".pytest_cache/*" -x ".env/*" -x ".git/*" -x "neurallambda*.zip"
-``
+```
+
+## Profiling tips
+
+* Memory: `memray` makes this so easy:
+
+```sh
+  pip install memray
+  PYTHONPATH=. memray run experiment/t01_sandbox.py
+  memray flamegraph experiment/memray-t01_sandbox.py.64412.bin
+```
+
+* Time: cProfile makes this so easy:
+
+```sh
+pip install snakeviz
+PYTHONPATH=. python -m cProfile -o t01_sandbox.prof experiment/t01_sandbox.py
+snakeviz t01_sandbox.prof
+```
 
 
 ## Tickets
 
+- [ ] Look into error correction, both differentiable (Hopfield net) and
+      non-differentiable (interpolate symbol vector with value from LuT).
+
+- [ ] Try stack in an RNN (`experiment/t03_modulo_game.py`)
+
+- [ ] Try Neurallambda in an RNN
+
+- [ ] Clean up imports
+
 - [ ] Clean up how classes initialize and handle batch_size, dtype, and device
-  - [ ] Stack
+  - [X] Stack
   - [ ] Neurallambda
   - [ ] Neuralbeta
+
+- [X] Profile code, find some hotspots
+  - [X] Time profile results: `cosine_similarity` is the big obvious slowpoke
+  - [X] Memory profile results: worst offenders so far are outside the main ML
+        loop, and don't really matter: `string_to_neurallambda`, and `neurallambda_to_mem`

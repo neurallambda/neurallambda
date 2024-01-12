@@ -182,7 +182,7 @@ print('\n'*200)
 # Params
 
 N_STACK     = 16  # Stack size
-VEC_SIZE    = 4096  # Size of addresses and values
+VEC_SIZE    = 2048  # Size of addresses and values
 N_ADDRESSES = 24  # Memory size
 BATCH_SIZE  = 1
 N = H.Complex # number system

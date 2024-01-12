@@ -1,9 +1,8 @@
 '''
 
-A Finite Differentiable Neuralstack. Push, pop, pointer to top of stack, read from top.
+A Finite Differentiable Neuralstack.
 
 '''
-
 
 from torch import einsum, tensor, allclose
 import neurallambda.hypercomplex as H
@@ -15,31 +14,43 @@ from neurallambda.util import transform_runs
 import neurallambda.debug as D
 
 class Stack(nn.Module):
-    ''' NOTE: einsum's have "qr" for making use of matrix-form complex numbers '''
+    '''A Neural stack. Push, pop, pointer to top of stack, read from top.
 
-    def __init__(self, n_stack, vec_size, number_system, device, init_offset=1e-3, initial_sharpen=10):
+    NOTE: einsum's have "qr" as last 2 dimensions for making use of matrix-form
+          complex numbers
+
+    '''
+
+    def __init__(self, n_stack, vec_size, number_system):
+        '''Initialize the Neuralstack.
+
+        Args:
+
+        '''
         super(Stack, self).__init__()
-        self.init_offset = init_offset
         self.n_stack = n_stack
         self.vec_size = vec_size
         self.number_system = number_system
-        self.N = number_system # convenient shorthand
-        self.device = device
-        self.sharpen_k = nn.Parameter(torch.tensor([initial_sharpen], dtype=torch.float32, device=self.device))
-        self.stacks = None # run init to populate
-        self.pointers = None # run init to populate
+
+        # run init to populate
+        self.sharpen_k = None
+        self.stack = None
+        self.pointer = None
 
     def forward(self,
                 should_push,
                 should_pop,
                 should_null_op,
                 value):
-        '''Push and Pop will both be performed no matter what, and `action` signifies
-        whether the caller intended a pop or push. The action will scale the
-        actual results.
+        '''Apply all possible stack operations in superposition, and hopefully
+        scaled appropriately to signify the *actual* operation you intended.
 
         Args:
-          action: ndarray([BATCH_SIZE]). Real value from (-1, 1). -1=pop, +1=push, or 0=null_op
+
+          should_push, should_pop, should_null_op: ndarray([BATCH_SIZE]), values
+            in (0, 1). 0 means "dont do this operation", 1 means "do this
+            operation".
+
           value: value to push, if pushing. ndarray([BATCH_SIZE, VEC_SIZE])
 
         '''
@@ -49,70 +60,107 @@ class Stack(nn.Module):
         # Pop value off of stack
         pop_stack, pop_pointers, popped_val = self.pop_()
 
-        self.stacks = (
-            einsum('bnvqr, b -> bnvqr', self.stacks, should_null_op) +
+        self.stack = (
+            einsum('bnvqr, b -> bnvqr', self.stack, should_null_op) +
             einsum('bnvqr, b -> bnvqr', push_stack, should_push) +
             einsum('bnvqr, b -> bnvqr', pop_stack, should_pop)
         )
-        self.pointers = (
-            einsum('bn, b -> bn', self.pointers, should_null_op) +
+        self.pointer = (
+            einsum('bn, b -> bn', self.pointer, should_null_op) +
             einsum('bn, b -> bn', push_pointers, should_push) +
             einsum('bn, b -> bn', pop_pointers, should_pop)
         )
 
         ##########
         # Sharpen (softmax) pointers
-        self.pointers = torch.softmax(self.pointers * self.sharpen_k, dim=1)
-        psum = self.pointers.sum(dim=1).unsqueeze(1)
-        self.pointers = self.pointers / torch.maximum(psum, torch.zeros_like(psum) + 1e-8)
+        self.pointer = torch.softmax(self.pointer * self.sharpen_k, dim=1)
+        psum = self.pointer.sum(dim=1).unsqueeze(1)
+        self.pointer = self.pointer / torch.maximum(psum, torch.zeros_like(psum) + 1e-8)
 
         popped_val = einsum('bvqr, b -> bvqr', popped_val, should_pop)
         return popped_val
 
     def read(self):
-        return einsum('bnvqr, bn -> bvqr', self.stacks, self.pointers)
+        '''Read the top of the stack.
+
+        Remember the pointer points at all locations simultaneously, so what
+        you'll actually get returned from this call is a sum of all pointer
+        locations scaled by confidence that the pointer is actually at that
+        location. Recall as well that the pointer is softmaxed, so, the scaling
+        of all locations sums to 1.
+
+        '''
+        return einsum('bnvqr, bn -> bvqr', self.stack, self.pointer)
 
     def push_(self, val):
-        ''' NOTE: returns immutable stack and pointers, but does not mutate
-        self.stacks nor self.pointers '''
+        ''' Library consumers should NOT call this function. You must only call
+        `forward`.
+
+        NOTE: returns immutable stack and pointers, but does not mutate
+        self.stack nor self.pointer '''
         # shift pointer
-        new_p = torch.roll(self.pointers, shifts=1)
+        new_p = torch.roll(self.pointer, shifts=1)
 
         # place val at new pointer
-        old_stack = einsum('bnvqr, bn -> bnvqr', self.stacks, 1 - new_p)
+        old_stack = einsum('bnvqr, bn -> bnvqr', self.stack, 1 - new_p)
         new_stack = einsum('bvqr, bn -> bnvqr', val, new_p)
         return old_stack + new_stack, new_p
 
     def pop_(self):
-        ''' NOTE: returns immutable stack and pointers, but does not mutate
-        self.stacks nor self.pointers '''
+        '''Library consumers should NOT call this function. You must only call
+        `forward`.
+
+        NOTE: returns immutable stack and pointers, but does not mutate
+        self.stack nor self.pointer '''
         # read off top
         out = self.read()
 
         # zero out memory location @ pointer
-        old_stack_ = einsum('bnvqr, bn -> bnvqr', self.stacks, 1 - self.pointers)
-        new_stack_ = einsum('bvqr, bn -> bnvqr', self.zero_vec, self.pointers)
+        old_stack_ = einsum('bnvqr, bn -> bnvqr', self.stack, 1 - self.pointer)
+        new_stack_ = einsum('bvqr, bn -> bnvqr', self.zero_vec, self.pointer)
         new_stack = old_stack_ + new_stack_
 
         # shift pointers back
-        new_p = torch.roll(self.pointers, shifts=-1)
+        new_p = torch.roll(self.pointer, shifts=-1)
         return new_stack, new_p, out
 
-    def init(self, batch_size):
-        self.pointers = torch.zeros((batch_size, self.n_stack), device=self.device)
-        self.pointers[:, 0] = 1 # start stack pointer at ix=0
-        self.stacks = torch.zeros(
+    def init(self, batch_size, initial_sharpen, zero_offset, device, dtype=torch.float32):
+        '''Initialize the stack for a particular run.
+
+        Args:
+
+          init_offset: float. This creates a "zero_vec" in all memory locations
+             that isn't actually 0, because 0-only vecs don't play nicely with
+             cos-sim.
+
+          initial_sharpen: float. This is a scalar (0, inf) that scales the
+            softmax that decides "where the pointer should be". The pointer
+            lives in a scaled superposition of pointing at all locations in the
+            stack (because it's end-to-end differentiable, like how "attention"
+            works). The softmax sharpens this up. A large value (100+) means
+            it'll *really* sharpen up the pointer and you'll have incredible
+            fidelity. But I suspect it also means that gradients will be zeroed
+            for all other values, so may inhibit training (but be good for
+            inference).
+        '''
+        N = self.number_system  # convenient shorthand
+        self.device = device
+
+        self.sharpen_k = nn.Parameter(torch.tensor([initial_sharpen], dtype=dtype, device=device))
+
+        self.pointer = torch.zeros((batch_size, self.n_stack), device=device, dtype=dtype)
+        self.pointer[:, 0] = 1 # start stack pointer at ix=0
+        self.stack = torch.zeros(
             (batch_size,
              self.n_stack,
              self.vec_size,
-             self.N.dim,
-             self.N.dim), device=self.device) + self.init_offset
+             N.dim,
+             N.dim), device=device, dtype=dtype) + zero_offset
         self.zero_vec = torch.zeros(
             (batch_size,
              self.vec_size,
-             self.N.dim,
-             self.N.dim), device=self.device) + self.init_offset
-
+             N.dim,
+             N.dim), device=device, dtype=dtype) + zero_offset
 
 
 ##################################################
@@ -145,8 +193,8 @@ def pp_stack(stack, nl):
     print()
     print('STACK:')
 
-    ss = N.from_mat(stack.stacks[BATCH_I])  # [batch, stack_size, vec_size, complex, complex]
-    pp = stack.pointers[BATCH_I] # [batch, stack_size]
+    ss = N.from_mat(stack.stack[BATCH_I])  # [batch, stack_size, vec_size, complex, complex]
+    pp = stack.pointer[BATCH_I] # [batch, stack_size]
     BATCH_I = 0
 
     similarities = [] # [(pointer_p, stack_ix, null_sim, txt)]

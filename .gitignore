@@ -1,6 +1,8 @@
 
 # Misc
 neurallambda_*.zip
+memray*
+*.prof
 
 # Python
 .env/

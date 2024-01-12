@@ -5,20 +5,19 @@ Test neurallambda.tensor
 '''
 
 import neurallambda.tensor as T
-from neurallambda.tensor import Neurallambda
 import neurallambda.hypercomplex as H
 
-nl = Neurallambda(
+nl = T.build_empty_neurallambda(
+    number_system=H.Real,
+    batch_size=1,
     n_addresses=2,
     vec_size=128,
-    n_stack=2,
-    gc_steps=0,
-    number_system=H.Real,
+    zero_vec_bias=1e-3,
     device='cpu',
 )
 
 def test_int_projections():
-    # Round trip: char->int->vec->int->char
+    ''' Round trip: char -> int -> vec -> int -> char '''
     for c in T.chars:
         d = T.int_to_char(nl.unproject_int(nl.project_int(T.char_to_int(c))))
         assert c == d
