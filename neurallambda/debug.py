@@ -4,6 +4,15 @@ Debugging /  Probing Tools
 
 '''
 
+##################################################
+# Misc
+
+da = lambda at_addr: vec_to_address(N.from_mat(at_addr[0]), N.from_mat(addresses))
+
+
+##################################################
+# Colors
+
 # Dictionary of color gradients
 colors = {
     "black_to_blue": [

@@ -17,12 +17,6 @@ import neurallambda.memory as M
 import neurallambda.stack as S
 
 
-###########
-# PROBE TOOLS
-
-da = lambda at_addr: vec_to_address(N.from_mat(at_addr[0]), N.from_mat(addresses))
-
-
 ##########
 # Misc
 
@@ -150,32 +144,6 @@ unary_tags   = {'Var', 'ArithOp', 'Car', 'Cdr'}
 binary_tags  = {'App', 'Fn', 'Defn', 'Cons'}
 
 
-
-
-##########
-# String Encodings
-
-# Letters
-chars = 'a b c d e f g h i j k l m n o p q r s t u v w x y z A B C D E F G H I J K L M N O P Q R S T U V W X Y Z 0 1 2 3 4 5 6 7 8 9'.split(' ')
-char_to_int_ = {c: i for i, c in enumerate(chars)}
-def char_to_int(c):
-    if c in char_to_int_:
-        return char_to_int_[c]
-    return -666  # an error, but still an int
-
-int_to_char_ = {i: c for i, c in enumerate(chars)}
-def int_to_char(i):
-    if i in int_to_char_:
-        return int_to_char_[i]
-    return '#'  # an error, but still a char
-
-
-# ArithOp
-arithops = '+ - / *'.split(' ')
-arithop_to_int = {c: i for i, c in enumerate(arithops)}
-int_to_arithop = {i: c for i, c in enumerate(arithops)}
-
-
 ##################################################
 # NeuralLambdas
 
@@ -184,13 +152,11 @@ int_to_arithop = {i: c for i, c in enumerate(arithops)}
 # Builders
 
 def build_empty_neurallambda(number_system, batch_size, n_addresses, vec_size, zero_vec_bias, device):
-
     N = number_system
     addresses = N.randn((batch_size, n_addresses, vec_size)).to(device)
     tags  = torch.zeros((batch_size, n_addresses, vec_size, N.dim), device=device) + zero_vec_bias
     col1 = torch.zeros((batch_size, n_addresses, vec_size, N.dim), device=device) + zero_vec_bias
     col2 = torch.zeros((batch_size, n_addresses, vec_size, N.dim), device=device) + zero_vec_bias
-
     return Neurallambda(addresses, tags, col1, col2, number_system, zero_vec_bias, device)
 
 def build_neurallambdas(mem: Dict[M.Address, Any], number_system, batch_size, n_addresses, vec_size, zero_vec_bias, device):
@@ -926,7 +892,8 @@ def reduce_step(
 
 class Neuralbeta:
     def __init__(self, nl, n_stack):
-        INITIAL_SHARPEN = 100 # sharpening stack selection mechanism
+        STACK_INITIAL_SHARPEN = 100
+        STACK_ZERO_OFFSET = 1e-3
 
         self.n_stack = n_stack
         self.nl = nl
@@ -941,10 +908,14 @@ class Neuralbeta:
             n_stack,
             nl.vec_size,
             number_system=nl.number_system,
-            device=nl.device,
-            initial_sharpen=INITIAL_SHARPEN
         )
-        self.stack.init(nl.batch_size)
+        self.stack.init(
+            nl.batch_size,
+            initial_sharpen=STACK_INITIAL_SHARPEN,
+            zero_offset=STACK_ZERO_OFFSET,
+            device=nl.device,
+            dtype=torch.float32
+        )
 
     def push_address(self, address):
         ''' Push an address onto the stack. '''
