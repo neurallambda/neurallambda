@@ -6,37 +6,32 @@ A Neural Latch.
 
 
 from torch import einsum, tensor, allclose
-import neurallambda.hypercomplex as H
 import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from neurallambda.util import transform_runs
 import neurallambda.debug as D
-import neurallambda.hypercomplex as H
 
 class Latch(nn.Module):
-    def __init__(self, vec_size, number_system):
+    def __init__(self, vec_size):
         super(Latch, self).__init__()
         self.vec_size = vec_size
-        self.number_system = number_system
-        self.predicate = nn.Parameter(number_system.randn((vec_size,)) * 1e-2)
-        self.true = nn.Parameter(number_system.randn((vec_size,)) * 1e-2)
-        self.false = nn.Parameter(number_system.randn((vec_size,)) * 1e-2)
+        self.predicate = nn.Parameter(torch.randn((vec_size,)) * 1e-2)
+        self.true = nn.Parameter(torch.randn((vec_size,)) * 1e-2)
+        self.false = nn.Parameter(torch.randn((vec_size,)) * 1e-2)
 
     def forward(self, inp):
         # inp    : [batch_size, vec_size]
         # output : [batch_size, vec_size]
-        N = self.number_system
-        predicate = N.to_mat(self.predicate).unsqueeze(0)
-        true = N.to_mat(self.true)
-        false = N.to_mat(self.false)
-        matched = N.cosine_similarity(predicate.real, inp.real, dim=1)
+        predicate = self.predicate.unsqueeze(0)
+        true = self.true
+        false = self.false
+        matched = torch.cosine_similarity(predicate.real, inp.real, dim=1)
 
-        matched = matched.squeeze(-1).squeeze(-1) # squeeze hypercomplex dims
         return (
-            torch.einsum('vqr, b -> bvqr', true, matched) +
-            torch.einsum('vqr, b -> bvqr', false, 1 - matched)
+            torch.einsum('v, b -> bv', true, matched) +
+            torch.einsum('v, b -> bv', false, 1 - matched)
         )
 
 class DataLatch(nn.Module):

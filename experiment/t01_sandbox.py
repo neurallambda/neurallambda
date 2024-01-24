@@ -156,7 +156,6 @@ from lark import Lark, Transformer, Token, Tree
 from torch import einsum, tensor, allclose
 from typing import Dict, Union, List, Tuple
 from typing import Union, List, Any, Type
-import neurallambda.hypercomplex as H
 import random
 import torch
 import torch.nn as nn
@@ -181,11 +180,10 @@ print('\n'*200)
 ##################################################
 # Params
 
-N_STACK     = 16  # Stack size
-VEC_SIZE    = 2048  # Size of addresses and values
-N_ADDRESSES = 24  # Memory size
+N_STACK     = 16   # Stack size
+VEC_SIZE    = 4096 # Size of addresses and values
+N_ADDRESSES = 24   # Memory size
 BATCH_SIZE  = 1
-N = H.Complex # number system
 
 # Garbage collection (overwrites memory locations with `zero_vec`)
 GC_STEPS = 2
@@ -201,8 +199,8 @@ GC_STEPS = 2
 # x, total_steps = "((fn [x] x) 42)", 7
 
 
-# Simple Fn Application: -> '(1 13)
-x, total_steps = "((fn [x] '(1 x)) 13)", 13
+# # Simple Fn Application: -> '(1 13)
+# x, total_steps = "((fn [x] '(1 x)) 13)", 13
 
 
 # # Multi application: -> '(1 2 3)
@@ -217,17 +215,17 @@ x, total_steps = "((fn [x] '(1 x)) 13)", 13
 # x, total_steps = "((fn [x f] (f x)) 42 (fn [y] '(0 y y 100 y)))", 42
 
 
-# # Composition: -> (fn [z] '('(z z) '(z z) '(z z)))
-# #
-# # NOTE: this level of complexity is enough that successful reduction depends on
-# #       the starting RNG seed. I think that noise issue can be solved tho.
-# x, total_steps = """
-# (
-#  (fn [g f z] (g (f z)))
-#  (fn [y] '(y y y))
-#  (fn [x] '(x x))
-# )
-# """, 53
+# Composition: -> (fn [z] '('(z z) '(z z) '(z z)))
+#
+# NOTE: this level of complexity is enough that successful reduction depends on
+#       the starting RNG seed. I think that noise issue can be solved tho.
+x, total_steps = """
+(
+ (fn [g f z] (g (f z)))
+ (fn [y] '(y y y))
+ (fn [x] '(x x))
+)
+""", 53
 
 
 # # Y Combinator: An interesting case, has issues.
@@ -252,44 +250,9 @@ def step_neurallambda(nl, n_stack, start_address, total_steps, gc_steps):
     nb = T.Neuralbeta(nl, n_stack)
     nb.push_address(start_address)
 
-    nl.to_mat()
-
-    # addresses = nl.addresses
-    # tags = nl.tags
-    # col1 = nl.col1
-    # col2 = nl.col2
-
-
-    # # `is_reduced` for columns 1 and 2
-    # ir1 = torch.zeros((BATCH_SIZE, N_ADDRESSES)).to(DEVICE)
-    # ir2 = torch.zeros((BATCH_SIZE, N_ADDRESSES)).to(DEVICE)
-
-    # # stack
-    # stack = S.Stack(N_STACK, VEC_SIZE, number_system=nl.number_system, device=DEVICE, initial_sharpen=100)
-    # stack.init(BATCH_SIZE)
-
-    # # Convert
-    # addresses = N.to_mat(addresses)
-    # tags = N.to_mat(tags)
-    # col1 = N.to_mat(col1)
-    # col2 = N.to_mat(col2)
-
-    # #####
-    # # Setup Stack. Initialize by pushing ix=0
-    # should_push    = torch.ones((BATCH_SIZE,), device=DEVICE)
-    # should_pop     = torch.zeros((BATCH_SIZE,), device=DEVICE)
-    # should_null_op = torch.zeros((BATCH_SIZE,), device=DEVICE)
-
-    # stack(should_push,
-    #       should_pop,
-    #       should_null_op,
-    #       start_address,
-    # )
-
     debug_ixs = []
 
     for step in range(total_steps):
-
         # The address chosen to be reduced next
         at_addr = nb.stack.read()
 
@@ -304,16 +267,16 @@ def step_neurallambda(nl, n_stack, start_address, total_steps, gc_steps):
 
         ##########
         # Debug
-        ix = nl.vec_to_address(N.from_mat(at_addr), N.from_mat(nl.addresses))
+        ix = nl.vec_to_address(at_addr, nl.addresses[0])
         print()
         print(f'STEP {step} @ix={ix} ----------')
         debug_ixs.append(ix)
         recon_mem = T.neurallambda_to_mem(
             nl,
-            N.from_mat(nl.addresses),
-            N.from_mat(nl.tags),
-            N.from_mat(nl.col1),
-            N.from_mat(nl.col2),
+            nl.addresses,
+            nl.tags,
+            nl.col1,
+            nl.col2,
             n_ixs=N_ADDRESSES,
         )
 
@@ -337,7 +300,6 @@ def step_neurallambda(nl, n_stack, start_address, total_steps, gc_steps):
 
 nl = T.string_to_neurallambda(
     x,
-    number_system=N,
     batch_size=BATCH_SIZE,
     n_addresses=N_ADDRESSES,
     vec_size=VEC_SIZE,
@@ -345,7 +307,7 @@ nl = T.string_to_neurallambda(
     device=DEVICE,
 )
 start_ix = 0
-start_address = N.to_mat(nl.addresses[:, start_ix])
+start_address = nl.addresses[:, start_ix]
 
 with torch.no_grad():
 # with torch.enable_grad():

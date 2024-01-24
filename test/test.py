@@ -10,7 +10,6 @@ from torch import einsum, tensor, allclose
 from torch.nn import functional as F
 from typing import Dict, Union, List, Tuple
 from typing import Union, List, Any, Type
-import neurallambda.hypercomplex as H
 import numpy as np
 import pprint
 import random
@@ -60,25 +59,25 @@ expected[:, from_ix] = to_value
 
 result = replace(from_value, to_value, xs)
 
-assert H.cosine_similarity(result[0, 0], xs[0, 0], dim=0) > 0.8
-assert H.cosine_similarity(result[0, 1], xs[0, 1], dim=0) > 0.8
-assert H.cosine_similarity(result[0, 2], xs[0, 2], dim=0) > 0.8
-assert H.cosine_similarity(result[0, 3], xs[0, 3], dim=0) > 0.8
-assert H.cosine_similarity(result[0, 4], xs[0, 4], dim=0) < 0.2  # dissimilar to original
-assert H.cosine_similarity(result[0, 4], to_value[0], dim=0) < 0.2  # dissimilar to original
-assert H.cosine_similarity(result[0, 4], to_value[1], dim=0) < 0.2  # dissimilar to original
-assert H.cosine_similarity(result[0, 4], from_value[0], dim=0) > 0.8  # similar to new
-assert H.cosine_similarity(result[0, 4], from_value[1], dim=0) < 0.2  # no batch leakage
+assert cosine_similarity(result[0, 0], xs[0, 0], dim=0) > 0.8
+assert cosine_similarity(result[0, 1], xs[0, 1], dim=0) > 0.8
+assert cosine_similarity(result[0, 2], xs[0, 2], dim=0) > 0.8
+assert cosine_similarity(result[0, 3], xs[0, 3], dim=0) > 0.8
+assert cosine_similarity(result[0, 4], xs[0, 4], dim=0) < 0.2  # dissimilar to original
+assert cosine_similarity(result[0, 4], to_value[0], dim=0) < 0.2  # dissimilar to original
+assert cosine_similarity(result[0, 4], to_value[1], dim=0) < 0.2  # dissimilar to original
+assert cosine_similarity(result[0, 4], from_value[0], dim=0) > 0.8  # similar to new
+assert cosine_similarity(result[0, 4], from_value[1], dim=0) < 0.2  # no batch leakage
 
-assert H.cosine_similarity(result[1, 0], xs[1, 0], dim=0) > 0.8
-assert H.cosine_similarity(result[1, 1], xs[1, 1], dim=0) > 0.8
-assert H.cosine_similarity(result[1, 2], xs[1, 2], dim=0) > 0.8
-assert H.cosine_similarity(result[1, 3], xs[1, 3], dim=0) > 0.8
-assert H.cosine_similarity(result[1, 4], xs[1, 4], dim=0) < 0.2  # dissimilar to original
-assert H.cosine_similarity(result[1, 4], to_value[0], dim=0) < 0.2  # dissimilar to original
-assert H.cosine_similarity(result[1, 4], to_value[1], dim=0) < 0.2  # dissimilar to original
-assert H.cosine_similarity(result[1, 4], from_value[0], dim=0) < 0.2  # no batch leakage
-assert H.cosine_similarity(result[1, 4], from_value[1], dim=0) > 0.8  # similar to new
+assert cosine_similarity(result[1, 0], xs[1, 0], dim=0) > 0.8
+assert cosine_similarity(result[1, 1], xs[1, 1], dim=0) > 0.8
+assert cosine_similarity(result[1, 2], xs[1, 2], dim=0) > 0.8
+assert cosine_similarity(result[1, 3], xs[1, 3], dim=0) > 0.8
+assert cosine_similarity(result[1, 4], xs[1, 4], dim=0) < 0.2  # dissimilar to original
+assert cosine_similarity(result[1, 4], to_value[0], dim=0) < 0.2  # dissimilar to original
+assert cosine_similarity(result[1, 4], to_value[1], dim=0) < 0.2  # dissimilar to original
+assert cosine_similarity(result[1, 4], from_value[0], dim=0) < 0.2  # no batch leakage
+assert cosine_similarity(result[1, 4], from_value[1], dim=0) > 0.8  # similar to new
 
 # @@@@@@@@@@
 
@@ -92,7 +91,7 @@ n_batches = 3
 n_addresses = 13
 key_size = 1024
 value_size = 1
-keys   = N.randn_mat((n_addresses, key_size))
+keys   = torch.randn((n_addresses, key_size))
 values = torch.zeros((n_batches, n_addresses, value_size))
 # value at key location should be nearly equal to the new v
 for i in range(n_addresses):
@@ -103,7 +102,7 @@ for i in range(n_addresses):
     assert (values_2[0][i] - new_v).abs() < 0.001
 # if no key matches, there should be no updates
 for _ in range(5):
-    k = N.randn_mat((key_size,)).expand(n_batches, -1, N.dim, N.dim)
+    k = torch.randn((key_size,)).expand(n_batches, -1, N.dim, N.dim)
     new_v = 17
     v = torch.ones((n_batches, value_size)) * 17
     values_2 = kv_insert(keys, values, k, v, eps=0.1)
@@ -120,7 +119,7 @@ TEST_N_BATCHES = 5
 TEST_N_ADDRESSES = 7
 TEST_ADDRESS_DIM = 1024
 
-ks     = nn.Parameter(N.randn_mat((TEST_N_ADDRESSES, TEST_ADDRESS_DIM)))  # .to('cuda'))
+ks     = nn.Parameter(torch.randn((TEST_N_ADDRESSES, TEST_ADDRESS_DIM)))  # .to('cuda'))
 vs     = torch.randn((TEST_N_BATCHES, TEST_N_ADDRESSES, TEST_ADDRESS_DIM))  # .to('cuda')
 new_vs = torch.randn((TEST_N_BATCHES, TEST_N_ADDRESSES, TEST_ADDRESS_DIM))  # .to('cuda')
 

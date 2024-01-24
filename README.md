@@ -45,15 +45,11 @@ Demonstration:
 
 ## Todo
 
-* Clean up Hypercomplex
-  * Quaternions: https://github.com/ispamm/hTorch   https://github.com/Orkis-Research/Pytorch-Quaternion-Neural-Networks
-  *
 
 * Pedagogy:
   * Motivation of 4 tensors: tag tensor allows sum types, columns 1 and 2 allow product types
   * Computational Hierarchy: Pattern-matching < Prog Execution < Prog Validation < Prog Generation
   * References
-  * Explain hypercomplex: Reals weren't training via backprop, Complex, and Quaternions were.
 
 * NeuralX ("neural" is such a great prefix)
   * Neurallatch, Neuralqueue, NeuralFSM, NeuralPDA, Neurallist, Neuraltree, Neuralgraph, simplified Find+Replace
@@ -81,7 +77,7 @@ Demonstration:
   * Brute force: `without_grad` just replace symbols from LUT. This wouldn't work for training though.
 
 * Optimizations:
-  * Based on profiling, memory looks good, cosine_similarity is slooow, predominantly because of a hypercomplex.dot_product, and hypercomplex.hadamard.
+  * [X] Based on profiling, memory looks good, cosine_similarity is slooow, predominantly because of a hypercomplex.dot_product, and hypercomplex.hadamard. Solved when I got rid of hypercomplex.
   * Get a Linear Algebra pro to help fuse things down
   * There are some memory explosions some of the cos-sims, can we optimize?
 
@@ -94,8 +90,8 @@ Demonstration:
       * and: stack pretty_print fns
     * Move symbolics stuff out of Neurallambda into a "Symbol" class?
   * Collect assumptions made throughout and test:
-    * hypercomplex. If this isn't paying for itself, rip it out of the repo.
-    * converting from mat form of hypercomplex back to vec form
+    * [X] hypercomplex. If this isn't paying for itself, rip it out of the repo. Solution: deleted hypercomplex.
+    * [X] converting from mat form of hypercomplex back to vec form. Solution: deleted hypercomplex.
     * same vec_size across addresses, tags, col1, col2
     * This neuralstack vs others?
 

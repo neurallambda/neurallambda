@@ -30,7 +30,6 @@ import numpy as np
 import torch.nn as nn
 import torch.optim as optim
 import neurallambda.stack as S
-import neurallambda.hypercomplex as H
 
 # DATASET = 'modulo_game'
 DATASET = 'palindrome'
@@ -279,24 +278,6 @@ class LSTMModel(nn.Module):
 ##########
 # Stack
 
-def to_hyper(xs, number_system):
-    ''' Reshape a Real vector to fit in a hypercomplex matrix form
-
-    Args:
-      xs: [BATCH, N]
-
-    Returns:
-      ndarray([BATCH, N/(dim**2), dim, dim])
-
-    '''
-    n = xs.shape[1]
-    d = number_system.dim
-    return number_system.to_mat(xs.reshape(-1, n // d, d))
-
-def from_hyper(xs, number_system):
-    ''' Convert a hypercomplex matrix form back to a vec '''
-    return number_system.from_mat(xs).flatten(start_dim=-2, end_dim=-1)
-
 class StackModel(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
         super(StackModel, self).__init__()
@@ -306,9 +287,7 @@ class StackModel(nn.Module):
 
         self.n_stack = 12
         self.initial_sharpen = 5
-        self.number_system = H.Complex
-        self.cdim = self.number_system.dim # complex dim
-        self.stack_vec_size = input_dim // self.cdim
+        self.stack_vec_size = input_dim
 
         self.should_push    = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, 1), nn.Sigmoid())
         self.should_pop     = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, 1), nn.Sigmoid())
@@ -325,7 +304,7 @@ class StackModel(nn.Module):
         self.output_dim = output_dim
         self.lc1 = nn.LSTMCell(
             input_dim + # input
-            self.stack_vec_size * self.cdim,
+            self.stack_vec_size,
             hidden_dim)
         self.lc2 = nn.LSTMCell(hidden_dim, hidden_dim)
         self.fc = nn.Linear(hidden_dim, output_dim)
@@ -335,9 +314,8 @@ class StackModel(nn.Module):
         device = x.device
         batch_size = x.shape[0]
         vec_size = x.shape[2]
-        stack = S.Stack(self.n_stack, self.stack_vec_size, self.number_system)
+        stack = S.Stack(self.n_stack, self.stack_vec_size)
         stack.init(batch_size, self.initial_sharpen, zero_offset, device)
-        # self.complex_proj = self.complex_proj.to(device)
 
         # Initialize the hidden and cell states to zeros
         h1 = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
@@ -345,9 +323,7 @@ class StackModel(nn.Module):
         h1s = []
 
         for i in range(x.size(1)):
-            # s = stack.read().flatten(start_dim=-3, end_dim=-1).squeeze(-1)
-            # s = self.number_system.from_mat(stack.read()).flatten(start_dim=-2, end_dim=-1)
-            s = from_hyper(stack.read(), self.number_system)
+            s = stack.read()
             inp = x[:, i, :]
             h1, c1 = self.lc1(
                 torch.concat([inp, s], dim=1),
@@ -359,8 +335,7 @@ class StackModel(nn.Module):
             pop = self.should_pop(c1).squeeze(-1)
             null_op = self.should_null_op(c1).squeeze(-1)
 
-            # stack(push, pop, null_op, (self.complex_proj @ h1.T).reshape(batch_size, -1, self.cdim, self.cdim))
-            stack(push, pop, null_op, to_hyper(inp, self.number_system))
+            stack(push, pop, null_op, inp)
 
 
         # Run LSTM2

@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from lark import Lark, Transformer, Token, Tree
 from typing import Dict, Union, List, Tuple
 from typing import Union, List, Any, Type
-import neurallambda.hypercomplex as H
 import neurallambda.language as L
 from neurallambda.language import *
 import numpy as np

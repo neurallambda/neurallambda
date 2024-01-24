@@ -5,23 +5,20 @@ A Finite Differentiable Neuralstack.
 '''
 
 from torch import einsum, tensor, allclose
-import neurallambda.hypercomplex as H
 import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from neurallambda.util import transform_runs
 import neurallambda.debug as D
+from torch import cosine_similarity
 
 class Stack(nn.Module):
     '''A Neural stack. Push, pop, pointer to top of stack, read from top.
 
-    NOTE: einsum's have "qr" as last 2 dimensions for making use of matrix-form
-          complex numbers
-
     '''
 
-    def __init__(self, n_stack, vec_size, number_system):
+    def __init__(self, n_stack, vec_size):
         '''Initialize the Neuralstack.
 
         Args:
@@ -30,7 +27,6 @@ class Stack(nn.Module):
         super(Stack, self).__init__()
         self.n_stack = n_stack
         self.vec_size = vec_size
-        self.number_system = number_system
 
         # run init to populate
         self.sharpen_k = None
@@ -61,9 +57,9 @@ class Stack(nn.Module):
         pop_stack, pop_pointers, popped_val = self.pop_()
 
         self.stack = (
-            einsum('bnvqr, b -> bnvqr', self.stack, should_null_op) +
-            einsum('bnvqr, b -> bnvqr', push_stack, should_push) +
-            einsum('bnvqr, b -> bnvqr', pop_stack, should_pop)
+            einsum('bnv, b -> bnv', self.stack, should_null_op) +
+            einsum('bnv, b -> bnv', push_stack, should_push) +
+            einsum('bnv, b -> bnv', pop_stack, should_pop)
         )
         self.pointer = (
             einsum('bn, b -> bn', self.pointer, should_null_op) +
@@ -77,7 +73,7 @@ class Stack(nn.Module):
         psum = self.pointer.sum(dim=1).unsqueeze(1)
         self.pointer = self.pointer / torch.maximum(psum, torch.zeros_like(psum) + 1e-8)
 
-        popped_val = einsum('bvqr, b -> bvqr', popped_val, should_pop)
+        popped_val = einsum('bv, b -> bv', popped_val, should_pop)
         return popped_val
 
     def read(self):
@@ -90,7 +86,7 @@ class Stack(nn.Module):
         of all locations sums to 1.
 
         '''
-        return einsum('bnvqr, bn -> bvqr', self.stack, self.pointer)
+        return einsum('bnv, bn -> bv', self.stack, self.pointer)
 
     def push_(self, val):
         ''' Library consumers should NOT call this function. You must only call
@@ -102,8 +98,8 @@ class Stack(nn.Module):
         new_p = torch.roll(self.pointer, shifts=1)
 
         # place val at new pointer
-        old_stack = einsum('bnvqr, bn -> bnvqr', self.stack, 1 - new_p)
-        new_stack = einsum('bvqr, bn -> bnvqr', val, new_p)
+        old_stack = einsum('bnv, bn -> bnv', self.stack, 1 - new_p)
+        new_stack = einsum('bv, bn -> bnv', val, new_p)
         return old_stack + new_stack, new_p
 
     def pop_(self):
@@ -116,8 +112,8 @@ class Stack(nn.Module):
         out = self.read()
 
         # zero out memory location @ pointer
-        old_stack_ = einsum('bnvqr, bn -> bnvqr', self.stack, 1 - self.pointer)
-        new_stack_ = einsum('bvqr, bn -> bnvqr', self.zero_vec, self.pointer)
+        old_stack_ = einsum('bnv, bn -> bnv', self.stack, 1 - self.pointer)
+        new_stack_ = einsum('bv, bn -> bnv', self.zero_vec, self.pointer)
         new_stack = old_stack_ + new_stack_
 
         # shift pointers back
@@ -143,7 +139,6 @@ class Stack(nn.Module):
             for all other values, so may inhibit training (but be good for
             inference).
         '''
-        N = self.number_system  # convenient shorthand
         self.device = device
 
         self.sharpen_k = nn.Parameter(torch.tensor([initial_sharpen], dtype=dtype, device=device))
@@ -153,26 +148,21 @@ class Stack(nn.Module):
         self.stack = torch.zeros(
             (batch_size,
              self.n_stack,
-             self.vec_size,
-             N.dim,
-             N.dim), device=device, dtype=dtype) + zero_offset
+             self.vec_size), device=device, dtype=dtype) + zero_offset
         self.zero_vec = torch.zeros(
             (batch_size,
-             self.vec_size,
-             N.dim,
-             N.dim), device=device, dtype=dtype) + zero_offset
+             self.vec_size), device=device, dtype=dtype) + zero_offset
 
 
 ##################################################
 # Pretty printer debugging tools
 
-def pp_sim_addresses(nl, stack_ix, stack_val, zero_vec_mat, addresses):
-    N = nl.number_system
+def pp_sim_addresses(nl, stack_ix, stack_val, zero_vec, addresses):
     txts = []
-    null_sim = H.cosine_similarity(N.to_mat(stack_val), nl.zero_vec_mat[0], dim=0)
+    null_sim = cosine_similarity(stack_val, nl.zero_vec[0], dim=0)
     txts.append(D.colorize(f'NULL', value=null_sim.item()))
     for i, a in enumerate(addresses):
-        sim = H.cosine_similarity(N.to_mat(stack_val), a, dim=0)
+        sim = cosine_similarity(stack_val, a, dim=0)
         txt = D.colorize(f'{i:> 2d} ', value=sim.item())
         txts.append(txt)
     return (stack_ix, null_sim, txts)
@@ -185,7 +175,6 @@ def pp_stack(stack, nl):
     similarity.
     '''
     addresses = nl.addresses
-    N = nl.number_system
 
     NULL_SIM = 0.5 # If stack_val is sim to zero_vec more than this, we'll
                    # collapse its display
@@ -193,13 +182,13 @@ def pp_stack(stack, nl):
     print()
     print('STACK:')
 
-    ss = N.from_mat(stack.stack[BATCH_I])  # [batch, stack_size, vec_size, complex, complex]
+    ss = stack.stack[BATCH_I]  # [batch, stack_size, vec_size]
     pp = stack.pointer[BATCH_I] # [batch, stack_size]
     BATCH_I = 0
 
     similarities = [] # [(pointer_p, stack_ix, null_sim, txt)]
     for stack_ix, (stack_val, p) in enumerate(zip(ss, pp)):
-        similarities.append((p,) + pp_sim_addresses(nl, stack_ix, stack_val, nl.zero_vec_mat, addresses[BATCH_I]))
+        similarities.append((p,) + pp_sim_addresses(nl, stack_ix, stack_val, nl.zero_vec, addresses[BATCH_I]))
 
     similarities = transform_runs(
         similarities,

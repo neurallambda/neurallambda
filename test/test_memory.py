@@ -11,7 +11,6 @@ from torch import einsum, tensor, allclose
 from torch.nn import functional as F
 from typing import Dict, Union, List, Tuple
 from typing import Union, List, Any, Type
-import neurallambda.hypercomplex as H
 import numpy as np
 import random
 import torch
