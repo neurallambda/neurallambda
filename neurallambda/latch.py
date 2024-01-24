@@ -33,12 +33,7 @@ class Latch(nn.Module):
         false = N.to_mat(self.false)
         matched = N.cosine_similarity(predicate.real, input.real, dim=1)
 
-        # return (
-        #     N.scale(true, matched) +
-        #     N.scale(false, 1 - matched)
-        # )
-
-        matched = matched.squeeze(-1).squeeze(-1)
+        matched = matched.squeeze(-1).squeeze(-1) # squeeze hypercomplex dims
         return (
             torch.einsum('vqr, b -> bvqr', true, matched) +
             torch.einsum('vqr, b -> bvqr', false, 1 - matched)
@@ -65,8 +60,8 @@ N_DATASET_POS = 100
 N_DATASET_NEG = 100
 VEC_SIZE = 128
 
-# NUMBER_SYSTEM = H.Real
-NUMBER_SYSTEM = H.ComplexTorch
+NUMBER_SYSTEM = H.Real
+# NUMBER_SYSTEM = H.ComplexTorch
 # NUMBER_SYSTEM = H.Complex
 # NUMBER_SYSTEM = H.Quaternion
 N = NUMBER_SYSTEM # shorthand
@@ -114,8 +109,8 @@ def run_epoch(data_loader, model, optimizer):
 
         model.zero_grad()
         output = model(input_tensor)
-        breakpoint()
-        loss = (1 - N.cosine_similarity(target_tensor, output.unsqueeze(1), dim=1)).mean()
+
+        loss = (1 - N.cosine_similarity(target_tensor, output, dim=1)).mean()
 
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=GRAD_CLIP)

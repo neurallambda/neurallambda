@@ -24,6 +24,7 @@ RUN_COMPLEX_TESTS    = False
 RUN_QUATERNION_TESTS = False
 
 
+
 ##################################################
 # Types
 
@@ -50,6 +51,41 @@ class Real:
         return Real.to_mat(Real.randn(size))
 
 
+    # def scale(*args, **kwargs): return scale(*args, **kwargs)
+    # def conjugate(*args, **kwargs): return conjugate(*args, **kwargs)
+    # def hadamard(*args, **kwargs): return hadamard(*args, **kwargs)
+    # def dot_product(*args, **kwargs): return dot_product(*args, **kwargs)
+    # def norm(*args, **kwargs): return norm(*args, **kwargs)
+
+    @staticmethod
+    def cosine_similarity(*args, **kwargs): return torch.cosine_similarity(*args, **kwargs)
+
+
+class ComplexTorch:
+    ''' Use Pytorch's Complex '''
+    dim = 1
+
+    @staticmethod
+    def to_mat(x):
+        return x.unsqueeze(-1)
+
+    @staticmethod
+    def from_mat(x):
+        return x.squeeze(-1)
+
+    @staticmethod
+    def randn(size):
+        ''' Not in matrix form '''
+        return torch.randn(size + (1,)) + torch.randn(size + (1,)) * 1j
+
+    @staticmethod
+    def randn_mat(size):
+        ''' RandN, matrix-formatted version '''
+        return Real.to_mat(Real.randn(size))
+
+    @staticmethod
+    def cosine_similarity(*args, **kwargs): return torch.cosine_similarity(*args, **kwargs)
+
 class Complex:
     dim = 2
 
@@ -70,6 +106,19 @@ class Complex:
     def randn_mat(size):
         ''' RandN, matrix-formatted version '''
         return Complex.to_mat(Complex.randn(size))
+
+    @staticmethod
+    def scale(*args, **kwargs): return scale(*args, **kwargs)
+    @staticmethod
+    def conjugate(*args, **kwargs): return conjugate(*args, **kwargs)
+    @staticmethod
+    def hadamard(*args, **kwargs): return hadamard(*args, **kwargs)
+    @staticmethod
+    def dot_product(*args, **kwargs): return dot_product(*args, **kwargs)
+    @staticmethod
+    def norm(*args, **kwargs): return norm(*args, **kwargs)
+    @staticmethod
+    def cosine_similarity(*args, **kwargs): return cosine_similarity(*args, **kwargs)
 
 
 class Quaternion:
@@ -92,6 +141,20 @@ class Quaternion:
     def randn_mat(size):
         ''' RandN, matrix-formatted version '''
         return Quaternion.to_mat(Quaternion.randn(size))
+
+    @staticmethod
+    def scale(*args, **kwargs): return scale(*args, **kwargs)
+    @staticmethod
+    def conjugate(*args, **kwargs): return conjugate(*args, **kwargs)
+    @staticmethod
+    def hadamard(*args, **kwargs): return hadamard(*args, **kwargs)
+    @staticmethod
+    def dot_product(*args, **kwargs): return dot_product(*args, **kwargs)
+    @staticmethod
+    def norm(*args, **kwargs): return norm(*args, **kwargs)
+    @staticmethod
+    def cosine_similarity(*args, **kwargs): return cosine_similarity(*args, **kwargs)
+
 
 
 ##################################################

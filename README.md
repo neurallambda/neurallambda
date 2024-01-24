@@ -45,6 +45,10 @@ Demonstration:
 
 ## Todo
 
+* Clean up Hypercomplex
+  * Quaternions: https://github.com/ispamm/hTorch   https://github.com/Orkis-Research/Pytorch-Quaternion-Neural-Networks
+  *
+
 * Pedagogy:
   * Motivation of 4 tensors: tag tensor allows sum types, columns 1 and 2 allow product types
   * Computational Hierarchy: Pattern-matching < Prog Execution < Prog Validation < Prog Generation
@@ -99,7 +103,7 @@ Demonstration:
 ## Zip Repo
 
 ```sh
-zip -r "neurallambda_$(date +"%Y-%m-%d_%H-%M-%S").zip" . -x "*__pycache__*" -x ".pytest_cache/*" -x ".env/*" -x ".git/*" -x "neurallambda*.zip"
+zip -r "neurallambda_$(date +"%Y-%m-%d_%H-%M-%S").zip" . -x "*__pycache__*" -x ".pytest_cache/*" -x ".env/*" -x ".git/*" -x "neurallambda*.zip" -x "*.html" -x "*.bin"
 ```
 
 ## Profiling tips
