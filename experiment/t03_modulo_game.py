@@ -1,6 +1,6 @@
 '''
 
-Sliding-window-add-and-modulo Game
+Palindrome & Sliding-window-add-and-modulo Game
 
 ----------
 HOW THE GAME WORKS:
@@ -32,6 +32,9 @@ import torch.optim as optim
 import neurallambda.stack as S
 import neurallambda.hypercomplex as H
 
+# DATASET = 'modulo_game'
+DATASET = 'palindrome'
+
 BATCH_SIZE = 32
 
 NUM_SAMPLES = 1000  # total number of samples in the dataset
@@ -39,6 +42,10 @@ MAX_WINDOW_SIZE = 4  # maximum window size
 MAX_SEQUENCE_LENGTH = 10  # maximum length of the sequence
 
 LR = 1e-2
+
+NUM_EPOCHS = 50
+GRAD_CLIP = 10
+WARM_UP = 5 # ignore loss for this many steps
 
 
 ##########
@@ -75,7 +82,36 @@ for i in range(int_range_start, int_range_end):
 
 
 ##########
-# Toy Data
+# Palindrome Data
+
+# Function to generate palindrome synthetic data
+nums = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+def generate_palindrome_synthetic_data(num_samples, max_length, reflect_token):
+    REFLECT_SYMBOL = 42
+    NULL_SYMBOL = 1
+    data = []
+    for _ in range(num_samples):
+        length = random.randint(5, max_length)
+        hlength = length // 2
+        seed = [random.choice(nums) for _ in range(hlength)]
+        inputs  = seed + [REFLECT_SYMBOL] + [0] * hlength
+        outputs = [NULL_SYMBOL] * (hlength + 1) + seed[::-1]
+        data.append({
+            'seed': seed,
+            'inputs': inputs,
+            'outputs': outputs,
+        })
+    return data
+
+if DATASET == 'palindrome':
+    synthetic_data = generate_palindrome_synthetic_data(NUM_SAMPLES, MAX_SEQUENCE_LENGTH, reflect_token=42)
+    train_size = int(0.8 * len(synthetic_data))
+    train_data = synthetic_data[:train_size]
+    val_data = synthetic_data[train_size:]
+
+
+##########
+# Modulo Data
 
 def generate_sequence(seed, window_size, sequence_length):
     """
@@ -118,13 +154,15 @@ def generate_synthetic_data(num_samples, max_window_size, max_sequence_length):
         })
     return data
 
-# Generate the synthetic dataset
-synthetic_data = generate_synthetic_data(NUM_SAMPLES, MAX_WINDOW_SIZE, MAX_SEQUENCE_LENGTH)
+if DATASET == 'modulo_game':
+    synthetic_data = generate_synthetic_data(NUM_SAMPLES, MAX_WINDOW_SIZE, MAX_SEQUENCE_LENGTH)
+    train_size = int(0.8 * len(synthetic_data))
+    train_data = synthetic_data[:train_size]
+    val_data = synthetic_data[train_size:]
 
-# Splitting the dataset into train and validation sets (80% train, 20% validation)
-train_size = int(0.8 * len(synthetic_data))
-train_data = synthetic_data[:train_size]
-val_data = synthetic_data[train_size:]
+
+##############################
+# Collate Datasets
 
 # Convert to Hugging Face Dataset
 train_dataset = Dataset.from_list(train_data)
@@ -136,37 +174,45 @@ padding_vec = torch.zeros(VEC_SIZE, device=DEVICE) + zero_offset
 
 def collate_fn(batch):
     # Find the longest sequence in the batch
-    max_seq_len = max(len(item['sequence']) for item in batch)
+    max_seq_len = max(len(item['inputs']) for item in batch)
 
-
-    # Initialize the list to store the padded vector sequences
-    vectors_batch = []
+    # Initialize the list to store the padded vector inputss
+    inputs_batch = []
+    outputs_batch = []
 
     for item in batch:
-        sequence = item['sequence']
-        # Project each integer in the sequence to its vector representation
-        vectors = [project_int(i) for i in sequence]
-        # Calculate the number of padding vectors needed
-        num_padding = max_seq_len - len(vectors)
-        # Pad the sequence with padding_vec on the left
-        padded_sequence = [padding_vec] * num_padding + vectors
+        inputs = item['inputs']
+        outputs = item['outputs']
+
+        inputs = [project_int(i) for i in inputs]
+        num_padding = max_seq_len - len(inputs)
+        padded_inputs = [padding_vec] * num_padding + inputs
+
+        outputs = [project_int(i) for i in outputs]
+        num_padding = max_seq_len - len(outputs)
+        padded_outputs = [padding_vec] * num_padding + outputs
+
         # Stack the vectors and add to the batch
-        vectors_batch.append(torch.stack(padded_sequence))
+        inputs_batch.append(torch.stack(padded_inputs))
+        outputs_batch.append(torch.stack(padded_outputs))
 
-    # Stack all the padded sequences into a single tensor
-    sequences_tensor = torch.stack(vectors_batch)
+    # Stack all the padded inputss into a single tensor
+    inputs_tensor = torch.stack(inputs_batch)
+    outputs_tensor = torch.stack(outputs_batch)
 
-    # Return the tensor with the batch of padded sequences
-    return sequences_tensor
+    # Return the tensor with the batch of padded inputss
+    return inputs_tensor, outputs_tensor
 
 # Create DataLoaders with the new collate_fn
 train_dl = DataLoader(train_data, batch_size=BATCH_SIZE, collate_fn=collate_fn, shuffle=True)
 val_dl = DataLoader(val_data, batch_size=BATCH_SIZE, collate_fn=collate_fn)
 
 
+##################################################
+# Models
+
 ##########
 # RNN
-
 
 class RNNModel(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
@@ -233,43 +279,65 @@ class LSTMModel(nn.Module):
 ##########
 # Stack
 
+def to_hyper(xs, number_system):
+    ''' Reshape a Real vector to fit in a hypercomplex matrix form
+
+    Args:
+      xs: [BATCH, N]
+
+    Returns:
+      ndarray([BATCH, N/(dim**2), dim, dim])
+
+    '''
+    n = xs.shape[1]
+    d = number_system.dim
+    return number_system.to_mat(xs.reshape(-1, n // d, d))
+
+def from_hyper(xs, number_system):
+    ''' Convert a hypercomplex matrix form back to a vec '''
+    return number_system.from_mat(xs).flatten(start_dim=-2, end_dim=-1)
+
 class StackModel(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
         super(StackModel, self).__init__()
 
-        # stack
+        ##########
+        # Stack
+
         self.n_stack = 12
         self.initial_sharpen = 5
-        self.number_system = H.Real
+        self.number_system = H.Complex
         self.cdim = self.number_system.dim # complex dim
-        self.complex_proj = torch.randn(input_dim, input_dim * self.cdim ** 2) # not a param
+        self.stack_vec_size = input_dim // self.cdim
 
-        # net
+        self.should_push    = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, 1), nn.Sigmoid())
+        self.should_pop     = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, 1), nn.Sigmoid())
+        self.should_null_op = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, 1), nn.Sigmoid())
+
+        # self.should_push    = nn.Sequential(nn.Linear(hidden_dim, 1), nn.Sigmoid())
+        # self.should_pop     = nn.Sequential(nn.Linear(hidden_dim, 1), nn.Sigmoid())
+        # self.should_null_op = nn.Sequential(nn.Linear(hidden_dim, 1), nn.Sigmoid())
+
+        ##########
+        # Net
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
         self.lc1 = nn.LSTMCell(
             input_dim + # input
-            input_dim * self.cdim ** 2, # stack
+            self.stack_vec_size * self.cdim,
             hidden_dim)
         self.lc2 = nn.LSTMCell(hidden_dim, hidden_dim)
         self.fc = nn.Linear(hidden_dim, output_dim)
-
-
-        # Stack
-        self.should_push = nn.Sequential(nn.Linear(hidden_dim, 1), nn.Sigmoid())
-        self.should_pop = nn.Sequential(nn.Linear(hidden_dim, 1), nn.Sigmoid())
-        self.should_null_op = nn.Sequential(nn.Linear(hidden_dim, 1), nn.Sigmoid())
-
 
     def forward(self, x):
         # Stack 1
         device = x.device
         batch_size = x.shape[0]
         vec_size = x.shape[2]
-        stack = S.Stack(self.n_stack, vec_size, self.number_system)
+        stack = S.Stack(self.n_stack, self.stack_vec_size, self.number_system)
         stack.init(batch_size, self.initial_sharpen, zero_offset, device)
-        self.complex_proj = self.complex_proj.to(device)
+        # self.complex_proj = self.complex_proj.to(device)
 
         # Initialize the hidden and cell states to zeros
         h1 = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
@@ -277,10 +345,12 @@ class StackModel(nn.Module):
         h1s = []
 
         for i in range(x.size(1)):
-            s = stack.read().flatten(start_dim=-3, end_dim=-1).squeeze(-1)
-
+            # s = stack.read().flatten(start_dim=-3, end_dim=-1).squeeze(-1)
+            # s = self.number_system.from_mat(stack.read()).flatten(start_dim=-2, end_dim=-1)
+            s = from_hyper(stack.read(), self.number_system)
+            inp = x[:, i, :]
             h1, c1 = self.lc1(
-                torch.concat([x[:, i, :], s], dim=1),
+                torch.concat([inp, s], dim=1),
                 (h1, c1))
             h1s.append(h1)
 
@@ -289,7 +359,8 @@ class StackModel(nn.Module):
             pop = self.should_pop(c1).squeeze(-1)
             null_op = self.should_null_op(c1).squeeze(-1)
 
-            stack(push, pop, null_op, (h1 @ self.complex_proj).reshape(batch_size, -1, self.cdim, self.cdim))
+            # stack(push, pop, null_op, (self.complex_proj @ h1.T).reshape(batch_size, -1, self.cdim, self.cdim))
+            stack(push, pop, null_op, to_hyper(inp, self.number_system))
 
 
         # Run LSTM2
@@ -315,8 +386,6 @@ class StackModel(nn.Module):
         return out
 
 
-
-
 ##################################################
 # Training
 
@@ -328,9 +397,9 @@ def train_epoch(model, dl, optimizer, criterion, warm_up, device, clip):
     model.train()
     epoch_loss = 0
 
-    for i, batch in enumerate(dl):
-        src = batch[:, :-1, :].to(device)
-        trg = batch[:, 1:, :].to(device)
+    for i, (src, trg) in enumerate(dl):
+        src = src.to(device)
+        trg = trg.to(device)
 
         optimizer.zero_grad()
         output = model(src)
@@ -349,9 +418,9 @@ def evaluate(model, dl, criterion, warm_up, device):
     epoch_loss = 0
 
     with torch.no_grad():
-        for i, batch in enumerate(dl):
-            src = batch[:, :-1, :].to(device)
-            trg = batch[:, 1:, :].to(device)
+        for i, (src, trg) in enumerate(dl):
+            src = src.to(device)
+            trg = trg.to(device)
 
             output = model(src)
 
@@ -366,9 +435,9 @@ def accuracy(model, val_dl, warm_up, device):
     total_predictions = 0
 
     with torch.no_grad():
-        for i, batch in enumerate(val_dl):
-            src = batch[:, :-1, :].to(device)
-            trg = batch[:, 1:, :].to(device)
+        for i, (src, trg) in enumerate(val_dl):
+            src = src.to(device)
+            trg = trg.to(device)
 
             output = model(src)
             predicted_vectors = output[:, warm_up:, :]
@@ -389,11 +458,13 @@ def accuracy(model, val_dl, warm_up, device):
 ##########
 # Setup
 
+# MyModel = RNNModel
+# MyModel = LSTMModel
 MyModel = StackModel
 
 model = MyModel(
     input_dim=VEC_SIZE,
-    hidden_dim=128,
+    hidden_dim=64,
     output_dim=VEC_SIZE,
 )
 model.to(DEVICE)
@@ -402,13 +473,6 @@ def criterion(x, target):
     return torch.mean(1 - torch.cosine_similarity(x, target, dim=2))
 
 optimizer = optim.Adam(model.parameters(), lr=LR)
-
-
-# Train and evaluate the RNN model
-
-NUM_EPOCHS = 50
-GRAD_CLIP = 10
-WARM_UP = 5 # ignore loss for this many steps
 
 train_losses = []
 val_losses = []
