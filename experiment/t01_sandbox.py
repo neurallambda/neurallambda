@@ -198,7 +198,6 @@ GC_STEPS = 2
 # # Trivial
 # x, total_steps = "((fn [x] x) 42)", 7
 
-
 # # Simple Fn Application: -> '(1 13)
 # x, total_steps = "((fn [x] '(1 x)) 13)", 13
 

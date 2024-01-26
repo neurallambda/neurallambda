@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from neurallambda.util import transform_runs
 import neurallambda.debug as D
+from torch import cosine_similarity
 
 class Latch(nn.Module):
     def __init__(self, vec_size):
@@ -28,17 +29,18 @@ class Latch(nn.Module):
         true = self.true
         false = self.false
         matched = torch.cosine_similarity(predicate.real, inp.real, dim=1)
-
         return (
             torch.einsum('v, b -> bv', true, matched) +
             torch.einsum('v, b -> bv', false, 1 - matched)
         )
 
 class DataLatch(nn.Module):
-    def __init__(self, ):
+    def __init__(self, vec_size, init_scale, dropout=0.01):
         super(DataLatch, self).__init__()
-        self.enable = nn.Parameter(torch.randn(VEC_SIZE, ) * INIT_SCALE)
-        self.dropout = torch.nn.Dropout(0.01)
+        self.vec_size = vec_size
+        self.init_scale = init_scale
+        self.enable = nn.Parameter(torch.randn(vec_size, ) * init_scale)
+        self.dropout = torch.nn.Dropout(dropout)
 
     def forward(self, state, enable, data):
         # state  : [batch_size, vec_size]

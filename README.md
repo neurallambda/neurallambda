@@ -2,6 +2,8 @@
 
 Lambda Calculus, Fully Differentiable.
 
+* "Shock testing" from aviation for Error Correction? Material sciences (Casey's recommendation)
+
 
 ## Explanation
 
@@ -52,11 +54,21 @@ Demonstration:
   * References
 
 * NeuralX ("neural" is such a great prefix)
-  * Neurallatch, Neuralqueue, NeuralFSM, NeuralPDA, Neurallist, Neuraltree, Neuralgraph, simplified Find+Replace
+  * [X] Neurallatch
+  * [ ] Neuralqueue
+  * [ ] Neurallist
+  * [ ] Simplified Find + Replace
+  * [ ] NeuralFSM
+  * [ ] NeuralPDA
+  * [ ] Neuraltree
+  * [ ] Neuralgraph
+
 
 * Empirical validation:
   * Test on simple RNNs
   * Build some benchmark suites to try these on
+  * RNG Bot that generates pseudo random numbers via program
+
 
 * Misc:
   * Improve test coverage
