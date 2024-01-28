@@ -1,23 +1,10 @@
 '''
 
-Palindrome & Sliding-window-add-and-modulo Game
+Palindrome
 
-----------
-HOW THE GAME WORKS:
-
-Window=2 Example Dataset
-1 2 <- seed
-1 2 3 5 8 3 [1 4] _ _ _ _
-
-Window=3 Example Dataset
-1 2 3 <- seed
-1 2 3 6 1 0 7 8 [5 0 3] _ _ _ _
-
-
-----------
-LVL1: All data is generated with locked window size.
-
-LVL2: Agent has to infer the correct window size.
+RESULTS:
+* Validation scores frequently surpass training scores
+* Seems a little sensitive to the RNG seed
 
 '''
 
@@ -34,10 +21,10 @@ import neurallambda.latch as L
 from torch import cosine_similarity, einsum
 from torch.nn.functional import elu, selu, gelu, leaky_relu
 
+torch.manual_seed(11)
 
 DEBUG = False
 
-# DATASET = 'modulo_game'
 DATASET = 'palindrome'
 
 BATCH_SIZE = 32
@@ -48,7 +35,7 @@ MAX_SEQUENCE_LENGTH = 10  # maximum length of the sequence
 
 LR = 1e-2
 
-NUM_EPOCHS = 7
+NUM_EPOCHS = 8
 GRAD_CLIP = 10
 
 
@@ -109,62 +96,11 @@ def generate_palindrome_synthetic_data(num_samples, max_length, reflect_token):
         })
     return data
 
-if DATASET == 'palindrome':
-    synthetic_data = generate_palindrome_synthetic_data(NUM_SAMPLES, MAX_SEQUENCE_LENGTH, reflect_token=42)
-    train_size = int(0.8 * len(synthetic_data))
-    train_data = synthetic_data[:train_size]
-    val_data = synthetic_data[train_size:]
 
-
-##########
-# Modulo Data
-
-def generate_sequence(seed, window_size, sequence_length):
-    """
-    Generates a sequence using a seed and a sliding window.
-
-    The function starts with a seed, which is a list of initial numbers.
-    It then extends this seed into a longer sequence by repeatedly summing the last 'window_size' numbers,
-    and adding this sum (modulo 10) to the sequence.
-
-    Args:
-    seed (list): The initial numbers of the sequence.
-    window_size (int): The number of elements to sum in each step.
-    sequence_length (int): The total length of the sequence to generate.
-
-    Returns:
-    list: The generated sequence with the specified length.
-    """
-    sequence = seed.copy()
-    while len(sequence) < sequence_length:
-        window_sum = sum(sequence[-window_size:]) % 10
-        sequence.append(window_sum)
-    return sequence
-
-# @@@@@@@@@@
-assert generate_sequence([1, 2], 2, sequence_length=10) == [1, 2, 3, 5, 8, 3, 1, 4, 5, 9]
-assert generate_sequence([1, 2, 3], 3, sequence_length=15) == [1, 2, 3, 6, 1, 0, 7, 8, 5, 0, 3, 8, 1, 2, 1]
-# @@@@@@@@@@
-
-def generate_synthetic_data(num_samples, max_window_size, max_sequence_length):
-    data = []
-    for _ in range(num_samples):
-        window_size = random.randint(2, max_window_size)
-        sequence_length = random.randint(window_size+1, max_sequence_length)
-        seed = [random.randint(0, 9) for _ in range(window_size)]
-        sequence = generate_sequence(seed, window_size, sequence_length)
-        data.append({
-            'seed': seed,
-            'window_size': window_size,
-            'sequence': sequence
-        })
-    return data
-
-if DATASET == 'modulo_game':
-    synthetic_data = generate_synthetic_data(NUM_SAMPLES, MAX_WINDOW_SIZE, MAX_SEQUENCE_LENGTH)
-    train_size = int(0.8 * len(synthetic_data))
-    train_data = synthetic_data[:train_size]
-    val_data = synthetic_data[train_size:]
+synthetic_data = generate_palindrome_synthetic_data(NUM_SAMPLES, MAX_SEQUENCE_LENGTH, reflect_token=42)
+train_size = int(0.8 * len(synthetic_data))
+train_data = synthetic_data[:train_size]
+val_data = synthetic_data[train_size:]
 
 
 ##############################
@@ -369,6 +305,7 @@ class StackLSTM(nn.Module):
         self.initial_sharpen = 5
         self.stack_vec_size = input_dim
 
+        self.sharpen_pointer = nn.Parameter(torch.tensor([5.0]))
         self.should_push    = nn.Sequential(nn.Linear(hidden_dim, 1), nn.Sigmoid())
         self.should_pop     = nn.Sequential(nn.Linear(hidden_dim, 1), nn.Sigmoid())
         self.should_null_op = nn.Sequential(nn.Linear(hidden_dim, 1), nn.Sigmoid())
@@ -392,7 +329,7 @@ class StackLSTM(nn.Module):
         batch_size = x.shape[0]
         vec_size = x.shape[2]
         stack = S.Stack(self.n_stack, self.stack_vec_size)
-        stack.init(batch_size, self.initial_sharpen, zero_offset, device)
+        stack.init(batch_size, zero_offset, device)
 
         # Initialize the hidden and cell states to zeros
         h1 = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
@@ -412,7 +349,7 @@ class StackLSTM(nn.Module):
             pop = self.should_pop(c1).squeeze(-1)
             null_op = self.should_null_op(c1).squeeze(-1)
 
-            stack(push, pop, null_op, inp)
+            stack(self.sharpen_pointer, push, pop, null_op, inp)
 
         # Run LSTM2
         h1s = torch.stack(h1s, dim=1) # input to lstm2
@@ -451,6 +388,7 @@ class NeuralLambdaOnly(nn.Module):
         self.initial_sharpen = 5
         self.stack_vec_size = input_dim
         self.stack = S.Stack(self.n_stack, self.stack_vec_size)
+        self.sharpen_pointer = nn.Parameter(torch.tensor([5.0]))
 
         ##########
         # Latch
@@ -478,7 +416,7 @@ class NeuralLambdaOnly(nn.Module):
         batch_size = x.shape[0]
         vec_size = x.shape[2]
         # stack = S.Stack(self.n_stack, self.stack_vec_size)
-        self.stack.init(batch_size, self.initial_sharpen, zero_offset, device)
+        self.stack.init(batch_size, zero_offset, device)
 
         # Latch Init
         # latch_state = torch.zeros((batch_size, self.input_dim), device=device) + zero_offset
@@ -511,7 +449,7 @@ class NeuralLambdaOnly(nn.Module):
             null_op = torch.zeros_like(pop)
 
             # Update Stack
-            self.stack(push, pop, null_op, inp)
+            self.stack(self.sharpen_pointer, push, pop, null_op, inp)
             s = self.stack.read()
 
             out = (

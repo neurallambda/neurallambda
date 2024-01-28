@@ -30,14 +30,12 @@ class Queue(nn.Module):
 
         # run init to populate
         self.queue = None
-
-        self.sharpen_head = None
-        self.head = None  # dequeue/get from head
-
-        self.sharpen_tail = None
-        self.tail = None  # enqueue/put at tail
+        self.head = None  # pointer to dequeue/get from head
+        self.tail = None  # pointer to enqueue/put at tail
 
     def forward(self,
+                sharpen_head,
+                sharpen_tail,
                 should_put,
                 should_get,
                 should_null_op,
@@ -81,11 +79,11 @@ class Queue(nn.Module):
         ##########
         # Sharpen (softmax) pointers
 
-        self.head = torch.softmax(self.head * self.sharpen_head, dim=1)
+        self.head = torch.softmax(self.head * sharpen_head, dim=1)
         hsum = self.head.sum(dim=1).unsqueeze(1)
         self.head = self.head / torch.maximum(hsum, torch.zeros_like(hsum) + 1e-8)
 
-        self.tail = torch.softmax(self.tail * self.sharpen_tail, dim=1)
+        self.tail = torch.softmax(self.tail * sharpen_tail, dim=1)
         tsum = self.tail.sum(dim=1).unsqueeze(1)
         self.tail = self.tail / torch.maximum(tsum, torch.zeros_like(tsum) + 1e-8)
 
@@ -136,7 +134,7 @@ class Queue(nn.Module):
         new_head = torch.roll(self.head, shifts=1)
         return new_queue, new_head, out
 
-    def init(self, batch_size, initial_sharpen, zero_offset, device, dtype=torch.float32):
+    def init(self, batch_size, zero_offset, device, dtype=torch.float32):
         '''Initialize the queue for a particular run.
 
         Args:
@@ -157,11 +155,9 @@ class Queue(nn.Module):
         '''
         self.device = device
 
-        self.sharpen_head = nn.Parameter(torch.tensor([initial_sharpen], dtype=dtype, device=device))
         self.head = torch.zeros((batch_size, self.n_queue), device=device, dtype=dtype)
         self.head[:, 1] = 1  # start queue head at ix=1
 
-        self.sharpen_tail = nn.Parameter(torch.tensor([initial_sharpen], dtype=dtype, device=device))
         self.tail = torch.zeros((batch_size, self.n_queue), device=device, dtype=dtype)
         self.tail[:, 0] = 1  # start queue tail at ix=0
 
@@ -215,9 +211,10 @@ def unproject_int(vector):
 for i in range(int_range_start, int_range_end):
     assert i == unproject_int(project_int(i))
 
-##########
+# @@@@@@@@@@
 #
 
+SHARP = 100
 put = torch.ones((BATCH_SIZE, )).to(DEVICE)
 no_put = torch.zeros((BATCH_SIZE, )).to(DEVICE)
 
@@ -230,23 +227,22 @@ no_null_op = torch.zeros((BATCH_SIZE, )).to(DEVICE)
 p = lambda x: project_int(x).unsqueeze(0).to(DEVICE) # batch friendly
 u = lambda x: unproject_int(x[0])
 
-
 q = Queue(N_QUEUE, VEC_SIZE)
 q.to(DEVICE)
-q.init(BATCH_SIZE, initial_sharpen=100, zero_offset=1e-3, device=DEVICE)
-p1 = q(put, no_get, no_null_op, p(1))
-p2 = q(put, no_get, no_null_op, p(2))
-p3 = q(put, no_get, no_null_op, p(3))
+q.init(BATCH_SIZE, zero_offset=1e-3, device=DEVICE)
+p1 = q(SHARP, SHARP, put, no_get, no_null_op, p(1))
+p2 = q(SHARP, SHARP, put, no_get, no_null_op, p(2))
+p3 = q(SHARP, SHARP, put, no_get, no_null_op, p(3))
 
-g1 = q(no_put, get, no_null_op, p(42))
-g2 = q(no_put, get, no_null_op, p(42))
+g1 = q(SHARP, SHARP, no_put, get, no_null_op, p(42))
+g2 = q(SHARP, SHARP, no_put, get, no_null_op, p(42))
 
-p4 = q(put, no_get, no_null_op, p(4))
-p5 = q(put, no_get, no_null_op, p(5))
+p4 = q(SHARP, SHARP, put, no_get, no_null_op, p(4))
+p5 = q(SHARP, SHARP, put, no_get, no_null_op, p(5))
 
-g3 = q(no_put, get, no_null_op, p(42))
-g4 = q(no_put, get, no_null_op, p(42))
-g5 = q(no_put, get, no_null_op, p(42))
+g3 = q(SHARP, SHARP, no_put, get, no_null_op, p(42))
+g4 = q(SHARP, SHARP, no_put, get, no_null_op, p(42))
+g5 = q(SHARP, SHARP, no_put, get, no_null_op, p(42))
 
 print()
 print(u(g1))

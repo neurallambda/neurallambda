@@ -18,10 +18,11 @@ But in the process, I learned:
   doesn't seem to hurt accuracy, but likely *would* for bigger systems.
 
 - Light Dropout is better than any other regularization I tried. Note, it
-  severely damages training loss, BUT, since I know the analytical solution, and
-  therefore know the "loss floor", I should question when the loss goes below
-  that floor. Even light dropout prevents that (eg Dropout(0.001)). Note,
-  `matched.leaky_relu` kinda sucks on its own, but with dropout is fine.
+  severely damages training loss, BUT in a good way. Since I know the analytical
+  solution, and therefore know the "loss floor", I should question when the loss
+  goes below that floor. Even light dropout prevents that (eg
+  Dropout(0.001)). Note, `matched.leaky_relu` kinda sucks on its own, but with
+  dropout is fine.
 
 - Regularization that failed: inhibitory-surround type things, pushing params away from known vecs, etc.
 
@@ -38,6 +39,7 @@ import random
 import string
 from datasets import Dataset
 from torch.utils.data.dataset import random_split
+from torch import cosine_similarity
 
 torch.set_printoptions(precision=3)
 print('\n'*10)

@@ -246,7 +246,7 @@ def step_neurallambda(nl, n_stack, start_address, total_steps, gc_steps):
     function will create some a helper stack, and some other helper
     functions.'''
 
-    nb = T.Neuralbeta(nl, n_stack)
+    nb = T.Neuralbeta(nl, n_stack, initial_sharpen_pointer=20)
     nb.push_address(start_address)
 
     debug_ixs = []

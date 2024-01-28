@@ -595,6 +595,7 @@ def reduce_step(
         nl,
 
         # Neuralbeta
+        sharpen_pointer,
         ir1,
         ir2,
         stack,
@@ -792,19 +793,19 @@ def reduce_step(
     # now.
 
     # 1. If the current term is a base type, we will need to pop the stack.
-    stack(base_should_push, base_should_pop, base_should_null_op, zero_vec)
+    stack(sharpen_pointer, base_should_push, base_should_pop, base_should_null_op, zero_vec)
 
     # 2. If the current term is an unreduced reference, let's push it on the
     # stack to get dealt with.
-    stack(should_push_1, should_pop_1, should_null_op_1, col1_addr)
-    stack(should_push_2, should_pop_2, should_null_op_2, col2_addr)
+    stack(sharpen_pointer, should_push_1, should_pop_1, should_null_op_1, col1_addr)
+    stack(sharpen_pointer, should_push_2, should_pop_2, should_null_op_2, col2_addr)
 
     # 3. If this term has 2 references, we need to check if they both have been
     # reduced. This would happen if this term was pushed, then other stuff got
     # pushed, then eventually reduced. Then we finally pop this original thing,
     # and if it indeed has both references now reduced, we can pop it off the
     # stack.
-    stack(should_push_3, should_pop_3, should_null_op_3, zero_vec)
+    stack(sharpen_pointer, should_push_3, should_pop_3, should_null_op_3, zero_vec)
 
     ir1 = ir1.clip(0, 1)
     ir2 = ir2.clip(0, 1)
@@ -813,7 +814,7 @@ def reduce_step(
 
 
 class Neuralbeta:
-    def __init__(self, nl, n_stack):
+    def __init__(self, nl, n_stack, initial_sharpen_pointer):
         STACK_INITIAL_SHARPEN = 100
         STACK_ZERO_OFFSET = 1e-3
 
@@ -832,11 +833,11 @@ class Neuralbeta:
         )
         self.stack.init(
             nl.batch_size,
-            initial_sharpen=STACK_INITIAL_SHARPEN,
             zero_offset=STACK_ZERO_OFFSET,
             device=nl.device,
             dtype=torch.float32
         )
+        self.sharpen_pointer = nn.Parameter(torch.tensor([initial_sharpen_pointer], dtype=torch.float))
 
     def push_address(self, address):
         ''' Push an address onto the stack. '''
@@ -844,6 +845,7 @@ class Neuralbeta:
         should_pop     = torch.zeros((self.nl.batch_size,), device=self.stack.device)
         should_null_op = torch.zeros((self.nl.batch_size,), device=self.stack.device)
         self.stack(
+            self.sharpen_pointer,
             should_push,
             should_pop,
             should_null_op,
@@ -859,6 +861,7 @@ class Neuralbeta:
             self.nl,
 
             # Neuralbeta
+            self.sharpen_pointer,
             self.ir1,
             self.ir2,
             self.stack,

@@ -29,11 +29,11 @@ class Stack(nn.Module):
         self.vec_size = vec_size
 
         # run init to populate
-        self.sharpen_k = None
         self.stack = None
         self.pointer = None
 
     def forward(self,
+                sharpen_pointer,
                 should_push,
                 should_pop,
                 should_null_op,
@@ -69,7 +69,7 @@ class Stack(nn.Module):
 
         ##########
         # Sharpen (softmax) pointers
-        self.pointer = torch.softmax(self.pointer * self.sharpen_k, dim=1)
+        self.pointer = torch.softmax(self.pointer * sharpen_pointer, dim=1)
         psum = self.pointer.sum(dim=1).unsqueeze(1)
         self.pointer = self.pointer / torch.maximum(psum, torch.zeros_like(psum) + 1e-8)
 
@@ -120,7 +120,7 @@ class Stack(nn.Module):
         new_p = torch.roll(self.pointer, shifts=-1)
         return new_stack, new_p, out
 
-    def init(self, batch_size, initial_sharpen, zero_offset, device, dtype=torch.float32):
+    def init(self, batch_size, zero_offset, device, dtype=torch.float32):
         '''Initialize the stack for a particular run.
 
         Args:
@@ -140,8 +140,6 @@ class Stack(nn.Module):
             inference).
         '''
         self.device = device
-
-        self.sharpen_k = nn.Parameter(torch.tensor([initial_sharpen], dtype=dtype, device=device))
 
         self.pointer = torch.zeros((batch_size, self.n_stack), device=device, dtype=dtype)
         self.pointer[:, 0] = 1 # start stack pointer at ix=0
