@@ -44,6 +44,10 @@ Demonstration:
 
 <TODO> : str -> terms -> mem -> neurallambda ---beta---> neurallambda -> mem -> terms -> str
 
+## Pedagogy
+
+- "It's all about constraining the system"
+
 
 ## Todo
 
@@ -53,15 +57,23 @@ Demonstration:
   * Computational Hierarchy: Pattern-matching < Prog Execution < Prog Validation < Prog Generation
   * References
 
+* NOISE IN STACK VIA "zero_offset" when dotpdting pointer with stack values
+
 * NeuralX ("neural" is such a great prefix)
   * [X] Neurallatch
-  * [ ] Neuralqueue
-  * [ ] Neurallist
+  * [X] Neuralqueue
+  * [ ] Neural List
+  * [ ] Neural Array / Addressable Storage
+  * [ ] Neural Dict / Content Addressable Storage
   * [ ] Simplified Find + Replace
-  * [ ] NeuralFSM
-  * [ ] NeuralPDA
-  * [ ] Neuraltree
-  * [ ] Neuralgraph
+  * [ ] Neural Heap
+  * [ ] Neural Set
+  * [ ] Neural FSM
+  * [ ] Neural PDA
+  * [ ] Neural Tree
+  * [ ] Neural Graph
+  * [ ] Neural Priority Queue
+  * [ ] Neural Dequeue
 
 
 * Empirical validation:
@@ -83,10 +95,14 @@ Demonstration:
     * PDA w queue instead of stack is also turing complete, I think
     * More: post machines, tag systems, register machines, a myriad of Cellular Automata
   * Loading memory: is there a nice differentiable way to read memory out from a bank of programs (akin to token embeddings, but, program embeddings here).
+  * Make a Dequeue (double ended queue, put and pop from L+R)
 
 * Error correcting of neuralsymbols (eg tags, integers, addresses)
   * Pre-trained + frozen hopfield net? It's differentiable, and, could be linear, so, possibly some big optimizations possible.
   * Brute force: `without_grad` just replace symbols from LUT. This wouldn't work for training though.
+
+* Dynamic computation time via ability to output "null tokens". Similar to
+  "delete tokens". This works if it's simultaneously outputting hidden state.
 
 * Optimizations:
   * [X] Based on profiling, memory looks good, cosine_similarity is slooow, predominantly because of a hypercomplex.dot_product, and hypercomplex.hadamard. Solved when I got rid of hypercomplex.
