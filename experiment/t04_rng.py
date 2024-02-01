@@ -271,24 +271,6 @@ if False:
 ##################################################
 # Models
 
-##########
-# RNN
-
-class RNNModel(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
-        super(RNNModel, self).__init__()
-        self.hidden_dim = hidden_dim
-        self.num_layers = num_layers
-
-        self.rnn = nn.RNN(output_dim, hidden_dim, num_layers, batch_first=True)
-        self.fc = nn.Linear(hidden_dim, output_dim)
-
-    def forward(self, x):
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_dim).to(x.device)
-        out, _ = self.rnn(x, h0)
-        out = self.fc(out[:, -1, :])
-        return out
-
 
 ##########
 # LSTM
@@ -337,90 +319,11 @@ class LSTMModel(nn.Module):
 
 
 ##########
-# Stack
+# Neuralsymbolics
 
-class StackLSTM(nn.Module):
+class NeuralstackOnly(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
-        super(StackLSTM, self).__init__()
-
-        ##########
-        # Stack
-
-        self.n_stack = 12
-        self.initial_sharpen = 5
-        self.stack_vec_size = input_dim
-
-        self.should_push    = nn.Sequential(nn.Linear(hidden_dim, 1), nn.Sigmoid())
-        self.should_pop     = nn.Sequential(nn.Linear(hidden_dim, 1), nn.Sigmoid())
-        self.should_null_op = nn.Sequential(nn.Linear(hidden_dim, 1), nn.Sigmoid())
-
-        ##########
-        # Net
-
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
-        self.lc1 = nn.LSTMCell(
-            input_dim + # input
-            self.stack_vec_size,
-            hidden_dim)
-        self.lc2 = nn.LSTMCell(hidden_dim, hidden_dim)
-        self.fc = nn.Linear(hidden_dim, output_dim)
-
-    def forward(self, x):
-        # Stack 1
-        device = x.device
-        batch_size = x.shape[0]
-        vec_size = x.shape[2]
-        stack = S.Stack(self.n_stack, self.stack_vec_size)
-        stack.init(batch_size, self.initial_sharpen, zero_offset, device)
-
-        # Initialize the hidden and cell states to zeros
-        h1 = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
-        c1 = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
-        h1s = []
-
-        for i in range(x.size(1)):
-            s = stack.read()
-            inp = x[:, i, :]
-            h1, c1 = self.lc1(
-                torch.concat([inp, s], dim=1),
-                (h1, c1))
-            h1s.append(h1)
-
-            # Stack
-            push = self.should_push(c1).squeeze(-1)
-            pop = self.should_pop(c1).squeeze(-1)
-            null_op = self.should_null_op(c1).squeeze(-1)
-
-            stack(push, pop, null_op, inp)
-
-        # Run LSTM2
-        h1s = torch.stack(h1s, dim=1) # input to lstm2
-
-        h2 = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
-        c2 = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
-        h2s = []
-
-        for i in range(x.size(1)):
-            h2, c2 = self.lc2(h1s[:, i, :], (h2, c2))
-            h2s.append(h2)
-
-        # Stack the outputs (hidden states) from each time step
-        outputs = torch.stack(h2s, dim=1)
-
-        # Apply the linear layer to each time step's output
-        # We reshape the outputs tensor to (-1, self.hidden_dim) before applying the linear layer
-        # Then reshape it back to (batch_size, seq_len, output_dim)
-        out = self.fc(outputs.view(-1, self.hidden_dim))
-        out = out.view(-1, x.size(1), self.output_dim)
-
-        return out, {}
-
-
-class NeuralLambdaOnly(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
-        super(NeuralLambdaOnly, self).__init__()
+        super(NeuralstackOnly, self).__init__()
 
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
@@ -432,6 +335,7 @@ class NeuralLambdaOnly(nn.Module):
         self.initial_sharpen = 5
         self.stack_vec_size = input_dim
         self.stack = S.Stack(self.n_stack, self.stack_vec_size)
+        self.sharpen_pointer = nn.Parameter(torch.tensor([5.0]))
 
         ##########
         # Latch
@@ -439,10 +343,19 @@ class NeuralLambdaOnly(nn.Module):
 
         ##########
         # NNs
+
+        HIDDEN_DIM = 128
+
         self.should_pop = nn.Parameter(torch.randn(input_dim))
         self.null_symbol = nn.Parameter(torch.randn(output_dim))
         self.dropout = torch.nn.Dropout(0.02)
 
+        # with torch.no_grad():
+        #     print()
+        #     print('CHEATING')
+        #     self.latch.enable[:] = project_int(REFLECT_SYMBOL)
+        #     self.should_pop[:] = project_int(REFLECT_SYMBOL)
+        #     # self.null_symbol[:] = project_int(NULL_SYMBOL)
 
     def forward(self, x):
         # Stack Init
@@ -450,7 +363,7 @@ class NeuralLambdaOnly(nn.Module):
         batch_size = x.shape[0]
         vec_size = x.shape[2]
         # stack = S.Stack(self.n_stack, self.stack_vec_size)
-        self.stack.init(batch_size, self.initial_sharpen, zero_offset, device)
+        self.stack.init(batch_size, zero_offset, device)
 
         # Latch Init
         # latch_state = torch.zeros((batch_size, self.input_dim), device=device) + zero_offset
@@ -483,7 +396,7 @@ class NeuralLambdaOnly(nn.Module):
             null_op = torch.zeros_like(pop)
 
             # Update Stack
-            self.stack(push, pop, null_op, inp)
+            self.stack(self.sharpen_pointer, push, pop, null_op, inp)
             s = self.stack.read()
 
             out = (
@@ -518,6 +431,7 @@ class NeuralLambdaOnly(nn.Module):
             'pops': {'data':torch.stack(pops, dim=1), 'fn': lambda x: x.tolist()},
             'stack': {'data': torch.stack(stack_tops, dim=1), 'fn': unproject_int},
         }
+
 
 
 ##################################################
@@ -621,10 +535,9 @@ def accuracy(model, val_dl, device, debug=False):
 ##########
 # Setup
 
-# MyModel = RNNModel
-MyModel = LSTMModel
-# MyModel = StackLSTM
-# MyModel = NeuralLambdaOnly
+
+# MyModel = LSTMModel
+MyModel = NeuralLambdaOnly
 
 model = MyModel(
     input_dim=VEC_SIZE,

@@ -134,7 +134,7 @@ class Queue(nn.Module):
         new_head = torch.roll(self.head, shifts=1)
         return new_queue, new_head, out
 
-    def init(self, batch_size, zero_offset, device, dtype=torch.float32):
+    def init(self, batch_size, zero_offset, device, init_head_ix=1, init_tail_ix=0, dtype=torch.float32):
         '''Initialize the queue for a particular run.
 
         Args:
@@ -156,10 +156,10 @@ class Queue(nn.Module):
         self.device = device
 
         self.head = torch.zeros((batch_size, self.n_queue), device=device, dtype=dtype)
-        self.head[:, 1] = 1  # start queue head at ix=1
+        self.head[:, init_head_ix] = 1  # start queue head at ix=1
 
         self.tail = torch.zeros((batch_size, self.n_queue), device=device, dtype=dtype)
-        self.tail[:, 0] = 1  # start queue tail at ix=0
+        self.tail[:, init_tail_ix] = 1  # start queue tail at ix=0
 
         self.queue = torch.zeros(
             (batch_size,
@@ -173,80 +173,81 @@ class Queue(nn.Module):
 
 
 # @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+# Tests
+
+if False:
+    BATCH_SIZE = 32
+    DEVICE = 'cuda'
+    VEC_SIZE = 2048
+    N_QUEUE = 16
+
+    ##########
+    # Project Ints to Vectors
+
+    int_range_start = -200
+    int_range_end   =  200
+
+    # A matrix where each row ix represents the int, projected to VEC_SIZE
+    int_vecs = torch.stack([
+        torch.randn((VEC_SIZE,))
+        for _ in range(int_range_start, int_range_end + 1)
+    ]).to(DEVICE)
+
+    def project_int(integer):
+        """Projects an integer to a vector space."""
+        index = integer - int_range_start
+        return int_vecs[index]
+
+    def unproject_int(vector):
+        """Unprojects a vector from the vector space back to an integer.
+
+        Assumes matrix formatted `vector`.
+        """
+        cs = torch.cosine_similarity(vector.unsqueeze(0), int_vecs, dim=1)
+        max_index = torch.argmax(cs).item()
+        return max_index + int_range_start
 
 
-BATCH_SIZE = 32
-DEVICE = 'cuda'
-VEC_SIZE = 2048
-N_QUEUE = 16
+    # Test round tripping
+    for i in range(int_range_start, int_range_end):
+        assert i == unproject_int(project_int(i))
 
-##########
-# Project Ints to Vectors
+    # @@@@@@@@@@
+    #
 
-int_range_start = -200
-int_range_end   =  200
+    SHARP = 100
+    put = torch.ones((BATCH_SIZE, )).to(DEVICE)
+    no_put = torch.zeros((BATCH_SIZE, )).to(DEVICE)
 
-# A matrix where each row ix represents the int, projected to VEC_SIZE
-int_vecs = torch.stack([
-    torch.randn((VEC_SIZE,))
-    for _ in range(int_range_start, int_range_end + 1)
-]).to(DEVICE)
+    get = torch.ones((BATCH_SIZE, )).to(DEVICE)
+    no_get = torch.zeros((BATCH_SIZE, )).to(DEVICE)
 
-def project_int(integer):
-    """Projects an integer to a vector space."""
-    index = integer - int_range_start
-    return int_vecs[index]
+    null_op = torch.ones((BATCH_SIZE, )).to(DEVICE)
+    no_null_op = torch.zeros((BATCH_SIZE, )).to(DEVICE)
 
-def unproject_int(vector):
-    """Unprojects a vector from the vector space back to an integer.
+    p = lambda x: project_int(x).unsqueeze(0).to(DEVICE) # batch friendly
+    u = lambda x: unproject_int(x[0])
 
-    Assumes matrix formatted `vector`.
-    """
-    cs = torch.cosine_similarity(vector.unsqueeze(0), int_vecs, dim=1)
-    max_index = torch.argmax(cs).item()
-    return max_index + int_range_start
+    q = Queue(N_QUEUE, VEC_SIZE)
+    q.to(DEVICE)
+    q.init(BATCH_SIZE, zero_offset=1e-3, device=DEVICE)
+    p1 = q(SHARP, SHARP, put, no_get, no_null_op, p(1))
+    p2 = q(SHARP, SHARP, put, no_get, no_null_op, p(2))
+    p3 = q(SHARP, SHARP, put, no_get, no_null_op, p(3))
 
+    g1 = q(SHARP, SHARP, no_put, get, no_null_op, p(42))
+    g2 = q(SHARP, SHARP, no_put, get, no_null_op, p(42))
 
-# Test round tripping
-for i in range(int_range_start, int_range_end):
-    assert i == unproject_int(project_int(i))
+    p4 = q(SHARP, SHARP, put, no_get, no_null_op, p(4))
+    p5 = q(SHARP, SHARP, put, no_get, no_null_op, p(5))
 
-# @@@@@@@@@@
-#
+    g3 = q(SHARP, SHARP, no_put, get, no_null_op, p(42))
+    g4 = q(SHARP, SHARP, no_put, get, no_null_op, p(42))
+    g5 = q(SHARP, SHARP, no_put, get, no_null_op, p(42))
 
-SHARP = 100
-put = torch.ones((BATCH_SIZE, )).to(DEVICE)
-no_put = torch.zeros((BATCH_SIZE, )).to(DEVICE)
-
-get = torch.ones((BATCH_SIZE, )).to(DEVICE)
-no_get = torch.zeros((BATCH_SIZE, )).to(DEVICE)
-
-null_op = torch.ones((BATCH_SIZE, )).to(DEVICE)
-no_null_op = torch.zeros((BATCH_SIZE, )).to(DEVICE)
-
-p = lambda x: project_int(x).unsqueeze(0).to(DEVICE) # batch friendly
-u = lambda x: unproject_int(x[0])
-
-q = Queue(N_QUEUE, VEC_SIZE)
-q.to(DEVICE)
-q.init(BATCH_SIZE, zero_offset=1e-3, device=DEVICE)
-p1 = q(SHARP, SHARP, put, no_get, no_null_op, p(1))
-p2 = q(SHARP, SHARP, put, no_get, no_null_op, p(2))
-p3 = q(SHARP, SHARP, put, no_get, no_null_op, p(3))
-
-g1 = q(SHARP, SHARP, no_put, get, no_null_op, p(42))
-g2 = q(SHARP, SHARP, no_put, get, no_null_op, p(42))
-
-p4 = q(SHARP, SHARP, put, no_get, no_null_op, p(4))
-p5 = q(SHARP, SHARP, put, no_get, no_null_op, p(5))
-
-g3 = q(SHARP, SHARP, no_put, get, no_null_op, p(42))
-g4 = q(SHARP, SHARP, no_put, get, no_null_op, p(42))
-g5 = q(SHARP, SHARP, no_put, get, no_null_op, p(42))
-
-print()
-print(u(g1))
-print(u(g2))
-print(u(g3))
-print(u(g4))
-print(u(g5))
+    print()
+    print(u(g1))
+    print(u(g2))
+    print(u(g3))
+    print(u(g4))
+    print(u(g5))
