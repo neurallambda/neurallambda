@@ -16,6 +16,7 @@ import neurallambda.memory as M
 import neurallambda.stack as S
 import neurallambda.symbol as Sym
 from torch import cosine_similarity
+import math
 
 
 ##################################################
@@ -873,3 +874,73 @@ class Neuralbeta:
         self.ir1 = ir1
         self.ir2 = ir2
         return None # this function mutates class's state
+
+
+##################################################
+# CosineSimilarity
+
+class Weight(nn.Module):
+    def __init__(self, input_features, output_features, init_method='kaiming'):
+        super(Weight, self).__init__()
+        self.weight = nn.Parameter(torch.empty(input_features, output_features))
+        self.init_method = init_method
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        if self.init_method == 'kaiming':
+            nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        elif self.init_method == 'xavier':
+            nn.init.xavier_uniform_(self.weight)
+        elif self.init_method == 'orthogonal':
+            nn.init.orthogonal_(self.weight)
+        else:
+            raise ValueError(f"Invalid initialization method: {self.init_method}")
+
+    def forward(self, input):
+        raise Exception("You must not call Weight's forward function ever.")
+
+class CosineSimilarity(nn.Module):
+    def __init__(self, weight, dim, unsqueeze_x1=[], unsqueeze_x2=[]):
+        super(CosineSimilarity, self).__init__()
+        self.weight = weight.weight
+        self.dim = dim
+        self.unsqueeze_x1 = unsqueeze_x1
+        self.unsqueeze_x2 = unsqueeze_x2
+
+    def forward(self, input):
+        for ix in self.unsqueeze_x1:
+            input = input.unsqueeze(ix)
+
+        weight = self.weight
+        for ix in self.unsqueeze_x2:
+            weight = weight.unsqueeze(ix)
+
+        return torch.cosine_similarity(input, weight, dim=self.dim)
+
+class ReverseCosineSimilarity(nn.Module):
+    '''When you project inputs forward, you can learn how similar each was to a
+    known "symbol" within the `weight` tensor. This similarity is in [-1, 1]. If
+    you project that scalar backwards, you can recover the original vector. If
+    you project back something close to 0, it won't be too similar to anything
+    in the known-symbols tensor.
+
+    '''
+    def __init__(self, cs):
+        super(ReverseCosineSimilarity, self).__init__()
+        self.cs = cs
+
+    def forward(self, input):
+        for ix in self.cs.unsqueeze_x1:
+            input = input.unsqueeze(ix)
+
+        weight = self.cs.weight.t()
+        for ix in self.cs.unsqueeze_x2:
+            weight = weight.unsqueeze(ix)
+
+        input, weight = torch.broadcast_tensors(input, weight)
+
+        # breakpoint()
+        return torch.sum(
+            input * weight,
+            dim=self.cs.dim
+        )

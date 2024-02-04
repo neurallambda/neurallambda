@@ -52,12 +52,23 @@ Demonstration:
 ## Todo
 
 
+* Toy Problems, to test components:
+  * [ ] Sum Sequence
+  * [ ] RNG
+  * [ ] Balanced Parens?
+  * [ ] Sort inputs
+  * [ ] Find and replace
+  * [ ] Find and emit
+
 * Pedagogy:
   * Motivation of 4 tensors: tag tensor allows sum types, columns 1 and 2 allow product types
   * Computational Hierarchy: Pattern-matching < Prog Execution < Prog Validation < Prog Generation
   * References
 
-* NOISE IN STACK VIA "zero_offset" when dotpdting pointer with stack values
+* NOISE IN STACK VIA "zero_offset" when dotpdting pointer with stack values (IE zero_offset is highly biased, and adds up without cancelling). Randn may be too expensive to generate, plus not backproppable. No fixed value works. Maybe, diminish the values toward zero, and roll them (which makes them orthogonal). Test quantitty of noise reduction of this technique.
+
+* Dynamic Time: output null tokens if you need more time to think
+* Dynamic Space: Can multiple objects be added to a queue, stack, or array, in one timestep? If so, error correction would likely help.
 
 * NeuralX ("neural" is such a great prefix)
   * [X] Neurallatch
