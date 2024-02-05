@@ -43,7 +43,7 @@ MAX_VAL_SEQUENCE_LENGTH = 10  # maximum length of the sequence
 BATCH_SIZE = 100
 LR = 1e-2
 
-NUM_EPOCHS = 600
+NUM_EPOCHS = 100
 
 
 ##################################################
@@ -413,13 +413,11 @@ class Neuralsymbol(nn.Module):
                  ):
         super(Neuralsymbol, self).__init__()
 
-        n_symbols = 64
+        n_symbols = 128
         init_sharpen = 5.0
         dropout_p = 0.05
         n_control_stack = 8
         n_work_stack = 8
-
-        self.symbol_space = 128
 
         vec_size = input_dim
         self.vec_size = vec_size
@@ -438,6 +436,13 @@ class Neuralsymbol(nn.Module):
         # Identifying Symbols
         sym_w = Weight(self.input_dim, self.n_symbols)
         self.sym_w = sym_w
+
+        # preload some known symbols
+        with torch.no_grad():
+            for ix, i in enumerate(tokens + list(range(-40, 40))):
+                self.sym_w.weight[:, ix] = project(i)
+
+
 
         # cos sim for multiple stacked vecs
         cos_sim = CosineSimilarity(
@@ -501,7 +506,7 @@ class Neuralsymbol(nn.Module):
         # Computation
         #   Inp: control, work
         #   Out: value
-        HH = 64
+        HH = 128
         INIT_METHOD = 'kaiming'
 
         self.ff = nn.Sequential(
@@ -686,8 +691,8 @@ def accuracy(model, val_dl, device, debug=False):
 ##########
 # Setup
 
-MyModel = LSTMModel
-# MyModel = Neuralsymbol
+# MyModel = LSTMModel
+MyModel = Neuralsymbol
 
 model = MyModel(
     input_dim=VEC_SIZE,
