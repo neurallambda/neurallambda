@@ -161,6 +161,10 @@ class Queue(nn.Module):
         self.tail = torch.zeros((batch_size, self.n_queue), device=device, dtype=dtype)
         self.tail[:, init_tail_ix] = 1  # start queue tail at ix=0
 
+
+        # TODO: this zero_offset is likely introducing strong noise when
+        #       `forward` is called, and all the addresses get summed down into
+        #       one value.
         self.queue = torch.zeros(
             (batch_size,
              self.n_queue,

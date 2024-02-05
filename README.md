@@ -96,6 +96,7 @@ Demonstration:
 * Misc:
   * Improve test coverage
   * Does my computational hierarchy map back to the Chomsky hierarchy?
+  * Neuralbeta currently uses kv_loopkup and replace functions that might be better abstracted as a Neuralarray.
   * Try other machines/turing machines than lambda calc:
     * combinatory logic, eg SKI
     * a ticker tape model
@@ -134,6 +135,16 @@ Demonstration:
     * same vec_size across addresses, tags, col1, col2
     * This neuralstack vs others?
 
+* For Fun:
+  * Arrow composition of nn.Modules, instead of just nn.Sequential. Haskell has
+    an Category/Arrow semantics that would be great, especially for composing
+    multiple streams of things such as joining tuples of values into one Linear
+    operation, and then splitting the result back out into say a different
+    shapped tuple. (This is likely too big a distraction). The advantages of
+    this are statically knowing the computation graph ahead of time, so, it
+    could be easier to optimize. Another is, if devs need to write a lot of
+    different architectures, it could be to beneficial to have a nice "Free" (as
+    in cat theory) data structure, which was based on an Arrow.
 
 ## Zip Repo
 

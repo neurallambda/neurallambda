@@ -900,22 +900,98 @@ class Weight(nn.Module):
         raise Exception("You must not call Weight's forward function ever.")
 
 class CosineSimilarity(nn.Module):
-    def __init__(self, weight, dim, unsqueeze_x1=[], unsqueeze_x2=[]):
+    def __init__(self, weight, dim, unsqueeze_inputs=[], unsqueeze_weights=[]):
         super(CosineSimilarity, self).__init__()
         self.weight = weight.weight
         self.dim = dim
-        self.unsqueeze_x1 = unsqueeze_x1
-        self.unsqueeze_x2 = unsqueeze_x2
+        self.unsqueeze_inputs = unsqueeze_inputs
+        self.unsqueeze_weights = unsqueeze_weights
 
     def forward(self, input):
-        for ix in self.unsqueeze_x1:
+        for ix in self.unsqueeze_inputs:
             input = input.unsqueeze(ix)
 
         weight = self.weight
-        for ix in self.unsqueeze_x2:
+        for ix in self.unsqueeze_weights:
             weight = weight.unsqueeze(ix)
 
         return torch.cosine_similarity(input, weight, dim=self.dim)
+
+
+    def diagnose(self, input):
+        '''An interpreter-time helper to help devs get shapes right.'''
+        print()
+
+        # Normal weights
+        print('Input:', input.shape)
+        print('Weight:', self.weight.shape)
+        print()
+
+        # # Expected input
+        # einput = torch.empty_like(self.weight)
+        # for ix in self.unsqueeze_weights:
+        #     einput = einput.unsqueeze(ix) #
+        # for ix in self.unsqueeze_inputs:
+        #     einput = einput.squeeze(ix) # squeeze here
+        # print('Exp Input:', einput.shape)
+        # print()
+
+        # Unsquoze Input
+        uinput = torch.empty_like(input)
+        for ix in self.unsqueeze_inputs:
+            uinput = uinput.unsqueeze(ix)
+        print('Unsquoze Input :', uinput.shape)
+
+        # Unsquoze Weights
+        uweight = torch.empty_like(self.weight)
+        for ix in self.unsqueeze_weights:
+            uweight = uweight.unsqueeze(ix)
+        print('Unsquoze Weight:', uweight.shape)
+        print()
+
+        # # Unsquoze Expected Input
+        # ueinput = torch.empty_like(einput)
+        # for ix in self.unsqueeze_inputs:
+        #     ueinput = ueinput.unsqueeze(ix)
+        # print('Unsquoze Exp Input :', ueinput.shape)
+        # print()
+
+        # Broadcasted
+
+        # beinput, beweight = torch.broadcast_tensors(ueinput, uweight)
+        # print('Broadcasted Weight:', beweight.shape)
+        # print('Broadcasted Exp Input :', beinput.shape)
+        # print()
+
+        binput, bweight = torch.broadcast_tensors(uinput, uweight)
+        print('Broadcasted Weight:', binput.shape)
+        print('Broadcasted Exp Input :', bweight.shape)
+        print()
+
+        # Ouptut
+        out = self(input)
+        print('Out:', out.shape)
+
+
+# @@@@@@@@@@
+# Sandbox to align sizes
+
+# batch_size = 7
+# vec_size = 1024
+# n_symbols = 13
+
+# CosineSimilarity(Weight(vec_size, n_symbols),
+#                  dim=1,
+#                  unsqueeze_inputs=[2],
+#                  unsqueeze_weights=[0]).diagnose(torch.zeros(batch_size, vec_size))
+# print('----------')
+# CosineSimilarity(Weight(vec_size, n_symbols),
+#                  dim=2,
+#                  unsqueeze_inputs=[-1],
+#                  unsqueeze_weights=[0, 0]).diagnose(torch.zeros(batch_size, 41, vec_size))
+
+# @@@@@@@@@@
+
 
 class ReverseCosineSimilarity(nn.Module):
     '''When you project inputs forward, you can learn how similar each was to a
@@ -930,11 +1006,11 @@ class ReverseCosineSimilarity(nn.Module):
         self.cs = cs
 
     def forward(self, input):
-        for ix in self.cs.unsqueeze_x1:
+        for ix in self.cs.unsqueeze_inputs:
             input = input.unsqueeze(ix)
 
         weight = self.cs.weight.t()
-        for ix in self.cs.unsqueeze_x2:
+        for ix in self.cs.unsqueeze_weights:
             weight = weight.unsqueeze(ix)
 
         input, weight = torch.broadcast_tensors(input, weight)
