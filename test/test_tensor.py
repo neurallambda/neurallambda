@@ -42,7 +42,7 @@ def test_cosine_similarity_forward_shape():
     input_features, output_features = 10, 1024
     batch_size = 4
     w = Weight(input_features, output_features)
-    model = CosineSimilarity(w, dim=1, unsqueeze_x1=[2], unsqueeze_x2=[0])
+    model = CosineSimilarity(w, dim=1, unsqueeze_inputs=[2], unsqueeze_weights=[0])
     input_tensor = torch.randn(batch_size, input_features)
     output = model(input_tensor)
     assert output.shape == (batch_size, output_features), f"Output shape does not match expected shape, got: {output.shape}"
@@ -51,7 +51,7 @@ def test_cosine_similarity_for_identical_vectors():
     n_vectors, vec_size = 13, 4096
     batch_size = 7
     w = Weight(n_vectors, vec_size)
-    model = CosineSimilarity(w, unsqueeze_x1=[1], unsqueeze_x2=[0], dim=2)
+    model = CosineSimilarity(w, unsqueeze_inputs=[1], unsqueeze_weights=[0], dim=2)
 
     inputs = w.weight.clone().detach()  # Clone the weight to use as an input
     inputs = inputs[:batch_size]
@@ -68,7 +68,7 @@ def test_cosine_similarity_for_dissimilar_vectors():
     n_vectors, vec_size = 13, 4096
     batch_size = 7
     w = Weight(n_vectors, vec_size)
-    model = CosineSimilarity(w, unsqueeze_x1=[1], unsqueeze_x2=[0], dim=2)
+    model = CosineSimilarity(w, unsqueeze_inputs=[1], unsqueeze_weights=[0], dim=2)
 
     inputs = torch.randn(batch_size, vec_size)
 
@@ -105,7 +105,7 @@ def test_cosine_similarity_with_edge_cases():
 def test_cosine_similarity_for_weird():
     n_vectors, vec_size = 13, 2048
     w = Weight(n_vectors, vec_size)
-    model = CosineSimilarity(w, unsqueeze_x1=[2], unsqueeze_x2=[0, 0, -1, -1], dim=3)
+    model = CosineSimilarity(w, unsqueeze_inputs=[2], unsqueeze_weights=[0, 0, -1, -1], dim=3)
     ww = w.weight.clone().detach()  # Clone the weight to use as an input
 
     inputs = torch.randn(3, 1, vec_size, 5, 1)
@@ -130,7 +130,7 @@ def test_reverse_cosine_similarity_for_weird():
 
     n_vectors, vec_size = 13, 2048
     w = Weight(n_vectors, vec_size)
-    fwd = CosineSimilarity(w, unsqueeze_x1=[2], unsqueeze_x2=[0, 0, -1, -1], dim=3)
+    fwd = CosineSimilarity(w, unsqueeze_inputs=[2], unsqueeze_weights=[0, 0, -1, -1], dim=3)
     bwd = ReverseCosineSimilarity(fwd)
 
     ww = w.weight.clone().detach()  # Clone the weight to use as an input

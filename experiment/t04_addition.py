@@ -21,7 +21,7 @@ from torch import cosine_similarity, einsum
 from torch.nn.functional import elu, selu, gelu, leaky_relu
 import neurallambda.symbol as Sym
 import copy
-from neurallambda.tensor import CosineSimilarity
+from neurallambda.tensor import CosineSimilarity, Weight, ReverseCosineSimilarity
 
 torch.manual_seed(152)
 
@@ -34,15 +34,16 @@ PAUSE_APPEND_INDEX = -3  # append tokens before [..., L, 42, R]
 DEVICE = 'cuda'
 VEC_SIZE = 512
 
-TRAIN_SPLIT = 0.5
-BATCH_SIZE = 200
+NUM_TRAIN_SAMPLES = 500  # total number of samples in the dataset
+MAX_TRAIN_SEQUENCE_LENGTH = 5  # maximum length of the sequence
 
-NUM_SAMPLES = 2000  # total number of samples in the dataset
-MAX_SEQUENCE_LENGTH = 5  # maximum length of the sequence
+NUM_VAL_SAMPLES = 100
+MAX_VAL_SEQUENCE_LENGTH = 10  # maximum length of the sequence
 
-LR = 5
+BATCH_SIZE = 100
+LR = 1e-2
 
-NUM_EPOCHS = 200
+NUM_EPOCHS = 600
 
 
 ##################################################
@@ -104,7 +105,6 @@ for item in modified_data:
         e = insert_index + num_tokens
     assert item['inputs'][s:e] == ['T'] * num_tokens
 
-
 # @@@@@@@@@@
 
 
@@ -164,15 +164,25 @@ def generate_addition_synthetic_data(num_samples, max_length):
         })
     return data
 
-synthetic_data = generate_addition_synthetic_data(NUM_SAMPLES, MAX_SEQUENCE_LENGTH)
+# TRAIN
+train_data = generate_addition_synthetic_data(NUM_TRAIN_SAMPLES, MAX_TRAIN_SEQUENCE_LENGTH)
 
 # Inject pause tokens
-synthetic_data = insert_at_ix(synthetic_data, PAUSE_NUM_APPEND, PAUSE_APPEND_INDEX, symbol=THINKING_SYMBOL, null_symbol=NULL_SYMBOL)
-# synthetic_data = irradiate_tokens(synthetic_data, PAUSE_IRRADIATION_P, symbol=THINKING_SYMBOL, null_symbol=NULL_SYMBOL)
+train_data = insert_at_ix(train_data, PAUSE_NUM_APPEND, PAUSE_APPEND_INDEX, symbol=THINKING_SYMBOL, null_symbol=NULL_SYMBOL)
+# train_data = irradiate_tokens(train_data, PAUSE_IRRADIATION_P, symbol=THINKING_SYMBOL, null_symbol=NULL_SYMBOL)
 
-train_size = int(TRAIN_SPLIT * len(synthetic_data))
-train_data = synthetic_data[:train_size]
-val_data = synthetic_data[train_size:]
+# train_size = int(TRAIN_SPLIT * len(synthetic_data))
+# train_data = synthetic_data[:train_size]
+# val_data = synthetic_data[train_size:]
+
+# VAL
+
+val_data = generate_addition_synthetic_data(NUM_TRAIN_SAMPLES, MAX_TRAIN_SEQUENCE_LENGTH)
+
+# Inject pause tokens
+val_data = insert_at_ix(val_data, PAUSE_NUM_APPEND, PAUSE_APPEND_INDEX, symbol=THINKING_SYMBOL, null_symbol=NULL_SYMBOL)
+# val_data = irradiate_tokens(val_data, PAUSE_IRRADIATION_P, symbol=THINKING_SYMBOL, null_symbol=NULL_SYMBOL)
+
 
 padding_vec = project(PADDING_SYMBOL)
 
@@ -330,66 +340,188 @@ class LSTMModel(nn.Module):
         return out, {}
 
 
-
 ##################################################
 #
 
 
+# @@@@@@@@@@
+# Sandbox for aligning shapes
+
+if False:
+    batch_size = 67
+    vec_size = 1024
+    n_symbols = 13
+    n_inp_vecs = 3
+    cs = CosineSimilarity(
+        Weight(vec_size, n_symbols),
+        dim=2,
+        unsqueeze_inputs=[-1],
+        unsqueeze_weights=[0, 0])
+    inp = torch.zeros(batch_size, n_inp_vecs, vec_size)
+    cs.diagnose(inp)
+    out = cs(inp)
+    assert out.shape == torch.Size([batch_size, n_inp_vecs, n_symbols])
+
+
+# @@@@@@@@@@
+
+
+class Stack(nn.Module):
+    def __init__(self, dim=1):
+        super(Stack, self).__init__()
+        self.dim = dim
+
+    def forward(self, inputs):
+        return torch.stack(inputs, dim=self.dim)
+
+class Cat(nn.Module):
+    def __init__(self, dim=-1):
+        super(Cat, self).__init__()
+        self.dim = dim
+
+    def forward(self, inputs):
+        # inputs is a tuple of tensors
+        # Each input tensor shape=[batch, features...]
+        return torch.cat(inputs, dim=self.dim)
+
+class Parallel(nn.Module):
+    def __init__(self, module_tuple):
+        super(Parallel, self).__init__()
+        self.ms = nn.ModuleList(module_tuple)
+
+    def forward(self, inputs):
+        # inputs is a tuple of tensors, parallelizing operations across the tuple
+        # Each input tensor shape=[batch, features...]
+        outputs = tuple(module(input) for module, input in zip(self.ms, inputs))
+        return outputs  # Output is a tuple of tensors, shapes depend on respective modules
+
+class Split(nn.Module):
+    def __init__(self, split_sizes, dim=-1):
+        super(Split, self).__init__()
+        self.split_sizes = split_sizes  # Tuple of sizes to split the tensor into
+        self.dim = dim
+
+    def forward(self, input):
+        # input shape=[batch, combined features...]
+        # torch.split returns a tuple of tensors split according to self.split_sizes
+        return torch.split(input, self.split_sizes, dim=self.dim)  # Output shapes depend on self.split_sizes
+
+
 class Neuralsymbol(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, n_queue=4, n_stack=2, init_sharpen=5.0):
+    def __init__(self,
+                 input_dim, hidden_dim, output_dim,
+                 ):
         super(Neuralsymbol, self).__init__()
+
+        n_symbols = 64
+        init_sharpen = 5.0
+        dropout_p = 0.05
+        n_control_stack = 8
+        n_work_stack = 8
 
         self.symbol_space = 128
 
-        DROPOUT = 0.2
+        vec_size = input_dim
+        self.vec_size = vec_size
 
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
+        self.input_dim       = input_dim
+        self.hidden_dim      = hidden_dim
+        self.output_dim      = output_dim
+        self.n_symbols       = n_symbols
+        self.dropout_p       = dropout_p
+        self.n_control_stack = n_control_stack
+        self.n_work_stack    = n_work_stack
 
-        id = self.input_dim
-        hd = self.hidden_dim
-        od = self.output_dim
+        self.zero_offset = 1e-5
 
+        ##########
         # Identifying Symbols
-        self.sym = CosineSimilarity(id, self.symbol_space)
+        sym_w = Weight(self.input_dim, self.n_symbols)
+        self.sym_w = sym_w
 
-        # Stack 1: Control Stack
-        self.s1 = S.Stack(n_stack, input_dim) # control stack
-        self.sharp1 = nn.Parameter(torch.tensor([init_sharpen]))
+        # cos sim for multiple stacked vecs
+        cos_sim = CosineSimilarity(
+            sym_w,
+            dim=2,
+            unsqueeze_inputs=[-1],    # (batch, N, vec_size, _)  # control + input
+            unsqueeze_weights=[0, 0], # (_,     _, vec_size, n_symbols)
+        ) # (batch, N, n_symbols)
 
-        s1_inp_dim = id + id # control dim + input dim
-        s2_out_dim = id + id # control_op + control_val
-        self.decide1 = nn.Sequential(CosineSimilarity(s1_inp_dim, hd), nn.GELU(), nn.Dropout(DROPOUT),
-                                     CosineSimilarity(hd, 1), nn.Sigmoid())
+        # cos sim for a single vec
+        cos_sim_1 = CosineSimilarity(
+            sym_w,
+            dim=1,
+            unsqueeze_inputs=[-1],    # (batch, vec_size, _)
+            unsqueeze_weights=[0],    # (_,     vec_size, n_symbols)
+        ) # (batch, n_symbols)
 
 
+        ##########
+        # Control Stack
+        self.control_stack = S.Stack(n_control_stack, input_dim) # control stack
+        self.control_sharp = nn.Parameter(torch.tensor([init_sharpen]))
 
-        # Stack 2: Working Memory Stack
-        self.s2 = S.Stack(n_stack, input_dim) # work stack
+        # Control Ops:
+        #   Inp: control dim + input dim
+        #   Out: control_op + control_val
+        self.control = nn.Sequential(
+            Stack(dim=1), # input = (control, input)
+            cos_sim,
+            nn.Flatten(start_dim=1, end_dim=2), # (batch, 2 * n_symbols)
+            nn.GELU(),
+            nn.Dropout(self.dropout_p),
+            nn.Linear(n_symbols * 2, 3 + vec_size), #(batch, control_decision + control_value)
+            Split([1, 1, 1, vec_size]),
+            Parallel([nn.Sigmoid(), nn.Sigmoid(), nn.Sigmoid(), nn.Tanh()]),
+        )
 
 
-        self.zero_offset = 1e-3
+        ##########
+        # Working Stack
+
+        self.work_stack = S.Stack(n_work_stack, input_dim) # work stack
+        self.work_sharp = nn.Parameter(torch.tensor([init_sharpen]))
+
+        # Control Ops:
+        #   Inp: work dim + input dim
+        #   Out: work_op + work_val
+        self.work = nn.Sequential(
+            Stack(dim=1), # input = (control, work, input)
+            cos_sim,
+            nn.Flatten(start_dim=1, end_dim=2), # (batch, 3 * n_symbols)
+            nn.GELU(),
+            nn.Dropout(self.dropout_p),
+            nn.Linear(n_symbols * 3, 3 + vec_size), #(batch, work_decision + work_value)
+            Split([1, 1, 1, vec_size]),
+            Parallel([nn.Sigmoid(), nn.Sigmoid(), nn.Sigmoid(), nn.Tanh()]),
+        )
 
 
-        # Decisions: Off of Queue
-
-        # Summing
+        ##########
+        # Computation
+        #   Inp: control, work
+        #   Out: value
         HH = 64
         INIT_METHOD = 'kaiming'
-        self.ff = nn.Sequential(CosineSimilarity(id * 3, HH, init_method=INIT_METHOD), nn.GELU(),
-                                CosineSimilarity(HH, output_dim, init_method=INIT_METHOD), nn.Tanh())
+
+        self.ff = nn.Sequential(
+            Stack(dim=1), # input = (control, work)
+            cos_sim,
+            nn.Flatten(start_dim=1, end_dim=2), # (batch, 2 * n_symbols)
+            nn.GELU(),
+            nn.Dropout(self.dropout_p),
+            nn.Linear(n_symbols * 2, n_symbols), #(batch, work_decision + work_value)
+            nn.Sigmoid(),
+            ReverseCosineSimilarity(cos_sim_1)
+        )
 
     def forward(self, x):
         # Containers Init
         device = x.device
         batch_size = x.shape[0]
-        vec_size = x.shape[2]
 
-        self.q1.init(batch_size, self.zero_offset, device,
-                     init_head_ix=1, init_tail_ix=0)
-
-        self.s.init(batch_size, self.zero_offset, device)
+        self.control_stack.init(batch_size, self.zero_offset, device)
+        self.work_stack.init(batch_size, self.zero_offset, device)
 
         # Debugging
         latch_states = []
@@ -402,63 +534,33 @@ class Neuralsymbol(nn.Module):
             inp = x[:, i, :]
 
             ##########
-            # Read
+            # Containers
 
-            # Heads
-            q1h = self.q1.read()
-            sh = self.s.read()
+            # pop stacks no matter what
+            control = self.control_stack.pop()
+            work = self.work_stack.pop()
 
-            a = torch.hstack([inp, q1h, sh])
-
-            # Off of Queues
-            q_put     = self.qa_put(a).squeeze(1)
-            q_get     = self.qa_get(a).squeeze(1)
-            q_null_op = self.qa_null_op(a).squeeze(1)
-            q1x = self.q1(self.sharpen_head, self.sharpen_tail, q_put, q_get, q_null_op, inp)
-
-            # Off of Stack
-            sa_push    = self.sa_push(a).squeeze(1)
-            sa_pop     = self.sa_pop(a).squeeze(1)
-            sa_null_op = self.sa_null_op(a).squeeze(1)
-            sx = self.s(
-                self.sharpen_stack,
-                sa_push,
-                sa_pop,
-                sa_null_op,
-                inp)
+            # collect some thoughts on stack operations
+            c_push, c_pop, c_null_op, new_control = self.control([control, inp])
+            w_push, w_pop, w_null_op, new_work = self.work([control, work, inp])
 
 
             ##########
-            # Compute
+            # Computation
 
             # Calculation on "working memory"
-            xx = torch.hstack([inp, q1x, sx])
-            out = self.ff(xx)
+            out = self.ff([control, work])
+            outputs.append(out)
 
 
             ##########
-            # Write
+            # Apply Ops
 
-            # Onto Queue
-            b = torch.hstack([out, q1x, sx])
-            q_put     = self.qb_put(b).squeeze(1)
-            q_get     = self.qb_get(b).squeeze(1)
-            q_null_op = self.qb_null_op(b).squeeze(1)
-            _ = self.q1(self.sharpen_head, self.sharpen_tail, q_put, q_get, q_null_op, out)
+            c_push, c_pop, c_null_op = c_push.squeeze(1), c_pop.squeeze(1), c_null_op.squeeze(1)
+            w_push, w_pop, w_null_op = w_push.squeeze(1), w_pop.squeeze(1), w_null_op.squeeze(1)
 
-            # Onto Stack
-            sb_push    = self.sb_push(b).squeeze(1)
-            sb_pop     = self.sb_pop(b).squeeze(1)
-            sb_null_op = self.sb_null_op(b).squeeze(1)
-
-            _ = self.s(
-                self.sharpen_stack,
-                sb_push,
-                sb_pop,
-                sb_null_op,
-                out)
-
-            outputs.append(out)
+            self.control_stack(self.control_sharp, c_push, c_pop, c_null_op, new_control)
+            self.work_stack(self.work_sharp, w_push, w_pop, w_null_op, new_work)
 
         out = torch.stack(outputs, dim=1)
         return out, {}
@@ -584,8 +686,8 @@ def accuracy(model, val_dl, device, debug=False):
 ##########
 # Setup
 
-# MyModel = LSTMModel
-MyModel = Neuralsymbol
+MyModel = LSTMModel
+# MyModel = Neuralsymbol
 
 model = MyModel(
     input_dim=VEC_SIZE,
@@ -595,7 +697,12 @@ model = MyModel(
 model.to(DEVICE)
 
 optimizer = optim.Adam(model.parameters(), lr=LR)
-# optimizer = optim.Adam(model.parameters(), lr=0.1)
+
+'''
+optimizer = optim.Adam(model.parameters(), lr=1e-1)
+optimizer = optim.Adam(model.parameters(), lr=1e-2)
+optimizer = optim.Adam(model.parameters(), lr=1e-3)
+'''
 
 train_losses = []
 val_losses = []

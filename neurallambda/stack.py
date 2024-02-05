@@ -88,6 +88,15 @@ class Stack(nn.Module):
         '''
         return einsum('bnv, bn -> bv', self.stack, self.pointer)
 
+    def pop(self):
+        '''Mutates instance, returns popped val. This is a helper function if
+        you know you want to pop, hard coded in to your architecture. (IE
+        there's no decision to be made between push-pop-nullop.
+
+        '''
+        self.stack, self.pointer, out = self.pop_()
+        return out
+
     def push_(self, val):
         ''' Library consumers should NOT call this function. You must only call
         `forward`.
@@ -143,6 +152,10 @@ class Stack(nn.Module):
 
         self.pointer = torch.zeros((batch_size, self.n_stack), device=device, dtype=dtype)
         self.pointer[:, 0] = 1 # start stack pointer at ix=0
+
+        # TODO: this zero_offset is likely introducing strong noise when
+        #       `forward` is called, and all the addresses get summed down into
+        #       one value.
         self.stack = torch.zeros(
             (batch_size,
              self.n_stack,
