@@ -48,8 +48,6 @@ TODO:
 
 * [ ] Is CosineSimilarity worth it? Or should I just use FFNNs?
 
-* [ ] simplify out-computation? return just from operation vocabulary
-
 '''
 
 
@@ -307,6 +305,7 @@ def collate_fn(batch):
 train_dl = DataLoader(train_data, batch_size=BATCH_SIZE, collate_fn=collate_fn, shuffle=True)
 val_dl = DataLoader(val_data, batch_size=BATCH_SIZE, collate_fn=collate_fn)
 
+
 def print_grid(data, labels=None):
     data = list(data)  # Convert the data to a list if it's not already. Data should be iterable of iterables.
     column_widths = []  # This will store the maximum width needed for each column.
@@ -345,6 +344,11 @@ def print_grid(data, labels=None):
                 print(f"{x.rjust(column_widths[i])}", end=" ")  # Right-justify item based on column width.
             print()  # Newline after each column.
         print("-" * (sum(column_widths) + max_label + 1))  # Print separator line after each row.
+
+
+
+
+
 
 if False:
     for ins, outs, mask in train_dl:
@@ -770,17 +774,14 @@ class Neuralsymbol(nn.Module):
 
             ##########
             # Computation
-
             out = self.ff([control, work])
             outputs.append(out)
 
 
             ##########
             # Apply Ops
-
             c_push, c_pop, c_null_op = c_push.squeeze(1), c_pop.squeeze(1), c_null_op.squeeze(1)
             w_push, w_pop, w_null_op = w_push.squeeze(1), w_pop.squeeze(1), w_null_op.squeeze(1)
-
 
             csharp = self.control_sharp # TODO: constrain more? relu?
             wsharp = self.work_sharp
@@ -801,44 +802,24 @@ class Neuralsymbol(nn.Module):
 # Training
 
 def run_epoch(model, dl, optimizer, device, train_mode=True):
-    '''
-    Processes an epoch of data, in either train or evaluation mode.
-
-    Args:
-      model (torch.nn.Module): The model to train/evaluate.
-      dl (DataLoader): DataLoader providing the dataset.
-      optimizer (torch.optim.Optimizer): Optimizer for training.
-      device (torch.device): The device to run the training/evaluation on.
-      train_mode (bool, optional): Whether to run in train mode. Defaults to True.
-      warm_up (int, optional): Number of steps to ignore loss at the start of training. Defaults to 0.
-    Returns:
-      float: Average loss for the epoch.
-    '''
-
     if train_mode:
         model.train()
     else:
         model.eval()
-
     epoch_loss = 0
     steps = 0
-
     process = torch.enable_grad if train_mode else torch.no_grad
-
     with process():
         for i, (src, trg, mask) in enumerate(dl):
             src, trg, mask = src.to(device), trg.to(device), mask.to(device)
-
             if train_mode:
                 optimizer.zero_grad()
-
             output, latch_states = model(src)
             loss = ((1 - torch.cosine_similarity(output, trg, dim=2)) * mask).mean()
             if train_mode:
                 loss.backward()
                 optimizer.step()
             epoch_loss += loss.item()
-
     return epoch_loss / max(steps, 1)
 
 
@@ -858,133 +839,49 @@ def extract_integers_from_seq(sequence, mask):
             integers.append(symbol)
     return integers
 
+
 def debug_output(src, trg, output, mask, batch_idx, states):
     """Print debug information for the first element of the batch."""
-    ins_seq = [unproject(x) for x in src[batch_idx]]
-    trgs_seq = [unproject(x) for x in trg[batch_idx]]
-    outs_seq = [unproject(x) for x in output[batch_idx]]
-    mask_seq = mask[batch_idx].tolist()
-
-    sequences = [ins_seq, trgs_seq, outs_seq, mask_seq]
+    # Unproject and display the sequences for debugging
+    ins_seq = [unproject(x.to('cuda')) for x in src[batch_idx]]  # List of symbols
+    trgs_seq = [unproject(x.to('cuda')) for x in trg[batch_idx]]  # List of symbols
+    outs_seq = [unproject(x.to('cuda')) for x in output[batch_idx]]  # List of symbols
+    mask_seq = mask[batch_idx].to(int).tolist()  # List of integers (0 or 1)
+    ss = []
     labels = ['inps', 'trgs', 'outs', 'mask']
-
-    state_seqs = []
     for k, v in states.items():
         labels.append(k)
-        data = v['data'][batch_idx]
+        data = v['data'][batch_idx]  # Tensor: [seq_len, vec_size]
         fn = v['fn']
-        if fn:
-            state_seqs.append([fn(x) for x in data])
+        if fn is not None:
+            ss_seq = [fn(x.to('cuda')) for x in data]  # List of symbols or other representations
         else:
-            state_seqs.append(data.tolist())
-
-    all_seqs = sequences + state_seqs
-    print_grid(zip(*[sequences]), labels)  # Adjusted to correct function call
-
-def accuracy(model, val_dl, device, debug=False):
-    model.eval()
-    correct_predictions = 0
-    total_predictions = 0
-
-    with torch.no_grad():
-        for i, (src, trg, mask) in enumerate(val_dl):
-            src, trg, mask = src.to(device), trg.to(device), mask.to(device)
-            output, states = model(src)
-
-            for batch_idx in range(src.size(0)):
-                predicted_integers = extract_integers_from_seq(output[batch_idx], mask[batch_idx])
-                target_integers = extract_integers_from_seq(trg[batch_idx], mask[batch_idx])
-
-                if len(predicted_integers) == len(target_integers):
-                    total_predictions += len(predicted_integers)
-                    correct_predictions += sum(p == t for p, t in zip(predicted_integers, target_integers))
-                else:
-                    total_predictions += max(len(predicted_integers), len(target_integers))
-
-                if debug and batch_idx == 0:
-                    debug_output(src, trg, output, mask, batch_idx, states)
-
-    acc = correct_predictions / total_predictions if total_predictions > 0 else 0
-    return acc
+            ss_seq = data.tolist()  # List of list of floats
+        ss.append(ss_seq)
+    all_seqs = [[ins_seq], [trgs_seq], [outs_seq], [mask_seq]] + [[s] for s in ss]
+    print_grid(zip(*all_seqs), labels)  # Print the debug information
 
 
 def accuracy(model, val_dl, device, debug=False):
     model.eval()
     correct_predictions = 0
     total_predictions = 0
-
     with torch.no_grad():
         for i, (src, trg, mask) in enumerate(val_dl):
             output, states = model(src)  # output: Tensor [batch_size, seq_len, vec_size]
-
             for batch_idx in range(src.size(0)):  # Iterate over each element in the batch
-
-
                 # Extract the sequence for the current batch element
-                predicted_seq = output[batch_idx]
-                target_seq = trg[batch_idx]
                 mask_seq = mask[batch_idx]
-
-                # # Unproject the predicted vectors to symbols and extract numbers between LTAG and RTAG
-                # predicted_integers = []
-                # in_answer = False
-                # for v, m in zip(predicted_seq, mask_seq):
-                #     if m < 0.00000001:
-                #         continue  # Skip masked elements
-                #     symbol = unproject(v)
-                #     if symbol == LTAG:
-                #         in_answer = True
-                #     elif symbol == RTAG:
-                #         in_answer = False
-                #     elif in_answer and isinstance(symbol, int):
-                #         predicted_integers.append(symbol)
-
-                # # Unproject the target vectors to symbols and extract numbers between LTAG and RTAG
-                # target_integers = []
-                # in_answer = False
-                # for v, m in zip(target_seq, mask_seq):
-                #     if m < 0.00000001:
-                #         continue  # Skip masked elements
-                #     symbol = unproject(v)
-                #     if symbol == LTAG:
-                #         in_answer = True
-                #     elif symbol == RTAG:
-                #         in_answer = False
-                #     elif in_answer and isinstance(symbol, int):
-                #         target_integers.append(symbol)
-
                 predicted_integers = extract_integers_from_seq(output[batch_idx], mask[batch_idx])
                 target_integers = extract_integers_from_seq(trg[batch_idx], mask[batch_idx])
-
                 # Only compare if both lists are of the same length
                 if len(predicted_integers) == len(target_integers):
                     total_predictions += len(predicted_integers)
                     correct_predictions += (torch.tensor(predicted_integers) == torch.tensor(target_integers)).sum().item()
                 else:
                     total_predictions += max(len(predicted_integers), len(target_integers))
-
                 if debug and batch_idx < 1:
-                    # Unproject and display the sequences for debugging
-                    ins_seq = [unproject(x.to('cuda')) for x in src[batch_idx]]  # List of symbols
-                    trgs_seq = [unproject(x.to('cuda')) for x in trg[batch_idx]]  # List of symbols
-                    outs_seq = [unproject(x.to('cuda')) for x in output[batch_idx]]  # List of symbols
-                    mask_seq = mask[batch_idx].to(int).tolist()  # List of integers (0 or 1)
-
-                    ss = []
-                    labels = ['inps', 'trgs', 'outs', 'mask']
-                    for k, v in states.items():
-                        labels.append(k)
-                        data = v['data'][batch_idx]  # Tensor: [seq_len, vec_size]
-                        fn = v['fn']
-                        if fn is not None:
-                            ss_seq = [fn(x.to('cuda')) for x in data]  # List of symbols or other representations
-                        else:
-                            ss_seq = data.tolist()  # List of list of floats
-                        ss.append(ss_seq)
-
-                    all_seqs = [[ins_seq], [trgs_seq], [outs_seq], [mask_seq]] + [[s] for s in ss]
-                    print_grid(zip(*all_seqs), labels)  # Print the debug information
-
+                    debug_output(src, trg, output, mask, batch_idx, states)
     acc = correct_predictions / total_predictions if total_predictions > 0 else 0
     return acc
 
@@ -1018,7 +915,7 @@ def accuracy(model, val_dl, device, debug=False):
 # optimizer = optim.Adam(opt_params, lr=1e-4)
 
 
-# SHARP = 20.0
+# SHARP = 10.0
 # with torch.no_grad():
 #     model.control_sharp[:] = SHARP
 #     model.work_sharp[:] = SHARP
