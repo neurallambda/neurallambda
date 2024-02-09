@@ -927,15 +927,6 @@ class CosineSimilarity(nn.Module):
         print('Weight:', self.weight.shape)
         print()
 
-        # # Expected input
-        # einput = torch.empty_like(self.weight)
-        # for ix in self.unsqueeze_weights:
-        #     einput = einput.unsqueeze(ix) #
-        # for ix in self.unsqueeze_inputs:
-        #     einput = einput.squeeze(ix) # squeeze here
-        # print('Exp Input:', einput.shape)
-        # print()
-
         # Unsquoze Input
         uinput = torch.empty_like(input)
         for ix in self.unsqueeze_inputs:
@@ -949,20 +940,7 @@ class CosineSimilarity(nn.Module):
         print('Unsquoze Weight:', uweight.shape)
         print()
 
-        # # Unsquoze Expected Input
-        # ueinput = torch.empty_like(einput)
-        # for ix in self.unsqueeze_inputs:
-        #     ueinput = ueinput.unsqueeze(ix)
-        # print('Unsquoze Exp Input :', ueinput.shape)
-        # print()
-
         # Broadcasted
-
-        # beinput, beweight = torch.broadcast_tensors(ueinput, uweight)
-        # print('Broadcasted Weight:', beweight.shape)
-        # print('Broadcasted Exp Input :', beinput.shape)
-        # print()
-
         binput, bweight = torch.broadcast_tensors(uinput, uweight)
         print('Broadcasted Weight:', binput.shape)
         print('Broadcasted Exp Input :', bweight.shape)

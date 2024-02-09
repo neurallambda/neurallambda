@@ -1,10 +1,57 @@
-'''
+'''.
 
 Variable Time Computation!
 
 Test Variable Time Computation by building an LM that can process strings of numbers added together
 
+----------
+RESULTS:
+
+* [X] Preloading known symbols into the CosineSimilarity weights helps training
+      immensely, but I'm not sure I want to keep using the CosSim layers.
+
+* [X] How does stack sharpening behave? Barely moves from init, but then after
+      crossing energy thresholds, it can move a little. Pretty stable though,
+      all things considered.
+
+* [X] Make "operation vocabulary" separate from other symbol
+      vocabulary. RESULT: GREAT! This gave a speed up, and improved learning,
+      and generalization.
+
+* [X] separate work decision and semantics. RESULTS: This seemed to really help generalization.
+
+* [X] Make new number system for projecting ints. bin -> xor projection. RESULTS: Works okish.
+
+* [X] Make separate path for adding numbers. Tested FFNN separately. RESULTS:
+
+  HUGE: for the Addition sub network, having (x,y) go through a network cat'd
+  together sucked, but doing element wise * or + to have a single vec_size
+  vector go through the FFNN totally rocked.
+
+* [X] Simplify addition problem, make it addition with mod 10. RESULTS: Way
+      easier to learn, especially when dataset is sparse.
+
+* Dubious
+    * [X] DEBUG track pushes/pops/nops
+    * [X] Add (CLEAN UP) a token of "ok, now output the answer".
+    * [X] Add a token of "sequence init"
+    * [X] Change "sharpen" param throughout training?
+    * [X] Init with a particular control op
+
+
+----------
+TODO:
+
+* [ ] Add another stack/queue to help it handle Think tokens / decide when to output
+
+* [ ] REGEX MASKED LOSS: Parse out [LEFT_TAG, <Num>, RIGHT_TAG], and mask loss on that.
+
+* [ ] Is CosineSimilarity worth it? Or should I just use FFNNs?
+
+* [ ] simplify out-computation? return just from operation vocabulary
+
 '''
+
 
 import torch
 import random
@@ -22,19 +69,20 @@ from torch.nn.functional import elu, selu, gelu, leaky_relu
 import neurallambda.symbol as Sym
 import copy
 from neurallambda.tensor import CosineSimilarity, Weight, ReverseCosineSimilarity
+import re
 
 torch.manual_seed(152)
 
 DEBUG = False
 
 PAUSE_IRRADIATION_P = 0.1
-PAUSE_NUM_APPEND = 3
+PAUSE_NUM_APPEND = 3 # "Think" tokens
 PAUSE_APPEND_INDEX = -3  # append tokens before [..., L, 42, R]
 
 DEVICE = 'cuda'
-VEC_SIZE = 512
+VEC_SIZE = 256
 
-NUM_TRAIN_SAMPLES = 500  # total number of samples in the dataset
+NUM_TRAIN_SAMPLES = 1000  # total number of samples in the dataset
 MAX_TRAIN_SEQUENCE_LENGTH = 5  # maximum length of the sequence
 
 NUM_VAL_SAMPLES = 100
@@ -42,6 +90,7 @@ MAX_VAL_SEQUENCE_LENGTH = 10  # maximum length of the sequence
 
 BATCH_SIZE = 100
 LR = 1e-2
+INIT_SHARPEN = 5.0
 
 NUM_EPOCHS = 100
 
@@ -62,10 +111,23 @@ def irradiate_tokens(data, percentage, symbol, null_symbol):
 
 def insert_at_ix(data, num_tokens, index, symbol, null_symbol):
     """Inserts a block of pause tokens at a specified index in the data sequences."""
+    # for item in data:
+    #     item['inputs'] = item['inputs'][:index] + [symbol] * num_tokens + item['inputs'][index:]
+    #     item['outputs'] = item['outputs'][:index] + [null_symbol] * num_tokens + item['outputs'][index:]
+    #     item['loss_mask'] = item['loss_mask'][:index] + [0] * num_tokens + item['loss_mask'][index:]
+
+    # # Add F token
+    # for item in data:
+    #     item['inputs'] = item['inputs'][:index] + [symbol] * num_tokens + ['F'] + item['inputs'][index:]
+    #     item['outputs'] = item['outputs'][:index] + [null_symbol] * (num_tokens + 1) + item['outputs'][index:]
+    #     item['loss_mask'] = item['loss_mask'][:index] + [0] * (num_tokens + 1) + item['loss_mask'][index:]
+
+    # Add F token
     for item in data:
-        item['inputs'] = item['inputs'][:index] + [symbol] * num_tokens + item['inputs'][index:]
+        item['inputs'] = item['inputs'][:index] + [symbol] * (num_tokens - 1) + ['F'] + item['inputs'][index:]
         item['outputs'] = item['outputs'][:index] + [null_symbol] * num_tokens + item['outputs'][index:]
         item['loss_mask'] = item['loss_mask'][:index] + [0] * num_tokens + item['loss_mask'][index:]
+
     return data
 
 
@@ -91,19 +153,20 @@ insert_index = -3  # Index before the answer
 
 modified_data = insert_at_ix(copy.deepcopy(data_sample), num_tokens, insert_index, 'T', 'N')
 
-expected_length = len(data_sample[0]['inputs']) + num_tokens
-for item in modified_data:
-    assert len(item['inputs']) == expected_length
-    assert len(item['outputs']) == expected_length
-    assert len(item['loss_mask']) == expected_length
-    # Ensure the pause tokens are correctly positioned
-    if insert_index < 0:
-        s = insert_index - num_tokens
-        e = insert_index
-    else:
-        s = insert_index
-        e = insert_index + num_tokens
-    assert item['inputs'][s:e] == ['T'] * num_tokens
+if False: # turning off bc I'm hacking in an "F" token for "final, now output an answer"
+    expected_length = len(data_sample[0]['inputs']) + num_tokens
+    for item in modified_data:
+        assert len(item['inputs']) == expected_length
+        assert len(item['outputs']) == expected_length
+        assert len(item['loss_mask']) == expected_length
+        # Ensure the pause tokens are correctly positioned
+        if insert_index < 0:
+            s = insert_index - num_tokens
+            e = insert_index
+        else:
+            s = insert_index
+            e = insert_index + num_tokens
+        assert item['inputs'][s:e] == ['T'] * num_tokens
 
 # @@@@@@@@@@
 
@@ -112,18 +175,25 @@ for item in modified_data:
 ##################################################
 # Addition Data
 
-NULL_SYMBOL     = 'N'
+START_DATA_SYMBOL  = 'O'
 PADDING_SYMBOL  = 'P'
+START_SEQ_SYMBOL = 'S'
+NULL_SYMBOL     = 'N'
 THINKING_SYMBOL = 'T'
 LTAG = 'L' # answer start
 RTAG = 'R' # answer end
 
-tokens = [NULL_SYMBOL, PADDING_SYMBOL, THINKING_SYMBOL, LTAG, RTAG]
+tokens = [NULL_SYMBOL, PADDING_SYMBOL, THINKING_SYMBOL, LTAG, RTAG, START_DATA_SYMBOL, START_SEQ_SYMBOL]
 
 all_symbols = Sym.nums + Sym.chars + tokens
 
 # project symbols to vectors, and back
-project, unproject, symbols_i2v, symbols_v2i, symbols_vec = Sym.symbol_map(VEC_SIZE, all_symbols, device=DEVICE)
+# project, unproject, symbols_i2v, symbols_v2i, symbols_vec = Sym.symbol_map(VEC_SIZE, all_symbols, device=DEVICE)
+
+int_map = Sym.SymbolMapper(VEC_SIZE, all_symbols, device=DEVICE)
+project = int_map.project
+unproject = int_map.unproject
+# symbols_vec = int_map.projection_matrix
 
 def generate_addition_synthetic_data(num_samples, max_length):
     """Generates synthetic data for the addition task.
@@ -147,14 +217,24 @@ def generate_addition_synthetic_data(num_samples, max_length):
         length = random.randint(2, max_length)
 
         # a list of numbers
-        numbers = [random.randint(0, 9) for _ in range(length)]
-        inputs = numbers + [NULL_SYMBOL] * 3 # *3 because of LTAG and RTAG
+
+        # numbers = [random.randint(-9, 9) for _ in range(length)] # include negatives
+
+        numbers = [random.randint(0, 9) for _ in range(length)] # positives only
+
+        # numbers = [random.randint(-2, 2) for _ in range(length)] # a few numbers only
+
+
+        inputs = [START_SEQ_SYMBOL] + numbers + [NULL_SYMBOL] * 3 # *3 because of LTAG and RTAG
 
         # sum them together
-        outputs = [NULL_SYMBOL] * len(numbers) + [LTAG, sum(numbers), RTAG]
+        # outputs = [NULL_SYMBOL] * len(numbers) + [LTAG, sum(numbers), RTAG]
+
+        # print('DOING %10 VERSION')
+        outputs = [NULL_SYMBOL] * (len(numbers) + 1) + [LTAG, sum(numbers) % 10, RTAG]
 
         # loss mask helps to ignore loss on the random seed data
-        loss_mask = [0] * len(numbers) + [1, 1, 1]
+        loss_mask = [0] * (len(numbers) + 1) + [1, 1, 1]
 
         assert len(inputs) == len(outputs) == len(loss_mask)
         data.append({
@@ -166,25 +246,20 @@ def generate_addition_synthetic_data(num_samples, max_length):
 
 # TRAIN
 train_data = generate_addition_synthetic_data(NUM_TRAIN_SAMPLES, MAX_TRAIN_SEQUENCE_LENGTH)
-
 # Inject pause tokens
 train_data = insert_at_ix(train_data, PAUSE_NUM_APPEND, PAUSE_APPEND_INDEX, symbol=THINKING_SYMBOL, null_symbol=NULL_SYMBOL)
 # train_data = irradiate_tokens(train_data, PAUSE_IRRADIATION_P, symbol=THINKING_SYMBOL, null_symbol=NULL_SYMBOL)
 
-# train_size = int(TRAIN_SPLIT * len(synthetic_data))
-# train_data = synthetic_data[:train_size]
-# val_data = synthetic_data[train_size:]
 
 # VAL
-
-val_data = generate_addition_synthetic_data(NUM_TRAIN_SAMPLES, MAX_TRAIN_SEQUENCE_LENGTH)
-
+val_data = generate_addition_synthetic_data(NUM_TRAIN_SAMPLES, MAX_VAL_SEQUENCE_LENGTH)
 # Inject pause tokens
 val_data = insert_at_ix(val_data, PAUSE_NUM_APPEND, PAUSE_APPEND_INDEX, symbol=THINKING_SYMBOL, null_symbol=NULL_SYMBOL)
 # val_data = irradiate_tokens(val_data, PAUSE_IRRADIATION_P, symbol=THINKING_SYMBOL, null_symbol=NULL_SYMBOL)
 
 
 padding_vec = project(PADDING_SYMBOL)
+start_data_vec = project(START_DATA_SYMBOL)
 
 def collate_fn(batch):
     """Collate function to handle variable-length sequences, and project symbols to
@@ -205,12 +280,15 @@ def collate_fn(batch):
 
         inputs_vec = [project(i) for i in inputs]
         num_padding = max_seq_len - len(inputs_vec)
-        padded_inputs_vec = [padding_vec] * num_padding + inputs_vec
+        # padded_inputs_vec = [padding_vec] * num_padding + inputs_vec
+        padded_inputs_vec = [start_data_vec] + [padding_vec] * num_padding + inputs_vec
 
-        padded_outputs_vec = [padding_vec] * num_padding + [project(x) for x in outputs]
-        padded_loss_mask = [0] * num_padding + loss_mask
+        padded_outputs_vec = [padding_vec] * (num_padding + 1) + [project(x) for x in outputs]
+        padded_loss_mask = [0] * (num_padding + 1) + loss_mask
 
-        assert len(padded_inputs_vec) == len(padded_outputs_vec) == len(padded_loss_mask)
+        assert len(padded_inputs_vec) == len(padded_outputs_vec) == len(padded_loss_mask), f'''
+        padded_inputs_vec={len(padded_inputs_vec)} == padded_outputs_vec={len(padded_outputs_vec)} == padded_loss_mask={len(padded_loss_mask)}
+        '''.strip()
 
         inputs_batch.append(torch.stack(padded_inputs_vec))
         outputs_batch.append(torch.stack(padded_outputs_vec))
@@ -237,7 +315,7 @@ def print_grid(data, labels=None):
     # Calculate the max number of columns in any row
     for row in data:
         for column in row:
-            max_columns = max(max_columns, len(str(column)))  # Update max_columns based on length of each column.
+            max_columns = max(max_columns, len(rm_format(str(column))))  # Update max_columns based on length of each column.
 
     # Initialize column widths to 0
     column_widths = [0] * max_columns  # Initialize column widths array with zeros based on max_columns.
@@ -249,7 +327,7 @@ def print_grid(data, labels=None):
                 if isinstance(item, float):
                     w = 6  # For floating point numbers, fix width to 6 (including decimal point and numbers after it).
                 else:
-                    w = len(str(item))  # For other types, set width to the length of item when converted to string.
+                    w = len(rm_format(str(item)))  # For other types, set width to the length of item when converted to string.
                 column_widths[k] = max(column_widths[k], w)  # Update column width if current item's width is larger.
 
     # Print the grid with aligned columns
@@ -362,9 +440,7 @@ if False:
     out = cs(inp)
     assert out.shape == torch.Size([batch_size, n_inp_vecs, n_symbols])
 
-
 # @@@@@@@@@@
-
 
 class Stack(nn.Module):
     def __init__(self, dim=1):
@@ -406,6 +482,71 @@ class Split(nn.Module):
         # torch.split returns a tuple of tensors split according to self.split_sizes
         return torch.split(input, self.split_sizes, dim=self.dim)  # Output shapes depend on self.split_sizes
 
+class Id(nn.Module):
+    def __init__(self):
+        super(Id, self).__init__()
+    def forward(self, x):
+        return x
+
+class Squeeze(nn.Module):
+    def __init__(self, dim):
+        super(Squeeze, self).__init__()
+        self.dim = dim
+    def forward(self, x):
+        return x.squeeze(self.dim)
+
+class Elementwise(nn.Module):
+    def __init__(self, f):
+        super(Elementwise, self).__init__()
+        self.f = f
+    def forward(self, input):
+        x, y = input
+        return self.f(x, y)
+
+class Diagnose(nn.Module):
+    def __init__(self, should_raise=True):
+        super(Diagnose, self).__init__()
+        self.should_raise = should_raise
+    def forward(self, input):
+        print(f'Input      :', input)
+        print(f'Input Shape: {input.shape}')
+        if self.should_raise:
+            raise RuntimeError('Done diangosing')
+
+
+##################################################
+#
+
+def colored(x):
+    # Define the ANSI escape codes for the desired colors
+    BLACK = '\033[30m'
+    YELLOW = '\033[33m'
+    RED = '\033[31m'
+    RESET = '\033[0m'  # Resets the color to default terminal color
+
+    # Retrieve the value
+    value = x.item()
+
+    # Determine the color based on the value
+    if 0.0 <= value < 0.4:
+        color = BLACK
+    elif 0.4 <= value < 0.6:
+        color = YELLOW
+    else:  # 0.6 <= value <= 1.0
+        color = RED
+
+    # Format and return the colored string
+    return f'{color}{value:>.1f}{RESET}'
+
+def rm_format(text):
+    # Regular expression to match ANSI escape codes
+    ansi_escape_pattern = re.compile(r'\x1B\[[0-9;]*m')
+
+    # Use re.sub() to replace all occurrences of the ANSI escape codes with an empty string
+    sanitized_text = re.sub(ansi_escape_pattern, '', text)
+
+    return sanitized_text
+
 
 class Neuralsymbol(nn.Module):
     def __init__(self,
@@ -414,8 +555,8 @@ class Neuralsymbol(nn.Module):
         super(Neuralsymbol, self).__init__()
 
         n_symbols = 128
-        init_sharpen = 5.0
-        dropout_p = 0.05
+        init_sharpen = INIT_SHARPEN
+        dropout_p = 0.01
         n_control_stack = 8
         n_work_stack = 8
 
@@ -430,11 +571,42 @@ class Neuralsymbol(nn.Module):
         self.n_control_stack = n_control_stack
         self.n_work_stack    = n_work_stack
 
-        self.zero_offset = 1e-5
+        self.zero_offset = 1e-4
+
+        ##########
+        # Operational Symbols (like push/pop/nopping the stack)
+
+        n_op_symbols = 8
+        self.n_op_symbols = n_op_symbols
+
+        # INIT_W = 'orthogonal'
+        INIT_W = 'kaiming'
+        op_sym_w = Weight(self.input_dim, n_op_symbols, INIT_W)
+        self.op_sym_w = op_sym_w
+
+        # cos sim for multiple stacked vecs
+        OpCosSim = CosineSimilarity(
+            op_sym_w,
+            dim=2,
+            unsqueeze_inputs=[-1],    # (batch, N, vec_size, _)  # control + input
+            unsqueeze_weights=[0, 0], # (_,     _, vec_size, n_op_symbols)
+        ) # (batch, N, n_op_symbols)
+
+        # cos sim for a single vec
+        OpCosSim_1 = CosineSimilarity(
+            op_sym_w,
+            dim=1,
+            unsqueeze_inputs=[-1],    # (batch, vec_size, _)
+            unsqueeze_weights=[0],    # (_,     vec_size, n_op_symbols)
+        ) # (batch, n_op_symbols)
+
 
         ##########
         # Identifying Symbols
-        sym_w = Weight(self.input_dim, self.n_symbols)
+
+        # INIT_W = 'orthogonal'
+        INIT_W = 'kaiming'
+        sym_w = Weight(self.input_dim, self.n_symbols, INIT_W)
         self.sym_w = sym_w
 
         # preload some known symbols
@@ -442,10 +614,8 @@ class Neuralsymbol(nn.Module):
             for ix, i in enumerate(tokens + list(range(-40, 40))):
                 self.sym_w.weight[:, ix] = project(i)
 
-
-
         # cos sim for multiple stacked vecs
-        cos_sim = CosineSimilarity(
+        CosSim = CosineSimilarity(
             sym_w,
             dim=2,
             unsqueeze_inputs=[-1],    # (batch, N, vec_size, _)  # control + input
@@ -453,7 +623,7 @@ class Neuralsymbol(nn.Module):
         ) # (batch, N, n_symbols)
 
         # cos sim for a single vec
-        cos_sim_1 = CosineSimilarity(
+        CosSim_1 = CosineSimilarity(
             sym_w,
             dim=1,
             unsqueeze_inputs=[-1],    # (batch, vec_size, _)
@@ -463,75 +633,114 @@ class Neuralsymbol(nn.Module):
 
         ##########
         # Control Stack
-        self.control_stack = S.Stack(n_control_stack, input_dim) # control stack
+        self.control_stack = S.Stack(n_control_stack, input_dim)
         self.control_sharp = nn.Parameter(torch.tensor([init_sharpen]))
 
         # Control Ops:
         #   Inp: control dim + input dim
         #   Out: control_op + control_val
         self.control = nn.Sequential(
-            Stack(dim=1), # input = (control, input)
-            cos_sim,
-            nn.Flatten(start_dim=1, end_dim=2), # (batch, 2 * n_symbols)
-            nn.GELU(),
+            Elementwise(lambda x, y: x * y),
+            nn.Linear(vec_size, hidden_dim),
+            nn.ReLU(),
             nn.Dropout(self.dropout_p),
-            nn.Linear(n_symbols * 2, 3 + vec_size), #(batch, control_decision + control_value)
-            Split([1, 1, 1, vec_size]),
-            Parallel([nn.Sigmoid(), nn.Sigmoid(), nn.Sigmoid(), nn.Tanh()]),
-        )
 
+            # nn.Linear(hidden_dim, self.n_op_symbols + 3, bias=True),
+            # Split([1, 1, 1, n_op_symbols]),
+            # Parallel([nn.Sigmoid(), nn.Sigmoid(), nn.Sigmoid(),
+            #           nn.Sequential(nn.Sigmoid(), ReverseCosineSimilarity(OpCosSim_1))
+            #           ]),
+
+            nn.Linear(hidden_dim, vec_size + 3, bias=True),
+            Split([1, 1, 1, vec_size]),
+            Parallel([nn.Sigmoid(), nn.Sigmoid(), nn.Sigmoid(),
+                      nn.Tanh()
+                      ]),
+
+        )
 
         ##########
         # Working Stack
 
-        self.work_stack = S.Stack(n_work_stack, input_dim) # work stack
+        self.work_stack = S.Stack(n_work_stack, input_dim)
         self.work_sharp = nn.Parameter(torch.tensor([init_sharpen]))
 
         # Control Ops:
         #   Inp: work dim + input dim
         #   Out: work_op + work_val
-        self.work = nn.Sequential(
-            Stack(dim=1), # input = (control, work, input)
-            cos_sim,
-            nn.Flatten(start_dim=1, end_dim=2), # (batch, 3 * n_symbols)
-            nn.GELU(),
+
+        self.work_op = nn.Sequential(
+            Elementwise(lambda x, y: x * y),
+            nn.Linear(vec_size, hidden_dim),
+            nn.ReLU(),
             nn.Dropout(self.dropout_p),
-            nn.Linear(n_symbols * 3, 3 + vec_size), #(batch, work_decision + work_value)
-            Split([1, 1, 1, vec_size]),
-            Parallel([nn.Sigmoid(), nn.Sigmoid(), nn.Sigmoid(), nn.Tanh()]),
+            nn.Linear(hidden_dim, 3, bias=True),
+            Split([1, 1, 1]),
+            Parallel([nn.Sigmoid(), nn.Sigmoid(), nn.Sigmoid(),]),
+
+
+            # Stack(dim=1), # input = (control, input)
+            # CosSim,
+            # nn.GELU(), # prevent negative sim
+            # nn.Flatten(start_dim=1, end_dim=2), # (batch, 2 * n_symbols)
+            # nn.Linear(n_symbols * 2, 3), #(batch, work_decision + work_value)
+            # Split([1, 1, 1]),
+            # Parallel([nn.Sigmoid(), nn.Sigmoid(), nn.Sigmoid()]),
         )
 
+        self.work = nn.Sequential(
+            Elementwise(lambda x, y: x * y),
+            nn.Linear(vec_size, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(self.dropout_p),
 
-        ##########
-        # Computation
-        #   Inp: control, work
-        #   Out: value
-        HH = 128
-        INIT_METHOD = 'kaiming'
+            # nn.Linear(hidden_dim, vec_size, bias=True),
+            # nn.Tanh(),
+
+            # nn.Linear(hidden_dim, self.n_symbols, bias=True),
+            # nn.Sigmoid(),
+            # ReverseCosineSimilarity(CosSim_1),
+
+            nn.Linear(hidden_dim, vec_size, bias=True),
+            nn.Tanh(),
+
+        )
 
         self.ff = nn.Sequential(
-            Stack(dim=1), # input = (control, work)
-            cos_sim,
-            nn.Flatten(start_dim=1, end_dim=2), # (batch, 2 * n_symbols)
-            nn.GELU(),
+            Elementwise(lambda x, y: x * y),
+            nn.Linear(vec_size, hidden_dim),
+            nn.ReLU(),
             nn.Dropout(self.dropout_p),
-            nn.Linear(n_symbols * 2, n_symbols), #(batch, work_decision + work_value)
-            nn.Sigmoid(),
-            ReverseCosineSimilarity(cos_sim_1)
+
+            nn.Linear(hidden_dim, vec_size, bias=True),
+            nn.Tanh(),
+
+            # nn.Linear(hidden_dim, n_symbols, bias=True),
+            # nn.Sigmoid(),
+            # ReverseCosineSimilarity(CosSim_1),
         )
 
     def forward(self, x):
         # Containers Init
         device = x.device
         batch_size = x.shape[0]
-
         self.control_stack.init(batch_size, self.zero_offset, device)
         self.work_stack.init(batch_size, self.zero_offset, device)
 
+        # Push first instruction
+        self.control_stack.push(self.op_sym_w.weight[:, 0].unsqueeze(0))
+        self.work_stack.push(self.op_sym_w.weight[:, 0].unsqueeze(0))
+
         # Debugging
-        latch_states = []
         pops = []
-        stack_tops = []
+        debug = {
+            'control_pop': [],
+            'control_push': [],
+            'control_null_op': [],
+            'work_pop': [],
+            'work_push': [],
+            'work_null_op': [],
+        }
 
         # Loop over sequence
         outputs = []
@@ -547,13 +756,21 @@ class Neuralsymbol(nn.Module):
 
             # collect some thoughts on stack operations
             c_push, c_pop, c_null_op, new_control = self.control([control, inp])
-            w_push, w_pop, w_null_op, new_work = self.work([control, work, inp])
+            w_push, w_pop, w_null_op = self.work_op([control, inp])
+            new_work = self.work([work, inp])
+
+            if True:
+                debug['control_pop'].append(c_pop)
+                debug['control_push'].append(c_push)
+                debug['control_null_op'].append(c_null_op)
+                debug['work_pop'].append(w_pop)
+                debug['work_push'].append(w_push)
+                debug['work_null_op'].append(w_null_op)
 
 
             ##########
             # Computation
 
-            # Calculation on "working memory"
             out = self.ff([control, work])
             outputs.append(out)
 
@@ -564,52 +781,131 @@ class Neuralsymbol(nn.Module):
             c_push, c_pop, c_null_op = c_push.squeeze(1), c_pop.squeeze(1), c_null_op.squeeze(1)
             w_push, w_pop, w_null_op = w_push.squeeze(1), w_pop.squeeze(1), w_null_op.squeeze(1)
 
-            self.control_stack(self.control_sharp, c_push, c_pop, c_null_op, new_control)
-            self.work_stack(self.work_sharp, w_push, w_pop, w_null_op, new_work)
+
+            csharp = self.control_sharp # TODO: constrain more? relu?
+            wsharp = self.work_sharp
+            self.control_stack(csharp, c_push, c_pop, c_null_op, new_control)
+            self.work_stack(wsharp, w_push, w_pop, w_null_op, new_work)
 
         out = torch.stack(outputs, dim=1)
-        return out, {}
+
+        for k, v in debug.items():
+            debug[k] = {
+                'data': torch.stack(v, dim=1),
+                'fn': colored,
+            }
+        return out, debug
 
 
 ##################################################
 # Training
 
-def train_epoch(model, dl, optimizer, device):
+def run_epoch(model, dl, optimizer, device, train_mode=True):
     '''
+    Processes an epoch of data, in either train or evaluation mode.
+
     Args:
-      warm_up: ignore loss for this many steps
+      model (torch.nn.Module): The model to train/evaluate.
+      dl (DataLoader): DataLoader providing the dataset.
+      optimizer (torch.optim.Optimizer): Optimizer for training.
+      device (torch.device): The device to run the training/evaluation on.
+      train_mode (bool, optional): Whether to run in train mode. Defaults to True.
+      warm_up (int, optional): Number of steps to ignore loss at the start of training. Defaults to 0.
+    Returns:
+      float: Average loss for the epoch.
     '''
-    model.train()
+
+    if train_mode:
+        model.train()
+    else:
+        model.eval()
+
     epoch_loss = 0
+    steps = 0
 
-    for i, (src, trg, mask) in enumerate(dl):
-        optimizer.zero_grad()
-        output, latch_states = model(src) # shape=[batch, seq, vec_size]
+    process = torch.enable_grad if train_mode else torch.no_grad
 
-        # loss = criterion(output, trg) * mask
-        loss = ((1 - torch.cosine_similarity(output, trg, dim=2)) * mask).mean()
-
-        loss.backward()
-        # torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
-        optimizer.step()
-
-        epoch_loss += loss.item()
-
-    return epoch_loss / len(dl)
-
-def evaluate(model, dl, device):
-    model.eval()
-    epoch_loss = 0
-
-    with torch.no_grad():
+    with process():
         for i, (src, trg, mask) in enumerate(dl):
-            output, latch_states = model(src)
+            src, trg, mask = src.to(device), trg.to(device), mask.to(device)
 
-            # loss = criterion(output, trg) * mask
+            if train_mode:
+                optimizer.zero_grad()
+
+            output, latch_states = model(src)
             loss = ((1 - torch.cosine_similarity(output, trg, dim=2)) * mask).mean()
+            if train_mode:
+                loss.backward()
+                optimizer.step()
             epoch_loss += loss.item()
 
-    return epoch_loss / len(dl)
+    return epoch_loss / max(steps, 1)
+
+
+def extract_integers_from_seq(sequence, mask):
+    """Extract integers between LTAG and RTAG, ignoring masked elements."""
+    integers = []
+    in_answer = False
+    for v, m in zip(sequence, mask):
+        if m < 0.00000001:
+            continue  # Skip masked elements
+        symbol = unproject(v)
+        if symbol == LTAG:
+            in_answer = True
+        elif symbol == RTAG:
+            in_answer = False
+        elif in_answer and isinstance(symbol, int):
+            integers.append(symbol)
+    return integers
+
+def debug_output(src, trg, output, mask, batch_idx, states):
+    """Print debug information for the first element of the batch."""
+    ins_seq = [unproject(x) for x in src[batch_idx]]
+    trgs_seq = [unproject(x) for x in trg[batch_idx]]
+    outs_seq = [unproject(x) for x in output[batch_idx]]
+    mask_seq = mask[batch_idx].tolist()
+
+    sequences = [ins_seq, trgs_seq, outs_seq, mask_seq]
+    labels = ['inps', 'trgs', 'outs', 'mask']
+
+    state_seqs = []
+    for k, v in states.items():
+        labels.append(k)
+        data = v['data'][batch_idx]
+        fn = v['fn']
+        if fn:
+            state_seqs.append([fn(x) for x in data])
+        else:
+            state_seqs.append(data.tolist())
+
+    all_seqs = sequences + state_seqs
+    print_grid(zip(*[sequences]), labels)  # Adjusted to correct function call
+
+def accuracy(model, val_dl, device, debug=False):
+    model.eval()
+    correct_predictions = 0
+    total_predictions = 0
+
+    with torch.no_grad():
+        for i, (src, trg, mask) in enumerate(val_dl):
+            src, trg, mask = src.to(device), trg.to(device), mask.to(device)
+            output, states = model(src)
+
+            for batch_idx in range(src.size(0)):
+                predicted_integers = extract_integers_from_seq(output[batch_idx], mask[batch_idx])
+                target_integers = extract_integers_from_seq(trg[batch_idx], mask[batch_idx])
+
+                if len(predicted_integers) == len(target_integers):
+                    total_predictions += len(predicted_integers)
+                    correct_predictions += sum(p == t for p, t in zip(predicted_integers, target_integers))
+                else:
+                    total_predictions += max(len(predicted_integers), len(target_integers))
+
+                if debug and batch_idx == 0:
+                    debug_output(src, trg, output, mask, batch_idx, states)
+
+    acc = correct_predictions / total_predictions if total_predictions > 0 else 0
+    return acc
 
 
 def accuracy(model, val_dl, device, debug=False):
@@ -622,38 +918,43 @@ def accuracy(model, val_dl, device, debug=False):
             output, states = model(src)  # output: Tensor [batch_size, seq_len, vec_size]
 
             for batch_idx in range(src.size(0)):  # Iterate over each element in the batch
+
+
                 # Extract the sequence for the current batch element
                 predicted_seq = output[batch_idx]
                 target_seq = trg[batch_idx]
                 mask_seq = mask[batch_idx]
 
-                # Unproject the predicted vectors to symbols and extract numbers between LTAG and RTAG
-                predicted_integers = []
-                in_answer = False
-                for v, m in zip(predicted_seq, mask_seq):
-                    if m < 0.00000001:
-                        continue  # Skip masked elements
-                    symbol = unproject(v)
-                    if symbol == LTAG:
-                        in_answer = True
-                    elif symbol == RTAG:
-                        in_answer = False
-                    elif in_answer and isinstance(symbol, int):
-                        predicted_integers.append(symbol)
+                # # Unproject the predicted vectors to symbols and extract numbers between LTAG and RTAG
+                # predicted_integers = []
+                # in_answer = False
+                # for v, m in zip(predicted_seq, mask_seq):
+                #     if m < 0.00000001:
+                #         continue  # Skip masked elements
+                #     symbol = unproject(v)
+                #     if symbol == LTAG:
+                #         in_answer = True
+                #     elif symbol == RTAG:
+                #         in_answer = False
+                #     elif in_answer and isinstance(symbol, int):
+                #         predicted_integers.append(symbol)
 
-                # Unproject the target vectors to symbols and extract numbers between LTAG and RTAG
-                target_integers = []
-                in_answer = False
-                for v, m in zip(target_seq, mask_seq):
-                    if m < 0.00000001:
-                        continue  # Skip masked elements
-                    symbol = unproject(v)
-                    if symbol == LTAG:
-                        in_answer = True
-                    elif symbol == RTAG:
-                        in_answer = False
-                    elif in_answer and isinstance(symbol, int):
-                        target_integers.append(symbol)
+                # # Unproject the target vectors to symbols and extract numbers between LTAG and RTAG
+                # target_integers = []
+                # in_answer = False
+                # for v, m in zip(target_seq, mask_seq):
+                #     if m < 0.00000001:
+                #         continue  # Skip masked elements
+                #     symbol = unproject(v)
+                #     if symbol == LTAG:
+                #         in_answer = True
+                #     elif symbol == RTAG:
+                #         in_answer = False
+                #     elif in_answer and isinstance(symbol, int):
+                #         target_integers.append(symbol)
+
+                predicted_integers = extract_integers_from_seq(output[batch_idx], mask[batch_idx])
+                target_integers = extract_integers_from_seq(trg[batch_idx], mask[batch_idx])
 
                 # Only compare if both lists are of the same length
                 if len(predicted_integers) == len(target_integers):
@@ -662,7 +963,7 @@ def accuracy(model, val_dl, device, debug=False):
                 else:
                     total_predictions += max(len(predicted_integers), len(target_integers))
 
-                if debug and batch_idx < 1:  # MAX_SHOW = 1 for debugging purposes
+                if debug and batch_idx < 1:
                     # Unproject and display the sequences for debugging
                     ins_seq = [unproject(x.to('cuda')) for x in src[batch_idx]]  # List of symbols
                     trgs_seq = [unproject(x.to('cuda')) for x in trg[batch_idx]]  # List of symbols
@@ -688,64 +989,85 @@ def accuracy(model, val_dl, device, debug=False):
     return acc
 
 
-##########
-# Setup
+# ##########
+# # Setup
 
-# MyModel = LSTMModel
-MyModel = Neuralsymbol
+# # MyModel = LSTMModel
+# MyModel = Neuralsymbol
 
-model = MyModel(
-    input_dim=VEC_SIZE,
-    hidden_dim=64,
-    output_dim=VEC_SIZE,
-)
-model.to(DEVICE)
+# model = MyModel(
+#     input_dim=VEC_SIZE,
+#     hidden_dim=64,
+#     output_dim=VEC_SIZE,
+# )
+# model.to(DEVICE)
 
-optimizer = optim.Adam(model.parameters(), lr=LR)
+# # print('disabling gradients for sharpening')
+# # model.control_sharp.requires_grad = False
+# # model.work_sharp.requires_grad = False
 
-'''
-optimizer = optim.Adam(model.parameters(), lr=1e-1)
-optimizer = optim.Adam(model.parameters(), lr=1e-2)
-optimizer = optim.Adam(model.parameters(), lr=1e-3)
-'''
+# opt_params = list(filter(lambda p: p.requires_grad, model.parameters()))
 
-train_losses = []
-val_losses = []
-train_accuracies = []
-val_accuracies = []
-
-for epoch in range(NUM_EPOCHS):
-    train_loss = train_epoch(model, train_dl, optimizer, DEVICE)
-
-    if epoch % 10 == 0:
-        val_loss = evaluate(model, val_dl, DEVICE)
-        tacc = accuracy(model, train_dl, DEVICE)
-        vacc = accuracy(model, val_dl, DEVICE)
-
-        train_losses.append(train_loss)
-        val_losses.append(val_loss)
-        train_accuracies.append(tacc)
-        val_accuracies.append(vacc)
-        print(f'Epoch: {epoch + 1:02} | Train Loss: {train_loss:.3f} | Val. Loss: {val_loss:.3f} | Train Acc: {tacc:.3f} | Val Acc: {vacc:.3f}')
-    else:
-        print(f'Epoch: {epoch + 1:02} | Train Loss: {train_loss:.3f}')
+# optimizer = optim.Adam(opt_params, lr=LR)
 
 
-
-# Plot training and validation loss
-plt.figure()
-n = np.arange(len(train_losses))
-plt.plot(n, train_losses, label='Train Loss')
-plt.plot(n, val_losses, label='Val Loss')
-plt.plot(n, train_accuracies, label='Train Acc')
-plt.plot(n, val_accuracies, label='Val Acc')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.legend()
-plt.grid()
-plt.show()
+# '''
+# optimizer = optim.Adam(opt_params, lr=1e-1)
+# optimizer = optim.Adam(opt_params, lr=1e-2)
+# optimizer = optim.Adam(opt_params, lr=1e-3)
+# optimizer = optim.Adam(opt_params, lr=1e-4)
 
 
-##########
+# SHARP = 20.0
+# with torch.no_grad():
+#     model.control_sharp[:] = SHARP
+#     model.work_sharp[:] = SHARP
 
+# '''
+
+# train_losses = []
+# val_losses = []
+# train_accuracies = []
+# val_accuracies = []
+
+# for epoch in range(NUM_EPOCHS):
+#     train_loss = run_epoch(model, train_dl, optimizer, DEVICE, train_mode=True)
+
+#     # Experiment changing sharpen param
+#     if False: # TODO: rm experiment
+#         with torch.no_grad():
+#             model.control_sharp[:] = torch.randint(8, 20, (1,))
+#             model.work_sharp[:]    = torch.randint(8, 20, (1,))
+
+#     if epoch % 10 == 0:
+#         val_loss = run_epoch(model, val_dl, None, DEVICE, train_mode=False)
+#         tacc = accuracy(model, train_dl, DEVICE)
+#         vacc = accuracy(model, val_dl, DEVICE)
+
+#         train_losses.append(train_loss)
+#         val_losses.append(val_loss)
+#         train_accuracies.append(tacc)
+#         val_accuracies.append(vacc)
+#         print(f'Epoch: {epoch + 1:02} | Train Loss: {train_loss:.5f} | Val. Loss: {val_loss:.3f} | Train Acc: {tacc:.3f} | Val Acc: {vacc:.3f}')
+#     else:
+#         if isinstance(model, Neuralsymbol):
+#             print(f'Epoch: {epoch + 1:02} | Train Loss: {train_loss:.5f} | CSharp: {model.control_sharp.item():.3f} | WSharp: {model.work_sharp.item():.3f}')
+#         else:
+#             print(f'Epoch: {epoch + 1:02} | Train Loss: {train_loss:.5f}')
+
+
+# # Plot training and validation loss
+# plt.figure()
+# n = np.arange(len(train_losses))
+# plt.plot(n, train_losses, label='Train Loss')
+# plt.plot(n, val_losses, label='Val Loss')
+# plt.plot(n, train_accuracies, label='Train Acc')
+# plt.plot(n, val_accuracies, label='Val Acc')
+# plt.xlabel('Epoch')
+# plt.ylabel('Loss')
+# plt.legend()
+# plt.grid()
+# plt.show()
+
+# Debug performance
 tacc = accuracy(model, val_dl, DEVICE, debug=True)

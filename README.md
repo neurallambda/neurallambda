@@ -2,12 +2,24 @@
 
 Lambda Calculus, Fully Differentiable.
 
-* "Shock testing" from aviation for Error Correction? Material sciences (Casey's recommendation)
-
 
 ## Explanation
 
-Motivation:
+Show it:
+
+```
+((fn [x] '(x x x)) 42)
+--->
+tensors
+-- differentiable beta reduction -->
+tensors
+--->
+'(42 42 42)
+```
+
+Why it matters?
+
+Constraining the system.
 
 <TODO>
 
@@ -15,6 +27,11 @@ TL;DR:
 
 This work introduces a datatype encapsulating the lambda calculus, which is
 stored in tensors. It also offers a differentiable beta-reduction function.
+
+A human readable program, written in lisp for this demo, can be turned into
+tensors, beta-reduced or manipulated in other interesting ways, and the
+resultant reduced/modified program can be read back out into a human readable
+program.
 
 Further, the ideas present in this work lend themselves to other datatype
 representations and other computation functions (that compute computation) that
