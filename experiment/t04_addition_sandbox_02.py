@@ -102,10 +102,10 @@ def running_sum(inp, work, control):
             case 'RETURN_SUM':
                 return ('PUSH', 'RETURN_ANSWER_CLOSE')
             case 'RETURN_ANSWER_CLOSE':
-                return ('PUSH', 'NA')
+                return ('PUSH', 'N')
             case _ if isinstance(inp, int):
                 return ('NULL_OP', None)
-            case _ if inp == 'FINISHED':
+            case _ if inp == 'F':
                 return ('PUSH', 'RETURN_ANSWER_OPEN')
             case _:
                 return ('NULL_OP', None)
@@ -131,13 +131,13 @@ def running_sum(inp, work, control):
         # Output decision based on control state
         match control:
             case 'RETURN_ANSWER_OPEN':
-                return '<answer>'
+                return 'L'
             case 'RETURN_SUM':
                 return work
             case 'RETURN_ANSWER_CLOSE':
-                return '</answer>'
+                return 'R'
             case _:
-                return 'NA'
+                return 'N'
 
     work_val = work_stack_semantics(work, inp)
     control_op, control_val = control_stack_decision(control, inp)
@@ -161,8 +161,8 @@ def apply_stack_op(stack, op, old_val, new_val):
     elif op == 'POP':
         pass # the original `pop` stands
 
-inps = [1, 2, 3, "FINISHED", "NA", "NA", "NA", "NA", "NA"]
-exps = ["NA", "NA", "NA", "NA", "<answer>", 6, "</answer>", "NA"]
+inps = ['O', 'P', 'S',  1,   2,   3,  'T', 'T', "F", "N", "N", "N", 'N']
+exps = ['N', 'N', 'N', "N", "N", "N", 'N', 'N', 'N', "L",  6,  "R", 'N']
 
 work_stack = Stack()
 work_queue = Queue()

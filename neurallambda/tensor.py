@@ -968,6 +968,22 @@ class CosineSimilarity(nn.Module):
 #                  unsqueeze_inputs=[-1],
 #                  unsqueeze_weights=[0, 0]).diagnose(torch.zeros(batch_size, 41, vec_size))
 
+# if False:
+#     batch_size = 67
+#     vec_size = 1024
+#     n_symbols = 13
+#     n_inp_vecs = 3
+#     cs = CosineSimilarity(
+#         Weight(vec_size, n_symbols),
+#         dim=2,
+#         unsqueeze_inputs=[-1],
+#         unsqueeze_weights=[0, 0])
+#     inp = torch.zeros(batch_size, n_inp_vecs, vec_size)
+#     cs.diagnose(inp)
+#     out = cs(inp)
+#     assert out.shape == torch.Size([batch_size, n_inp_vecs, n_symbols])
+
+
 # @@@@@@@@@@
 
 

@@ -37,10 +37,21 @@ RESULTS:
     * [X] Add a token of "sequence init"
     * [X] Change "sharpen" param throughout training?
     * [X] Init with a particular control op
-
+    * [X] Upgrade handrolled problem with thinking tokens
+    * [X] Separate control op from val. RESULTS: *seemed* to help generalization go better.
 
 ----------
 TODO:
+
+* [ ] `isinstance`. Add an "int identifier"/"tag"/"type". It looks like the
+      stack ops are struggling to always accurately push/pop/nop given a given
+      input.
+
+* [ ] increasing LR of sharpen
+
+* [ ] bias stacks towards pushing at init (ie net nullop since it pops each step?)
+
+* [ ] Cheat and add work_stack.peek() to dataset + loss function
 
 * [ ] Add another stack/queue to help it handle Think tokens / decide when to output
 
@@ -87,7 +98,7 @@ NUM_VAL_SAMPLES = 100
 MAX_VAL_SEQUENCE_LENGTH = 10  # maximum length of the sequence
 
 BATCH_SIZE = 100
-LR = 1e-2
+LR = 5e-3
 INIT_SHARPEN = 5.0
 
 NUM_EPOCHS = 100
@@ -217,12 +228,9 @@ def generate_addition_synthetic_data(num_samples, max_length):
         # a list of numbers
 
         # numbers = [random.randint(-9, 9) for _ in range(length)] # include negatives
-
         numbers = [random.randint(0, 9) for _ in range(length)] # positives only
 
         # numbers = [random.randint(-2, 2) for _ in range(length)] # a few numbers only
-
-
         inputs = [START_SEQ_SYMBOL] + numbers + [NULL_SYMBOL] * 3 # *3 because of LTAG and RTAG
 
         # sum them together
@@ -347,9 +355,6 @@ def print_grid(data, labels=None):
 
 
 
-
-
-
 if False:
     for ins, outs, mask in train_dl:
         assert ins.shape[0] == BATCH_SIZE
@@ -425,27 +430,6 @@ class LSTMModel(nn.Module):
 ##################################################
 #
 
-
-# @@@@@@@@@@
-# Sandbox for aligning shapes
-
-if False:
-    batch_size = 67
-    vec_size = 1024
-    n_symbols = 13
-    n_inp_vecs = 3
-    cs = CosineSimilarity(
-        Weight(vec_size, n_symbols),
-        dim=2,
-        unsqueeze_inputs=[-1],
-        unsqueeze_weights=[0, 0])
-    inp = torch.zeros(batch_size, n_inp_vecs, vec_size)
-    cs.diagnose(inp)
-    out = cs(inp)
-    assert out.shape == torch.Size([batch_size, n_inp_vecs, n_symbols])
-
-# @@@@@@@@@@
-
 class Stack(nn.Module):
     def __init__(self, dim=1):
         super(Stack, self).__init__()
@@ -499,13 +483,20 @@ class Squeeze(nn.Module):
     def forward(self, x):
         return x.squeeze(self.dim)
 
-class Elementwise(nn.Module):
-    def __init__(self, f):
-        super(Elementwise, self).__init__()
+class F(nn.Module):
+    def __init__(self, f, nargs=2):
+        super(F, self).__init__()
         self.f = f
+        self.nargs = nargs
     def forward(self, input):
-        x, y = input
-        return self.f(x, y)
+        if self.nargs == 1:
+            return self.f(input)
+        if self.nargs == 2:
+            x, y = input
+            return self.f(x, y)
+        if self.nargs == 3:
+            x, y, z = input
+            return self.f(x, y, z)
 
 class Diagnose(nn.Module):
     def __init__(self, should_raise=True):
@@ -536,20 +527,14 @@ def colored(x):
         color = BLACK
     elif 0.4 <= value < 0.6:
         color = YELLOW
-    else:  # 0.6 <= value <= 1.0
+    else:
         color = RED
-
-    # Format and return the colored string
     return f'{color}{value:>.1f}{RESET}'
 
 def rm_format(text):
-    # Regular expression to match ANSI escape codes
+    '''replace all occurrences of the ANSI escape codes with an empty string'''
     ansi_escape_pattern = re.compile(r'\x1B\[[0-9;]*m')
-
-    # Use re.sub() to replace all occurrences of the ANSI escape codes with an empty string
-    sanitized_text = re.sub(ansi_escape_pattern, '', text)
-
-    return sanitized_text
+    return re.sub(ansi_escape_pattern, '', text)
 
 
 class Neuralsymbol(nn.Module):
@@ -560,7 +545,7 @@ class Neuralsymbol(nn.Module):
 
         n_symbols = 128
         init_sharpen = INIT_SHARPEN
-        dropout_p = 0.01
+        dropout_p = 0.0
         n_control_stack = 8
         n_work_stack = 8
 
@@ -636,6 +621,18 @@ class Neuralsymbol(nn.Module):
 
 
         ##########
+        #
+        isinstance_dim = 8 # intentional bottleneck
+        self.isinstance = nn.Sequential(
+            Id(),
+
+            # nn.Linear(vec_size, isinstance_dim),
+            # nn.ReLU(),
+            # nn.Linear(isinstance_dim, vec_size),
+            # nn.Tanh(),
+        )
+
+        ##########
         # Control Stack
         self.control_stack = S.Stack(n_control_stack, input_dim)
         self.control_sharp = nn.Parameter(torch.tensor([init_sharpen]))
@@ -643,8 +640,8 @@ class Neuralsymbol(nn.Module):
         # Control Ops:
         #   Inp: control dim + input dim
         #   Out: control_op + control_val
-        self.control = nn.Sequential(
-            Elementwise(lambda x, y: x * y),
+        self.control_op = nn.Sequential(
+            F(lambda x, y: x * y),
             nn.Linear(vec_size, hidden_dim),
             nn.ReLU(),
             nn.Dropout(self.dropout_p),
@@ -655,13 +652,34 @@ class Neuralsymbol(nn.Module):
             #           nn.Sequential(nn.Sigmoid(), ReverseCosineSimilarity(OpCosSim_1))
             #           ]),
 
-            nn.Linear(hidden_dim, vec_size + 3, bias=True),
-            Split([1, 1, 1, vec_size]),
-            Parallel([nn.Sigmoid(), nn.Sigmoid(), nn.Sigmoid(),
-                      nn.Tanh()
-                      ]),
+            nn.Linear(hidden_dim, 3, bias=True),
+            Split([1, 1, 1]),
+            Parallel([
+                nn.Sigmoid(), nn.Sigmoid(), nn.Sigmoid(),
+            ]),
 
         )
+
+        # Control Ops:
+        #   Inp: control dim + input dim
+        #   Out: control_op + control_val
+        self.control = nn.Sequential(
+            F(lambda x, y: x * y),
+            nn.Linear(vec_size, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(self.dropout_p),
+
+            # nn.Linear(hidden_dim, self.n_op_symbols + 3, bias=True),
+            # Split([1, 1, 1, n_op_symbols]),
+            # Parallel([nn.Sigmoid(), nn.Sigmoid(), nn.Sigmoid(),
+            #           nn.Sequential(nn.Sigmoid(), ReverseCosineSimilarity(OpCosSim_1))
+            #           ]),
+
+            nn.Linear(hidden_dim, vec_size, bias=True),
+            nn.Tanh()
+
+        )
+
 
         ##########
         # Working Stack
@@ -674,7 +692,7 @@ class Neuralsymbol(nn.Module):
         #   Out: work_op + work_val
 
         self.work_op = nn.Sequential(
-            Elementwise(lambda x, y: x * y),
+            F(lambda x, y: x * y),
             nn.Linear(vec_size, hidden_dim),
             nn.ReLU(),
             nn.Dropout(self.dropout_p),
@@ -693,25 +711,22 @@ class Neuralsymbol(nn.Module):
         )
 
         self.work = nn.Sequential(
-            Elementwise(lambda x, y: x * y),
+            F(lambda x, y: x * y),
             nn.Linear(vec_size, hidden_dim),
             nn.ReLU(),
             nn.Dropout(self.dropout_p),
 
-            # nn.Linear(hidden_dim, vec_size, bias=True),
-            # nn.Tanh(),
+            nn.Linear(hidden_dim, vec_size, bias=True),
+            nn.Tanh(),
 
             # nn.Linear(hidden_dim, self.n_symbols, bias=True),
             # nn.Sigmoid(),
             # ReverseCosineSimilarity(CosSim_1),
 
-            nn.Linear(hidden_dim, vec_size, bias=True),
-            nn.Tanh(),
-
         )
 
         self.ff = nn.Sequential(
-            Elementwise(lambda x, y: x * y),
+            F(f=lambda x, y: x * y, nargs=2),
             nn.Linear(vec_size, hidden_dim),
             nn.ReLU(),
             nn.Dropout(self.dropout_p),
@@ -758,10 +773,12 @@ class Neuralsymbol(nn.Module):
             control = self.control_stack.pop()
             work = self.work_stack.pop()
 
-            # collect some thoughts on stack operations
-            c_push, c_pop, c_null_op, new_control = self.control([control, inp])
-            w_push, w_pop, w_null_op = self.work_op([control, inp])
+            c_push, c_pop, c_null_op = self.control_op([control, self.isinstance(inp)])
+            new_control = self.control([control, self.isinstance(inp)])
+            w_push, w_pop, w_null_op = self.work_op([control, self.isinstance(inp)])
             new_work = self.work([work, inp])
+            out = self.ff([control, work])
+            outputs.append(out)
 
             if True:
                 debug['control_pop'].append(c_pop)
@@ -771,19 +788,12 @@ class Neuralsymbol(nn.Module):
                 debug['work_push'].append(w_push)
                 debug['work_null_op'].append(w_null_op)
 
-
-            ##########
-            # Computation
-            out = self.ff([control, work])
-            outputs.append(out)
-
-
             ##########
             # Apply Ops
             c_push, c_pop, c_null_op = c_push.squeeze(1), c_pop.squeeze(1), c_null_op.squeeze(1)
             w_push, w_pop, w_null_op = w_push.squeeze(1), w_pop.squeeze(1), w_null_op.squeeze(1)
 
-            csharp = self.control_sharp # TODO: constrain more? relu?
+            csharp = self.control_sharp
             wsharp = self.work_sharp
             self.control_stack(csharp, c_push, c_pop, c_null_op, new_control)
             self.work_stack(wsharp, w_push, w_pop, w_null_op, new_work)
@@ -886,85 +896,88 @@ def accuracy(model, val_dl, device, debug=False):
     return acc
 
 
-# ##########
-# # Setup
+##########
+# Setup
 
-# # MyModel = LSTMModel
-# MyModel = Neuralsymbol
+# MyModel = LSTMModel
+MyModel = Neuralsymbol
 
-# model = MyModel(
-#     input_dim=VEC_SIZE,
-#     hidden_dim=64,
-#     output_dim=VEC_SIZE,
-# )
-# model.to(DEVICE)
+model = MyModel(
+    input_dim=VEC_SIZE,
+    hidden_dim=64,
+    output_dim=VEC_SIZE,
+)
+model.to(DEVICE)
 
-# # print('disabling gradients for sharpening')
-# # model.control_sharp.requires_grad = False
-# # model.work_sharp.requires_grad = False
+# print('disabling gradients for sharpening')
+# model.control_sharp.requires_grad = False
+# model.work_sharp.requires_grad = False
 
-# opt_params = list(filter(lambda p: p.requires_grad, model.parameters()))
+opt_params = list(filter(lambda p: p.requires_grad, model.parameters()))
 
-# optimizer = optim.Adam(opt_params, lr=LR)
-
-
-# '''
-# optimizer = optim.Adam(opt_params, lr=1e-1)
-# optimizer = optim.Adam(opt_params, lr=1e-2)
-# optimizer = optim.Adam(opt_params, lr=1e-3)
-# optimizer = optim.Adam(opt_params, lr=1e-4)
+optimizer = optim.Adam(opt_params, lr=LR)
 
 
-# SHARP = 10.0
-# with torch.no_grad():
-#     model.control_sharp[:] = SHARP
-#     model.work_sharp[:] = SHARP
-
-# '''
-
-# train_losses = []
-# val_losses = []
-# train_accuracies = []
-# val_accuracies = []
-
-# for epoch in range(NUM_EPOCHS):
-#     train_loss = run_epoch(model, train_dl, optimizer, DEVICE, train_mode=True)
-
-#     # Experiment changing sharpen param
-#     if False: # TODO: rm experiment
-#         with torch.no_grad():
-#             model.control_sharp[:] = torch.randint(8, 20, (1,))
-#             model.work_sharp[:]    = torch.randint(8, 20, (1,))
-
-#     if epoch % 10 == 0:
-#         val_loss = run_epoch(model, val_dl, None, DEVICE, train_mode=False)
-#         tacc = accuracy(model, train_dl, DEVICE)
-#         vacc = accuracy(model, val_dl, DEVICE)
-
-#         train_losses.append(train_loss)
-#         val_losses.append(val_loss)
-#         train_accuracies.append(tacc)
-#         val_accuracies.append(vacc)
-#         print(f'Epoch: {epoch + 1:02} | Train Loss: {train_loss:.5f} | Val. Loss: {val_loss:.3f} | Train Acc: {tacc:.3f} | Val Acc: {vacc:.3f}')
-#     else:
-#         if isinstance(model, Neuralsymbol):
-#             print(f'Epoch: {epoch + 1:02} | Train Loss: {train_loss:.5f} | CSharp: {model.control_sharp.item():.3f} | WSharp: {model.work_sharp.item():.3f}')
-#         else:
-#             print(f'Epoch: {epoch + 1:02} | Train Loss: {train_loss:.5f}')
+'''
+optimizer = optim.Adam(opt_params, lr=1e-1)
+optimizer = optim.Adam(opt_params, lr=1e-2)
+optimizer = optim.Adam(opt_params, lr=1e-3)
+optimizer = optim.Adam(opt_params, lr=1e-4)
 
 
-# # Plot training and validation loss
-# plt.figure()
-# n = np.arange(len(train_losses))
-# plt.plot(n, train_losses, label='Train Loss')
-# plt.plot(n, val_losses, label='Val Loss')
-# plt.plot(n, train_accuracies, label='Train Acc')
-# plt.plot(n, val_accuracies, label='Val Acc')
-# plt.xlabel('Epoch')
-# plt.ylabel('Loss')
-# plt.legend()
-# plt.grid()
-# plt.show()
+SHARP = 10.0
+with torch.no_grad():
+    model.control_sharp[:] = SHARP
+    model.work_sharp[:] = SHARP
+
+'''
+
+train_losses = []
+val_losses = []
+train_accuracies = []
+val_accuracies = []
+
+for epoch in range(NUM_EPOCHS):
+    train_loss = run_epoch(model, train_dl, optimizer, DEVICE, train_mode=True)
+
+    # Experiment changing sharpen param
+    if True: # TODO: rm experiment
+        with torch.no_grad():
+            # model.control_sharp[:] = torch.randint(2, 10, (1,))
+            # model.work_sharp[:]    = torch.randint(2, 10, (1,))
+            model.control_sharp[:] = torch.randint(4, 12, (1,))
+            model.work_sharp[:]    = torch.randint(4, 12, (1,))
+
+
+    if epoch % 10 == 0:
+        val_loss = run_epoch(model, val_dl, None, DEVICE, train_mode=False)
+        tacc = accuracy(model, train_dl, DEVICE)
+        vacc = accuracy(model, val_dl, DEVICE)
+
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+        train_accuracies.append(tacc)
+        val_accuracies.append(vacc)
+        print(f'Epoch: {epoch + 1:02} | Train Loss: {train_loss:.5f} | Val. Loss: {val_loss:.3f} | Train Acc: {tacc:.3f} | Val Acc: {vacc:.3f}')
+    else:
+        if isinstance(model, Neuralsymbol):
+            print(f'Epoch: {epoch + 1:02} | Train Loss: {train_loss:.5f} | CSharp: {model.control_sharp.item():.3f} | WSharp: {model.work_sharp.item():.3f}')
+        else:
+            print(f'Epoch: {epoch + 1:02} | Train Loss: {train_loss:.5f}')
+
+
+# Plot training and validation loss
+plt.figure()
+n = np.arange(len(train_losses))
+plt.plot(n, train_losses, label='Train Loss')
+plt.plot(n, val_losses, label='Val Loss')
+plt.plot(n, train_accuracies, label='Train Acc')
+plt.plot(n, val_accuracies, label='Val Acc')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+plt.grid()
+plt.show()
 
 # Debug performance
 tacc = accuracy(model, val_dl, DEVICE, debug=True)
