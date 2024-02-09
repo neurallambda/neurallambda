@@ -23,6 +23,7 @@ RESULTS:
 * [X] Make new number system for projecting ints. bin -> xor projection. RESULTS: Works okish.
 
 * [X] Make separate path for adding numbers. Tested FFNN separately. RESULTS:
+      found better arch, namely, elem-wise multiply
 
   HUGE: for the Addition sub network, having (x,y) go through a network cat'd
   together sucked, but doing element wise * or + to have a single vec_size
@@ -39,15 +40,38 @@ RESULTS:
     * [X] Init with a particular control op
     * [X] Upgrade handrolled problem with thinking tokens
     * [X] Separate control op from val. RESULTS: *seemed* to help generalization go better.
+    * [X] Scale sharpen with epoch number. RESULTS: Worked great in one instance
 
 ----------
 TODO:
+
+* [ ] Split up all stack ops
+
+* [ ] Add softmax to "type"
+
+* [ ] Add norm linear to "type"
+
+* [ ] SGD optimizer?
+
+* [ ] Norm weight inits
+
+* [ ] How to combine type info with values?
 
 * [ ] `isinstance`. Add an "int identifier"/"tag"/"type". It looks like the
       stack ops are struggling to always accurately push/pop/nop given a given
       input.
 
-* [ ] increasing LR of sharpen
+* [ ] Perfect LENGTH=2 First!
+
+* [ ] Make use of NormalizedLinear, test it!
+
+* [ ] Identify paths of memorization!
+
+* [ ] Verify, was it WEIGHT DECAY messing things up?
+
+* [ ] Noramlizing Linear (like CosSim, but, think it through) Maybe this helps gradients stabilize?
+
+* [ ] increasing LR of sharpen params
 
 * [ ] bias stacks towards pushing at init (ie net nullop since it pops each step?)
 
@@ -92,16 +116,58 @@ DEVICE = 'cuda'
 VEC_SIZE = 256
 
 NUM_TRAIN_SAMPLES = 1000  # total number of samples in the dataset
-MAX_TRAIN_SEQUENCE_LENGTH = 5  # maximum length of the sequence
+MAX_TRAIN_SEQUENCE_LENGTH = 2  # maximum length of the sequence
 
 NUM_VAL_SAMPLES = 100
-MAX_VAL_SEQUENCE_LENGTH = 10  # maximum length of the sequence
+MAX_VAL_SEQUENCE_LENGTH = 3  # maximum length of the sequence
 
 BATCH_SIZE = 100
-LR = 5e-3
+LR = 8e-3
 INIT_SHARPEN = 5.0
 
-NUM_EPOCHS = 100
+NUM_EPOCHS = 300
+
+WD = 0.0
+
+##################################################
+# Linear Norm
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+
+class NormalizedLinear(nn.Module):
+    def __init__(self, in_features, out_features, bias=True):
+        super(NormalizedCustomLinear, self).__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = nn.Parameter(torch.Tensor(out_features, in_features))
+        if bias:
+            self.bias = nn.Parameter(torch.Tensor(out_features))
+        else:
+            self.register_parameter('bias', None)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if self.bias is not None:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
+            bound = 1 / math.sqrt(fan_in)
+            nn.init.uniform_(self.bias, -bound, bound)
+
+    def forward(self, input):
+        # Normalize inputs along the feature dimension (dim=1)
+        normalized_input = F.normalize(input, p=2, dim=1)
+        # Normalize weights along the feature dimension (dim=1) which matches the input's feature dimension
+        normalized_weight = F.normalize(self.weight, p=2, dim=1)
+        # Apply the linear transformation using normalized inputs and weights
+        return F.linear(normalized_input, normalized_weight, self.bias)
+
+    def extra_repr(self):
+        return 'in_features={}, out_features={}, bias={}'.format(
+            self.in_features, self.out_features, self.bias is not None
+        )
 
 
 ##################################################
@@ -545,7 +611,7 @@ class Neuralsymbol(nn.Module):
 
         n_symbols = 128
         init_sharpen = INIT_SHARPEN
-        dropout_p = 0.0
+        dropout_p = 0.1
         n_control_stack = 8
         n_work_stack = 8
 
@@ -560,7 +626,7 @@ class Neuralsymbol(nn.Module):
         self.n_control_stack = n_control_stack
         self.n_work_stack    = n_work_stack
 
-        self.zero_offset = 1e-4
+        self.zero_offset = 1e-6
 
         ##########
         # Operational Symbols (like push/pop/nopping the stack)
@@ -622,14 +688,28 @@ class Neuralsymbol(nn.Module):
 
         ##########
         #
-        isinstance_dim = 8 # intentional bottleneck
-        self.isinstance = nn.Sequential(
-            Id(),
+        isinstance_dim = 4 # intentional bottleneck
+        # type_w = Weight(self.input_dim, isinstance_dim, INIT_W)
+        # TypeCosSim_1 = CosineSimilarity(
+        #     type_w,
+        #     dim=1,
+        #     unsqueeze_inputs=[-1],    # (batch, vec_size, _)
+        #     unsqueeze_weights=[0],    # (_,     vec_size, n_symbols)
+        # ) # (batch, n_symbols)
 
-            # nn.Linear(vec_size, isinstance_dim),
-            # nn.ReLU(),
-            # nn.Linear(isinstance_dim, vec_size),
-            # nn.Tanh(),
+        self.isinstance = nn.Sequential(
+            # Id(),
+
+            nn.Linear(vec_size, isinstance_dim),
+            nn.ReLU(),
+
+            nn.Linear(isinstance_dim, vec_size),
+            nn.Tanh(),
+
+            # nn.Linear(isinstance_dim, isinstance_dim),
+            # nn.Sigmoid(),
+            # ReverseCosineSimilarity(TypeCosSim_1),
+
         )
 
         ##########
@@ -711,7 +791,7 @@ class Neuralsymbol(nn.Module):
         )
 
         self.work = nn.Sequential(
-            F(lambda x, y: x * y),
+            F(lambda x, y, z: x * y * z, nargs=3),
             nn.Linear(vec_size, hidden_dim),
             nn.ReLU(),
             nn.Dropout(self.dropout_p),
@@ -726,7 +806,7 @@ class Neuralsymbol(nn.Module):
         )
 
         self.ff = nn.Sequential(
-            F(f=lambda x, y: x * y, nargs=2),
+            F(f=lambda x, y, z: x * y * z, nargs=3),
             nn.Linear(vec_size, hidden_dim),
             nn.ReLU(),
             nn.Dropout(self.dropout_p),
@@ -773,11 +853,13 @@ class Neuralsymbol(nn.Module):
             control = self.control_stack.pop()
             work = self.work_stack.pop()
 
-            c_push, c_pop, c_null_op = self.control_op([control, self.isinstance(inp)])
-            new_control = self.control([control, self.isinstance(inp)])
-            w_push, w_pop, w_null_op = self.work_op([control, self.isinstance(inp)])
-            new_work = self.work([work, inp])
-            out = self.ff([control, work])
+            typ = self.isinstance(inp)
+
+            c_push, c_pop, c_null_op = self.control_op([control, typ])
+            new_control = self.control([control, typ])
+            w_push, w_pop, w_null_op = self.work_op([control, typ])
+            new_work = self.work([work, inp, typ])
+            out = self.ff([control, work, typ])
             outputs.append(out)
 
             if True:
@@ -915,38 +997,46 @@ model.to(DEVICE)
 
 opt_params = list(filter(lambda p: p.requires_grad, model.parameters()))
 
-optimizer = optim.Adam(opt_params, lr=LR)
+optimizer = optim.Adam(opt_params, lr=LR, weight_decay=WD)
+train_losses = []
+val_losses = []
+train_accuracies = []
+val_accuracies = []
 
 
 '''
-optimizer = optim.Adam(opt_params, lr=1e-1)
-optimizer = optim.Adam(opt_params, lr=1e-2)
-optimizer = optim.Adam(opt_params, lr=1e-3)
-optimizer = optim.Adam(opt_params, lr=1e-4)
+optimizer = optim.Adam(opt_params, weight_decay=WD, lr=1e-1)
+optimizer = optim.Adam(opt_params, weight_decay=WD, lr=1e-2)
+optimizer = optim.Adam(opt_params, weight_decay=WD, lr=1e-3)
+optimizer = optim.Adam(opt_params, weight_decay=WD, lr=1e-4)
 
 
-SHARP = 10.0
+SHARP = 5.0
 with torch.no_grad():
     model.control_sharp[:] = SHARP
     model.work_sharp[:] = SHARP
 
 '''
 
-train_losses = []
-val_losses = []
-train_accuracies = []
-val_accuracies = []
-
 for epoch in range(NUM_EPOCHS):
     train_loss = run_epoch(model, train_dl, optimizer, DEVICE, train_mode=True)
 
     # Experiment changing sharpen param
-    if True: # TODO: rm experiment
+    if False: # TODO: rm experiment
         with torch.no_grad():
             # model.control_sharp[:] = torch.randint(2, 10, (1,))
             # model.work_sharp[:]    = torch.randint(2, 10, (1,))
             model.control_sharp[:] = torch.randint(4, 12, (1,))
             model.work_sharp[:]    = torch.randint(4, 12, (1,))
+
+
+    # Experiment changing sharpen param
+    if True: # TODO: rm experiment
+        with torch.no_grad():
+            a = epoch / NUM_EPOCHS
+            model.control_sharp[:] = (1-a) * 2 + a * 10
+            model.work_sharp[:]    = (1-a) * 2 + a * 10
+
 
 
     if epoch % 10 == 0:
