@@ -88,6 +88,11 @@ class Stack(nn.Module):
         '''
         return einsum('bnv, bn -> bv', self.stack, self.pointer)
 
+    def push(self, val):
+        '''Mutates instance, pushes val. This is a helper function if you know
+        you want to push. It's hard coded into the architecture.'''
+        self.stack, self.pointer = self.push_(val)
+
     def pop(self):
         '''Mutates instance, returns popped val. This is a helper function if
         you know you want to pop, hard coded in to your architecture. (IE
