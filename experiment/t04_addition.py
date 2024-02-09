@@ -41,17 +41,19 @@ RESULTS:
     * [X] Upgrade handrolled problem with thinking tokens
     * [X] Separate control op from val. RESULTS: *seemed* to help generalization go better.
     * [X] Scale sharpen with epoch number. RESULTS: Worked great in one instance
+    * [X] SGD optimizer. RESULTS: much more sensitive to LR, converges slower, can't break through loss barriers.
+
 
 ----------
 TODO:
+
+* [ ] is val loss right?
 
 * [ ] Split up all stack ops
 
 * [ ] Add softmax to "type"
 
 * [ ] Add norm linear to "type"
-
-* [ ] SGD optimizer?
 
 * [ ] Norm weight inits
 
@@ -116,18 +118,21 @@ DEVICE = 'cuda'
 VEC_SIZE = 256
 
 NUM_TRAIN_SAMPLES = 1000  # total number of samples in the dataset
-MAX_TRAIN_SEQUENCE_LENGTH = 2  # maximum length of the sequence
+MAX_TRAIN_SEQUENCE_LENGTH = 3  # maximum length of the sequence
 
 NUM_VAL_SAMPLES = 100
-MAX_VAL_SEQUENCE_LENGTH = 3  # maximum length of the sequence
+MAX_VAL_SEQUENCE_LENGTH = 4  # maximum length of the sequence
 
 BATCH_SIZE = 100
 LR = 8e-3
+WD = 0.0
+MOMENTUM = 0.98 # just for SGD
+
 INIT_SHARPEN = 5.0
 
-NUM_EPOCHS = 300
+NUM_EPOCHS = 100
 
-WD = 0.0
+
 
 ##################################################
 # Linear Norm
@@ -138,8 +143,9 @@ import torch.nn.functional as F
 import math
 
 class NormalizedLinear(nn.Module):
-    def __init__(self, in_features, out_features, bias=True):
-        super(NormalizedCustomLinear, self).__init__()
+    def __init__(self, in_features, out_features, bias=False):
+        ''' If bias=False, this is the same as Cosine Similarity. '''
+        super(NormalizedLinear, self).__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.weight = nn.Parameter(torch.Tensor(out_features, in_features))
@@ -446,6 +452,123 @@ if False:
 
 
 ##################################################
+# Training Functions
+
+
+def run_epoch(model, dl, optimizer, device, train_mode=True):
+    if train_mode:
+        model.train()
+    else:
+        model.eval()
+    epoch_loss = 0
+    steps = 0
+    process = torch.enable_grad if train_mode else torch.no_grad
+    with process():
+        for i, (src, trg, mask) in enumerate(dl):
+            src, trg, mask = src.to(device), trg.to(device), mask.to(device)
+            if train_mode:
+                optimizer.zero_grad()
+            output, latch_states = model(src)
+            loss = ((1 - torch.cosine_similarity(output, trg, dim=2)) * mask).mean()
+            if train_mode:
+                loss.backward()
+                optimizer.step()
+            epoch_loss += loss.item()
+    return epoch_loss / max(steps, 1)
+
+
+def extract_integers_from_seq(sequence, mask):
+    """Extract integers between LTAG and RTAG, ignoring masked elements."""
+    integers = []
+    in_answer = False
+    for v, m in zip(sequence, mask):
+        if m < 0.00000001:
+            continue  # Skip masked elements
+        symbol = unproject(v)
+        if symbol == LTAG:
+            in_answer = True
+        elif symbol == RTAG:
+            in_answer = False
+        elif in_answer and isinstance(symbol, int):
+            integers.append(symbol)
+    return integers
+
+
+def debug_output(src, trg, output, mask, batch_idx, states):
+    """Print debug information for the first element of the batch."""
+    # Unproject and display the sequences for debugging
+    ins_seq = [unproject(x.to('cuda')) for x in src[batch_idx]]  # List of symbols
+    trgs_seq = [unproject(x.to('cuda')) for x in trg[batch_idx]]  # List of symbols
+    outs_seq = [unproject(x.to('cuda')) for x in output[batch_idx]]  # List of symbols
+    mask_seq = mask[batch_idx].to(int).tolist()  # List of integers (0 or 1)
+    ss = []
+    labels = ['inps', 'trgs', 'outs', 'mask']
+    for k, v in states.items():
+        labels.append(k)
+        data = v['data'][batch_idx]  # Tensor: [seq_len, vec_size]
+        fn = v['fn']
+        if fn is not None:
+            ss_seq = [fn(x.to('cuda')) for x in data]  # List of symbols or other representations
+        else:
+            ss_seq = data.tolist()  # List of list of floats
+        ss.append(ss_seq)
+    all_seqs = [[ins_seq], [trgs_seq], [outs_seq], [mask_seq]] + [[s] for s in ss]
+    print_grid(zip(*all_seqs), labels)  # Print the debug information
+
+
+def accuracy(model, val_dl, device, debug=False):
+    model.eval()
+    correct_predictions = 0
+    total_predictions = 0
+    with torch.no_grad():
+        for i, (src, trg, mask) in enumerate(val_dl):
+            output, states = model(src)  # output: Tensor [batch_size, seq_len, vec_size]
+            for batch_idx in range(src.size(0)):  # Iterate over each element in the batch
+                # Extract the sequence for the current batch element
+                mask_seq = mask[batch_idx]
+                predicted_integers = extract_integers_from_seq(output[batch_idx], mask[batch_idx])
+                target_integers = extract_integers_from_seq(trg[batch_idx], mask[batch_idx])
+                # Only compare if both lists are of the same length
+                if len(predicted_integers) == len(target_integers):
+                    total_predictions += len(predicted_integers)
+                    correct_predictions += (torch.tensor(predicted_integers) == torch.tensor(target_integers)).sum().item()
+                else:
+                    total_predictions += max(len(predicted_integers), len(target_integers))
+                if debug and batch_idx < 1:
+                    debug_output(src, trg, output, mask, batch_idx, states)
+    acc = correct_predictions / total_predictions if total_predictions > 0 else 0
+    return acc
+
+
+##########
+# Coloring
+
+def colored(x):
+    # Define the ANSI escape codes for the desired colors
+    BLACK = '\033[30m'
+    YELLOW = '\033[33m'
+    RED = '\033[31m'
+    RESET = '\033[0m'  # Resets the color to default terminal color
+
+    # Retrieve the value
+    value = x.item()
+
+    # Determine the color based on the value
+    if 0.0 <= value < 0.4:
+        color = BLACK
+    elif 0.4 <= value < 0.6:
+        color = YELLOW
+    else:
+        color = RED
+    return f'{color}{value:>.1f}{RESET}'
+
+def rm_format(text):
+    '''replace all occurrences of the ANSI escape codes with an empty string'''
+    ansi_escape_pattern = re.compile(r'\x1B\[[0-9;]*m')
+    return re.sub(ansi_escape_pattern, '', text)
+
+
+##################################################
 
 ##########
 # LSTM
@@ -494,7 +617,7 @@ class LSTMModel(nn.Module):
 
 
 ##################################################
-#
+# PyTorch Tools
 
 class Stack(nn.Module):
     def __init__(self, dim=1):
@@ -549,9 +672,9 @@ class Squeeze(nn.Module):
     def forward(self, x):
         return x.squeeze(self.dim)
 
-class F(nn.Module):
+class Fn(nn.Module):
     def __init__(self, f, nargs=2):
-        super(F, self).__init__()
+        super(Fn, self).__init__()
         self.f = f
         self.nargs = nargs
     def forward(self, input):
@@ -577,31 +700,6 @@ class Diagnose(nn.Module):
 
 ##################################################
 #
-
-def colored(x):
-    # Define the ANSI escape codes for the desired colors
-    BLACK = '\033[30m'
-    YELLOW = '\033[33m'
-    RED = '\033[31m'
-    RESET = '\033[0m'  # Resets the color to default terminal color
-
-    # Retrieve the value
-    value = x.item()
-
-    # Determine the color based on the value
-    if 0.0 <= value < 0.4:
-        color = BLACK
-    elif 0.4 <= value < 0.6:
-        color = YELLOW
-    else:
-        color = RED
-    return f'{color}{value:>.1f}{RESET}'
-
-def rm_format(text):
-    '''replace all occurrences of the ANSI escape codes with an empty string'''
-    ansi_escape_pattern = re.compile(r'\x1B\[[0-9;]*m')
-    return re.sub(ansi_escape_pattern, '', text)
-
 
 class Neuralsymbol(nn.Module):
     def __init__(self,
@@ -700,7 +798,7 @@ class Neuralsymbol(nn.Module):
         self.isinstance = nn.Sequential(
             # Id(),
 
-            nn.Linear(vec_size, isinstance_dim),
+            NormalizedLinear(vec_size, isinstance_dim),
             nn.ReLU(),
 
             nn.Linear(isinstance_dim, vec_size),
@@ -721,8 +819,8 @@ class Neuralsymbol(nn.Module):
         #   Inp: control dim + input dim
         #   Out: control_op + control_val
         self.control_op = nn.Sequential(
-            F(lambda x, y: x * y),
-            nn.Linear(vec_size, hidden_dim),
+            Fn(lambda x, y: x * y),
+            NormalizedLinear(vec_size, hidden_dim),
             nn.ReLU(),
             nn.Dropout(self.dropout_p),
 
@@ -744,8 +842,8 @@ class Neuralsymbol(nn.Module):
         #   Inp: control dim + input dim
         #   Out: control_op + control_val
         self.control = nn.Sequential(
-            F(lambda x, y: x * y),
-            nn.Linear(vec_size, hidden_dim),
+            Fn(lambda x, y: x * y),
+            NormalizedLinear(vec_size, hidden_dim),
             nn.ReLU(),
             nn.Dropout(self.dropout_p),
 
@@ -772,8 +870,8 @@ class Neuralsymbol(nn.Module):
         #   Out: work_op + work_val
 
         self.work_op = nn.Sequential(
-            F(lambda x, y: x * y),
-            nn.Linear(vec_size, hidden_dim),
+            Fn(lambda x, y: x * y),
+            NormalizedLinear(vec_size, hidden_dim),
             nn.ReLU(),
             nn.Dropout(self.dropout_p),
             nn.Linear(hidden_dim, 3, bias=True),
@@ -791,8 +889,8 @@ class Neuralsymbol(nn.Module):
         )
 
         self.work = nn.Sequential(
-            F(lambda x, y, z: x * y * z, nargs=3),
-            nn.Linear(vec_size, hidden_dim),
+            Fn(lambda x, y, z: x * y * z, nargs=3),
+            NormalizedLinear(vec_size, hidden_dim),
             nn.ReLU(),
             nn.Dropout(self.dropout_p),
 
@@ -806,8 +904,8 @@ class Neuralsymbol(nn.Module):
         )
 
         self.ff = nn.Sequential(
-            F(f=lambda x, y, z: x * y * z, nargs=3),
-            nn.Linear(vec_size, hidden_dim),
+            Fn(f=lambda x, y, z: x * y * z, nargs=3),
+            NormalizedLinear(vec_size, hidden_dim),
             nn.ReLU(),
             nn.Dropout(self.dropout_p),
 
@@ -893,90 +991,6 @@ class Neuralsymbol(nn.Module):
 ##################################################
 # Training
 
-def run_epoch(model, dl, optimizer, device, train_mode=True):
-    if train_mode:
-        model.train()
-    else:
-        model.eval()
-    epoch_loss = 0
-    steps = 0
-    process = torch.enable_grad if train_mode else torch.no_grad
-    with process():
-        for i, (src, trg, mask) in enumerate(dl):
-            src, trg, mask = src.to(device), trg.to(device), mask.to(device)
-            if train_mode:
-                optimizer.zero_grad()
-            output, latch_states = model(src)
-            loss = ((1 - torch.cosine_similarity(output, trg, dim=2)) * mask).mean()
-            if train_mode:
-                loss.backward()
-                optimizer.step()
-            epoch_loss += loss.item()
-    return epoch_loss / max(steps, 1)
-
-
-def extract_integers_from_seq(sequence, mask):
-    """Extract integers between LTAG and RTAG, ignoring masked elements."""
-    integers = []
-    in_answer = False
-    for v, m in zip(sequence, mask):
-        if m < 0.00000001:
-            continue  # Skip masked elements
-        symbol = unproject(v)
-        if symbol == LTAG:
-            in_answer = True
-        elif symbol == RTAG:
-            in_answer = False
-        elif in_answer and isinstance(symbol, int):
-            integers.append(symbol)
-    return integers
-
-
-def debug_output(src, trg, output, mask, batch_idx, states):
-    """Print debug information for the first element of the batch."""
-    # Unproject and display the sequences for debugging
-    ins_seq = [unproject(x.to('cuda')) for x in src[batch_idx]]  # List of symbols
-    trgs_seq = [unproject(x.to('cuda')) for x in trg[batch_idx]]  # List of symbols
-    outs_seq = [unproject(x.to('cuda')) for x in output[batch_idx]]  # List of symbols
-    mask_seq = mask[batch_idx].to(int).tolist()  # List of integers (0 or 1)
-    ss = []
-    labels = ['inps', 'trgs', 'outs', 'mask']
-    for k, v in states.items():
-        labels.append(k)
-        data = v['data'][batch_idx]  # Tensor: [seq_len, vec_size]
-        fn = v['fn']
-        if fn is not None:
-            ss_seq = [fn(x.to('cuda')) for x in data]  # List of symbols or other representations
-        else:
-            ss_seq = data.tolist()  # List of list of floats
-        ss.append(ss_seq)
-    all_seqs = [[ins_seq], [trgs_seq], [outs_seq], [mask_seq]] + [[s] for s in ss]
-    print_grid(zip(*all_seqs), labels)  # Print the debug information
-
-
-def accuracy(model, val_dl, device, debug=False):
-    model.eval()
-    correct_predictions = 0
-    total_predictions = 0
-    with torch.no_grad():
-        for i, (src, trg, mask) in enumerate(val_dl):
-            output, states = model(src)  # output: Tensor [batch_size, seq_len, vec_size]
-            for batch_idx in range(src.size(0)):  # Iterate over each element in the batch
-                # Extract the sequence for the current batch element
-                mask_seq = mask[batch_idx]
-                predicted_integers = extract_integers_from_seq(output[batch_idx], mask[batch_idx])
-                target_integers = extract_integers_from_seq(trg[batch_idx], mask[batch_idx])
-                # Only compare if both lists are of the same length
-                if len(predicted_integers) == len(target_integers):
-                    total_predictions += len(predicted_integers)
-                    correct_predictions += (torch.tensor(predicted_integers) == torch.tensor(target_integers)).sum().item()
-                else:
-                    total_predictions += max(len(predicted_integers), len(target_integers))
-                if debug and batch_idx < 1:
-                    debug_output(src, trg, output, mask, batch_idx, states)
-    acc = correct_predictions / total_predictions if total_predictions > 0 else 0
-    return acc
-
 
 ##########
 # Setup
@@ -997,12 +1011,13 @@ model.to(DEVICE)
 
 opt_params = list(filter(lambda p: p.requires_grad, model.parameters()))
 
-optimizer = optim.Adam(opt_params, lr=LR, weight_decay=WD)
+optimizer = optim.AdamW(opt_params, lr=LR, weight_decay=WD)
+# optimizer = optim.SGD(opt_params, lr=LR, weight_decay=WD, momentum=MOMENTUM)
+
 train_losses = []
 val_losses = []
 train_accuracies = []
 val_accuracies = []
-
 
 '''
 optimizer = optim.Adam(opt_params, weight_decay=WD, lr=1e-1)
@@ -1010,6 +1025,11 @@ optimizer = optim.Adam(opt_params, weight_decay=WD, lr=1e-2)
 optimizer = optim.Adam(opt_params, weight_decay=WD, lr=1e-3)
 optimizer = optim.Adam(opt_params, weight_decay=WD, lr=1e-4)
 
+
+optimizer = optim.SGD(opt_params, weight_decay=WD, momentum=MOMENTUM, lr=1e-1, )
+optimizer = optim.SGD(opt_params, weight_decay=WD, momentum=MOMENTUM, lr=1e-2, )
+optimizer = optim.SGD(opt_params, weight_decay=WD, momentum=MOMENTUM, lr=1e-3, )
+optimizer = optim.SGD(opt_params, weight_decay=WD, momentum=MOMENTUM, lr=1e-4, )
 
 SHARP = 5.0
 with torch.no_grad():
@@ -1022,7 +1042,7 @@ for epoch in range(NUM_EPOCHS):
     train_loss = run_epoch(model, train_dl, optimizer, DEVICE, train_mode=True)
 
     # Experiment changing sharpen param
-    if False: # TODO: rm experiment
+    if True: # TODO: rm experiment
         with torch.no_grad():
             # model.control_sharp[:] = torch.randint(2, 10, (1,))
             # model.work_sharp[:]    = torch.randint(2, 10, (1,))
@@ -1030,14 +1050,12 @@ for epoch in range(NUM_EPOCHS):
             model.work_sharp[:]    = torch.randint(4, 12, (1,))
 
 
-    # Experiment changing sharpen param
-    if True: # TODO: rm experiment
-        with torch.no_grad():
-            a = epoch / NUM_EPOCHS
-            model.control_sharp[:] = (1-a) * 2 + a * 10
-            model.work_sharp[:]    = (1-a) * 2 + a * 10
-
-
+    # # Experiment changing sharpen param
+    # if True: # TODO: rm experiment
+    #     with torch.no_grad():
+    #         a = epoch / NUM_EPOCHS
+    #         model.control_sharp[:] = (1-a) * 2 + a * 10
+    #         model.work_sharp[:]    = (1-a) * 2 + a * 10
 
     if epoch % 10 == 0:
         val_loss = run_epoch(model, val_dl, None, DEVICE, train_mode=False)
