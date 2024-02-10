@@ -133,3 +133,64 @@ class Add(nn.Module):
 #         print(f'{i} + {j} = {uout}, {torch.cosine_similarity(out.squeeze(0), project(uout), dim=0):.4f}')
 
 # BRK
+
+
+##################################################
+# Trash heap
+
+        ##########
+        # Operational Symbols (like push/pop/nopping the stack)
+
+        n_op_symbols = 8
+        self.n_op_symbols = n_op_symbols
+
+        # INIT_W = 'orthogonal'
+        INIT_W = 'kaiming'
+        op_sym_w = Weight(self.input_dim, n_op_symbols, INIT_W)
+        self.op_sym_w = op_sym_w
+
+        # cos sim for multiple stacked vecs
+        OpCosSim = CosineSimilarity(
+            op_sym_w,
+            dim=2,
+            unsqueeze_inputs=[-1],    # (batch, N, vec_size, _)  # control + input
+            unsqueeze_weights=[0, 0], # (_,     _, vec_size, n_op_symbols)
+        ) # (batch, N, n_op_symbols)
+
+        # cos sim for a single vec
+        OpCosSim_1 = CosineSimilarity(
+            op_sym_w,
+            dim=1,
+            unsqueeze_inputs=[-1],    # (batch, vec_size, _)
+            unsqueeze_weights=[0],    # (_,     vec_size, n_op_symbols)
+        ) # (batch, n_op_symbols)
+
+
+        ##########
+        # Identifying Symbols
+
+        # INIT_W = 'orthogonal'
+        INIT_W = 'kaiming'
+        sym_w = Weight(self.input_dim, self.n_symbols, INIT_W)
+        self.sym_w = sym_w
+
+        # preload some known symbols
+        with torch.no_grad():
+            for ix, i in enumerate(tokens + list(range(-40, 40))):
+                self.sym_w.weight[:, ix] = project(i)
+
+        # cos sim for multiple stacked vecs
+        CosSim = CosineSimilarity(
+            sym_w,
+            dim=2,
+            unsqueeze_inputs=[-1],    # (batch, N, vec_size, _)  # control + input
+            unsqueeze_weights=[0, 0], # (_,     _, vec_size, n_symbols)
+        ) # (batch, N, n_symbols)
+
+        # cos sim for a single vec
+        CosSim_1 = CosineSimilarity(
+            sym_w,
+            dim=1,
+            unsqueeze_inputs=[-1],    # (batch, vec_size, _)
+            unsqueeze_weights=[0],    # (_,     vec_size, n_symbols)
+        ) # (batch, n_symbols)
