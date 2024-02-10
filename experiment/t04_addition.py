@@ -62,20 +62,24 @@ RESULTS:
     * [X] Add norm linear to "type"
     * [X] Split up all stack ops. RESULTS: helped a little?
     * [X] Verify, was it WEIGHT DECAY messing things up?. RESULTS: no actually, Adam sets to 0.0, AdamW sets to 1e-2
-
+    * [X] ff should not project out of work_stack, but merely guard out of work_stack. RESULTS: super important!
+    * [X] Is CosineSimilarity worth it? Or should I just use FFNNs? RESULTS: it's too much complexity for now, but worth revisiting. In this vein, I want to experiment again with sharing layers between different pieces of the computation.
 
 ----------
 TODO:
 
-* [ ] ff should not project out of work_stack, but merely guard out of work_stack.
+* [ ] Push, Pop, Nop still seem reluctant to go to 0/1
 
-* [ ] intertwine stack ops, like, multiply by nop?
+* [ ] Are we still projecting symbols somewhere? With an init sharpen of 10.0,
+      it's happy to memorize with no generalization at all.
 
 * [ ] is val loss right?
 
 * [ ] Norm weight inits
 
-* [ ] How to combine type info with values?
+* [ ] Different convolution operator than elem-multiply?
+
+* [ ] How to combine type info with values? F.conv1d?
 
 * [ ] `isinstance`. Add an "int identifier"/"tag"/"type". It looks like the
       stack ops are struggling to always accurately push/pop/nop given a given
@@ -96,10 +100,6 @@ TODO:
 * [ ] Add another stack/queue to help it handle Think tokens / decide when to output
 
 * [ ] REGEX MASKED LOSS: Parse out [LEFT_TAG, <Num>, RIGHT_TAG], and mask loss on that.
-
-* [ ] Is CosineSimilarity worth it? Or should I just use FFNNs?
-
-* [ ] Different convolution operator than elem-multiply?
 
 '''
 
@@ -975,12 +975,6 @@ for epoch in range(NUM_EPOCHS):
             # model.work_sharp[:]    = torch.randint(2, 10, (1,))
             model.control_sharp[:] = torch.randint(4, 12, (1,))
             model.work_sharp[:]    = torch.randint(4, 12, (1,))
-
-    # # Experiment changing sharpen param
-    # if epoch < 30:
-    #     with torch.no_grad():
-    #         model.control_sharp[:] = 10
-    #         model.work_sharp[:]    = 10
 
     if False: # TODO: rm experiment
         LO = 5
