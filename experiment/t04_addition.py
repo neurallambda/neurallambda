@@ -127,16 +127,18 @@ torch.manual_seed(152 + 1)
 DEBUG = False
 
 PAUSE_IRRADIATION_P = 0.1
-PAUSE_NUM_APPEND = 3 # "Think" tokens
+MAX_THINK_TOKENS = 3 # "Think" tokens
 PAUSE_APPEND_INDEX = -3  # append tokens before [..., L, 42, R]
 
 DEVICE = 'cuda'
 VEC_SIZE = 256
 
 NUM_TRAIN_SAMPLES = 1000  # total number of samples in the dataset
+MIN_TRAIN_SEQUENCE_LENGTH = 1  # maximum length of the sequence
 MAX_TRAIN_SEQUENCE_LENGTH = 3  # maximum length of the sequence
 
 NUM_VAL_SAMPLES = 100
+MIN_VAL_SEQUENCE_LENGTH = MAX_TRAIN_SEQUENCE_LENGTH + 1
 MAX_VAL_SEQUENCE_LENGTH = MAX_TRAIN_SEQUENCE_LENGTH * 2  # maximum length of the sequence
 
 BATCH_SIZE = 100
@@ -229,27 +231,28 @@ def insert_at_ix(data, num_tokens, index, symbol, null_symbol):
 
 # @@@@@@@@@@
 
-#  Test irradiate_tokens
-data_sample = [{'inputs': ['1', '2', '3'], 'outputs': ['N', 'N', '6'], 'loss_mask': [0, 0, 1]}]
-percentage = 0.5  # 50% of the sequence length
-
-modified_data = irradiate_tokens(data_sample.copy(), percentage, 'T', 'N')
-
-expected_length = len(data_sample[0]['inputs']) + int(len(data_sample[0]['inputs']) * percentage / 100)
-for item in modified_data:
-    assert len(item['inputs']) == expected_length
-    assert len(item['outputs']) == expected_length
-    assert len(item['loss_mask']) == expected_length
-
-# Test append_pause_tokens
-
-data_sample = [{'inputs': ['1', '2', '3', 'N', 'N', 'N'], 'outputs': ['N', 'N', 'N', 'L', '6', 'R'], 'loss_mask': [0, 0, 0, 1, 1, 1]}]
-num_tokens = 2
-insert_index = -3  # Index before the answer
-
-modified_data = insert_at_ix(copy.deepcopy(data_sample), num_tokens, insert_index, 'T', 'N')
-
 if False: # turning off bc I'm hacking in an "F" token for "final, now output an answer"
+    #  Test irradiate_tokens
+    data_sample = [{'inputs': ['1', '2', '3'], 'outputs': ['N', 'N', '6'], 'loss_mask': [0, 0, 1]}]
+    percentage = 0.5  # 50% of the sequence length
+
+    modified_data = irradiate_tokens(data_sample.copy(), percentage, 'T', 'N')
+
+    expected_length = len(data_sample[0]['inputs']) + int(len(data_sample[0]['inputs']) * percentage / 100)
+    for item in modified_data:
+        assert len(item['inputs']) == expected_length
+        assert len(item['outputs']) == expected_length
+        assert len(item['loss_mask']) == expected_length
+
+    # Test append_pause_tokens
+
+    data_sample = [{'inputs': ['1', '2', '3', 'N', 'N', 'N'], 'outputs': ['N', 'N', 'N', 'L', '6', 'R'], 'loss_mask': [0, 0, 0, 1, 1, 1]}]
+    num_tokens = 2
+    insert_index = -3  # Index before the answer
+
+    modified_data = insert_at_ix(copy.deepcopy(data_sample), num_tokens, insert_index, 'T', 'N')
+
+
     expected_length = len(data_sample[0]['inputs']) + num_tokens
     for item in modified_data:
         assert len(item['inputs']) == expected_length
@@ -276,10 +279,11 @@ PADDING_SYMBOL  = 'P'
 START_SEQ_SYMBOL = 'S'
 NULL_SYMBOL     = 'N'
 THINKING_SYMBOL = 'T'
+FINISHED_THINKING_SYMBOL = 'F'
 LTAG = 'L' # answer start
 RTAG = 'R' # answer end
 
-tokens = [NULL_SYMBOL, PADDING_SYMBOL, THINKING_SYMBOL, LTAG, RTAG, START_DATA_SYMBOL, START_SEQ_SYMBOL]
+tokens = [NULL_SYMBOL, PADDING_SYMBOL, THINKING_SYMBOL, FINISHED_THINKING_SYMBOL, LTAG, RTAG, START_DATA_SYMBOL, START_SEQ_SYMBOL]
 
 all_symbols = Sym.nums + Sym.chars + tokens
 
@@ -291,7 +295,7 @@ project = int_map.project
 unproject = int_map.unproject
 # symbols_vec = int_map.projection_matrix
 
-def generate_addition_synthetic_data(num_samples, max_length):
+def generate_addition_synthetic_data(num_samples, min_length, max_length, max_think_tokens):
     """Generates synthetic data for the addition task.
 
     Example 1:
@@ -299,7 +303,6 @@ def generate_addition_synthetic_data(num_samples, max_length):
      ins 4 1 5 9 7  N
     outs N N N N N 26
     mask 0 0 0 0 0  1
-
 
     Example 2:
 
@@ -310,7 +313,8 @@ def generate_addition_synthetic_data(num_samples, max_length):
     """
     data = []
     for _ in range(num_samples):
-        length = random.randint(2, max_length)
+        length = random.randint(min_length, max_length)
+        n_think = random.randint(1, max_think_tokens)
 
         # a list of numbers
 
@@ -318,16 +322,17 @@ def generate_addition_synthetic_data(num_samples, max_length):
         numbers = [random.randint(0, 9) for _ in range(length)] # positives only
 
         # numbers = [random.randint(-2, 2) for _ in range(length)] # a few numbers only
-        inputs = [START_SEQ_SYMBOL] + numbers + [NULL_SYMBOL] * 3 # *3 because of LTAG and RTAG
-
-        # sum them together
-        # outputs = [NULL_SYMBOL] * len(numbers) + [LTAG, sum(numbers), RTAG]
-
-        # print('DOING %10 VERSION')
-        outputs = [NULL_SYMBOL] * (len(numbers) + 1) + [LTAG, sum(numbers) % 10, RTAG]
+        inputs = (
+            [START_SEQ_SYMBOL] +
+            numbers +
+            [THINKING_SYMBOL] * (n_think - 1) +
+            [FINISHED_THINKING_SYMBOL] +
+            [NULL_SYMBOL] * 3 # *3 because of LTAG and RTAG
+        )
+        outputs = [NULL_SYMBOL] * (len(numbers) + 1 + n_think) + [LTAG, sum(numbers) % 10, RTAG]
 
         # loss mask helps to ignore loss on the random seed data
-        loss_mask = [0] * (len(numbers) + 1) + [1, 1, 1]
+        loss_mask = [0] * (len(numbers) + 1 + n_think) + [1, 1, 1]
 
         assert len(inputs) == len(outputs) == len(loss_mask)
         data.append({
@@ -338,16 +343,16 @@ def generate_addition_synthetic_data(num_samples, max_length):
     return data
 
 # TRAIN
-train_data = generate_addition_synthetic_data(NUM_TRAIN_SAMPLES, MAX_TRAIN_SEQUENCE_LENGTH)
+train_data = generate_addition_synthetic_data(NUM_TRAIN_SAMPLES, MIN_TRAIN_SEQUENCE_LENGTH, MAX_TRAIN_SEQUENCE_LENGTH, MAX_THINK_TOKENS)
 # Inject pause tokens
-train_data = insert_at_ix(train_data, PAUSE_NUM_APPEND, PAUSE_APPEND_INDEX, symbol=THINKING_SYMBOL, null_symbol=NULL_SYMBOL)
+# train_data = insert_at_ix(train_data, MAX_THINK_TOKENS, PAUSE_APPEND_INDEX, symbol=THINKING_SYMBOL, null_symbol=NULL_SYMBOL)
 # train_data = irradiate_tokens(train_data, PAUSE_IRRADIATION_P, symbol=THINKING_SYMBOL, null_symbol=NULL_SYMBOL)
 
 
 # VAL
-val_data = generate_addition_synthetic_data(NUM_TRAIN_SAMPLES, MAX_VAL_SEQUENCE_LENGTH)
+val_data = generate_addition_synthetic_data(NUM_TRAIN_SAMPLES, MIN_VAL_SEQUENCE_LENGTH, MAX_VAL_SEQUENCE_LENGTH, MAX_THINK_TOKENS)
 # Inject pause tokens
-val_data = insert_at_ix(val_data, PAUSE_NUM_APPEND, PAUSE_APPEND_INDEX, symbol=THINKING_SYMBOL, null_symbol=NULL_SYMBOL)
+# val_data = insert_at_ix(val_data, MAX_THINK_TOKENS, PAUSE_APPEND_INDEX, symbol=THINKING_SYMBOL, null_symbol=NULL_SYMBOL)
 # val_data = irradiate_tokens(val_data, PAUSE_IRRADIATION_P, symbol=THINKING_SYMBOL, null_symbol=NULL_SYMBOL)
 
 
@@ -747,7 +752,7 @@ class Neuralsymbol(nn.Module):
         self.isinstance = nn.Sequential(
             NormalizedLinear(vec_size, isinstance_dim, bias=False),
             nn.ReLU(),
-            nn.Softmax(),
+            nn.Softmax(dim=1),
             NormalizedLinear(isinstance_dim, vec_size, bias=False),
             nn.Tanh(),
         )
@@ -769,7 +774,7 @@ class Neuralsymbol(nn.Module):
                 Fn(lambda x, y: x * y),
                 nn.Linear(vec_size, hidden_dim, bias=True),
                 # nn.ReLU(),
-                nn.Softmax(),
+                nn.Softmax(dim=1),
                 nn.Linear(hidden_dim, 1, bias=True),
                 nn.Sigmoid(),
             )
@@ -805,7 +810,7 @@ class Neuralsymbol(nn.Module):
                 Fn(lambda x, y: x * y),
                 nn.Linear(vec_size, hidden_dim, bias=True),
                 # nn.ReLU(),
-                nn.Softmax(),
+                nn.Softmax(dim=1),
                 nn.Linear(hidden_dim, 1, bias=True),
                 nn.Sigmoid(),
             )
@@ -831,7 +836,7 @@ class Neuralsymbol(nn.Module):
             NormalizedLinear(vec_size, hidden_dim, bias=False),
             nn.ReLU(),
             nn.Linear(hidden_dim, self.n_out_sym + 1, bias=False), # n_out + work
-            nn.Softmax()
+            nn.Softmax(dim=1)
         )
 
 
