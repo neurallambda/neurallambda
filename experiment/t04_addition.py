@@ -9,6 +9,11 @@ GOOD RECIPES:
   * DO NOT PROJECT SYMBOLS, merely interpolate them in/out
   * All layers NormalizedLinear; repeatedly anneal sharp from fuzzy to sharp;
 
+  * Dumb things
+    * Don't do Sigmoid into Softmax, duh. ReLU into softmax seems ok
+    * Don't do NormalizedLinear into Sigmoid, duh.
+    * Watch where you put Dropout. IE right after a Softmax? You're gonna break something.
+
 
 ----------
 RESULTS:
@@ -40,8 +45,6 @@ RESULTS:
 
 * [X] Perfect LENGTH=2 First!
 
-* [X] Don't do Sigmoid into Softmax, duh. ReLU into softmax seems ok
-* [X] Don't do NormalizedLinear into Sigmoid, duh.
 
 * Linear encourages rote memorization, NormalizedLinear helps algorithmic generalization?
 
@@ -140,7 +143,7 @@ BATCH_SIZE = 100
 LR = 1e-2
 WD = 0.0
 
-INIT_SHARPEN = 5.0
+INIT_SHARPEN = 2.0
 
 NUM_EPOCHS = 100
 
@@ -720,7 +723,7 @@ class Neuralsymbol(nn.Module):
         super(Neuralsymbol, self).__init__()
 
         init_sharpen = INIT_SHARPEN
-        dropout_p = 0.05
+        dropout_p = 0.0
         n_control_stack = 4
         n_work_stack = 4
 
@@ -762,21 +765,13 @@ class Neuralsymbol(nn.Module):
 
         def control_op_1():
             return nn.Sequential(
+                # Parallel([nn.Dropout(self.dropout_p), nn.Dropout(self.dropout_p),]),
                 Fn(lambda x, y: x * y),
                 nn.Linear(vec_size, hidden_dim, bias=True),
                 # nn.ReLU(),
                 nn.Softmax(),
-                nn.Dropout(self.dropout_p),
                 nn.Linear(hidden_dim, 1, bias=True),
                 nn.Sigmoid(),
-
-                # Fn(lambda x, y: x * y),
-                # NormalizedLinear(vec_size, hidden_dim),
-                # nn.ReLU(),
-                # nn.Softmax(),
-                # nn.Dropout(self.dropout_p),
-                # nn.Linear(hidden_dim, 1, bias=False),
-                # nn.Sigmoid(),
             )
 
         self.cop1 = control_op_1()
@@ -806,22 +801,15 @@ class Neuralsymbol(nn.Module):
 
         def work_op_1():
             return nn.Sequential(
+                # Parallel([nn.Dropout(self.dropout_p), nn.Dropout(self.dropout_p),]),
                 Fn(lambda x, y: x * y),
                 nn.Linear(vec_size, hidden_dim, bias=True),
                 # nn.ReLU(),
                 nn.Softmax(),
-                nn.Dropout(self.dropout_p),
                 nn.Linear(hidden_dim, 1, bias=True),
                 nn.Sigmoid(),
-
-                # Fn(lambda x, y: x * y),
-                # NormalizedLinear(vec_size, hidden_dim, bias=False),
-                # nn.ReLU(),
-                # nn.Softmax(),
-                # nn.Dropout(self.dropout_p),
-                # nn.Linear(hidden_dim, 1, bias=False),
-                # nn.Sigmoid(),
             )
+
         self.wop1 = work_op_1()
         self.wop2 = work_op_1()
         self.wop3 = work_op_1()
@@ -835,22 +823,13 @@ class Neuralsymbol(nn.Module):
             nn.Tanh(),
         )
 
-        # self.ff = nn.Sequential(
-        #     Fn(f=lambda x, y, z: x * y * z, nargs=3),
-        #     NormalizedLinear(vec_size, hidden_dim, bias=False),
-        #     nn.ReLU(),
-        #     nn.Dropout(self.dropout_p),
-        #     NormalizedLinear(hidden_dim, vec_size, bias=False),
-        #     nn.Tanh(),
-        # )
-
         self.n_out_sym = 4
         self.out_sym = nn.Parameter(torch.randn(self.n_out_sym, vec_size))
         self.select_out = nn.Sequential(
+            Parallel([nn.Dropout(self.dropout_p), nn.Dropout(self.dropout_p), nn.Dropout(self.dropout_p)]),
             Fn(f=lambda x, y, z: x * y * z, nargs=3),
             NormalizedLinear(vec_size, hidden_dim, bias=False),
             nn.ReLU(),
-            nn.Dropout(self.dropout_p),
             nn.Linear(hidden_dim, self.n_out_sym + 1, bias=False), # n_out + work
             nn.Softmax()
         )
@@ -902,11 +881,6 @@ class Neuralsymbol(nn.Module):
 
             new_control = self.control([control, typ])
             new_work = self.work([work, inp, typ])
-
-
-            # out = self.ff([control, work, typ])
-            # outputs.append(out)
-
 
             select_out = self.select_out([control, work, typ])
             options = torch.cat([
@@ -1008,7 +982,7 @@ for epoch in range(NUM_EPOCHS):
     #         model.control_sharp[:] = 10
     #         model.work_sharp[:]    = 10
 
-    if True: # TODO: rm experiment
+    if False: # TODO: rm experiment
         LO = 5
         HI = 15
         with torch.no_grad():
