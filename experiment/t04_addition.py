@@ -32,6 +32,10 @@ RESULTS:
 * [X] Simplify addition problem, make it addition with mod 10. RESULTS: Way
       easier to learn, especially when dataset is sparse.
 
+* [X] Perfect LENGTH=2 First!
+
+* [X] Don't do Sigmoid into Softmax, duh. ReLU into softmax seems ok
+
 * Dubious
     * [X] DEBUG track pushes/pops/nops
     * [X] Add (CLEAN UP) a token of "ok, now output the answer".
@@ -42,18 +46,20 @@ RESULTS:
     * [X] Separate control op from val. RESULTS: *seemed* to help generalization go better.
     * [X] Scale sharpen with epoch number. RESULTS: Worked great in one instance
     * [X] SGD optimizer. RESULTS: much more sensitive to LR, converges slower, can't break through loss barriers.
+    * [X] Add softmax to "type"
+    * [X] Add norm linear to "type"
+    * [X] Split up all stack ops. RESULTS: helped a little?
+    * [X] Verify, was it WEIGHT DECAY messing things up?. RESULTS: no actually, Adam sets to 0.0, AdamW sets to 1e-2
 
+* GOOD RECIPES
+  * All layers NormalizedLinear; repeatedly anneal sharp from fuzzy to sharp;
 
 ----------
 TODO:
 
+* [ ] intertwine stack ops, like, multiply by nop?
+
 * [ ] is val loss right?
-
-* [ ] Split up all stack ops
-
-* [ ] Add softmax to "type"
-
-* [ ] Add norm linear to "type"
 
 * [ ] Norm weight inits
 
@@ -63,13 +69,9 @@ TODO:
       stack ops are struggling to always accurately push/pop/nop given a given
       input.
 
-* [ ] Perfect LENGTH=2 First!
-
 * [ ] Make use of NormalizedLinear, test it!
 
 * [ ] Identify paths of memorization!
-
-* [ ] Verify, was it WEIGHT DECAY messing things up?
 
 * [ ] Noramlizing Linear (like CosSim, but, think it through) Maybe this helps gradients stabilize?
 
@@ -581,7 +583,7 @@ class LSTMModel(nn.Module):
         self.output_dim = output_dim
         self.lc1 = nn.LSTMCell(input_dim, hidden_dim)
         self.lc2 = nn.LSTMCell(hidden_dim, hidden_dim)
-        self.fc = nn.Linear(hidden_dim, output_dim)
+        self.fc = NormalizedLinear(hidden_dim, output_dim)
 
     def forward(self, x):
         # Initialize the hidden and cell states to zeros
@@ -709,9 +711,9 @@ class Neuralsymbol(nn.Module):
 
         n_symbols = 128
         init_sharpen = INIT_SHARPEN
-        dropout_p = 0.1
-        n_control_stack = 8
-        n_work_stack = 8
+        dropout_p = 0.0
+        n_control_stack = 4
+        n_work_stack = 4
 
         vec_size = input_dim
         self.vec_size = vec_size
@@ -800,11 +802,13 @@ class Neuralsymbol(nn.Module):
 
             NormalizedLinear(vec_size, isinstance_dim),
             nn.ReLU(),
+            # nn.Sigmoid(),
+            nn.Softmax(),
 
-            nn.Linear(isinstance_dim, vec_size),
+            NormalizedLinear(isinstance_dim, vec_size),
             nn.Tanh(),
 
-            # nn.Linear(isinstance_dim, isinstance_dim),
+            # NormalizedLinear(isinstance_dim, isinstance_dim),
             # nn.Sigmoid(),
             # ReverseCosineSimilarity(TypeCosSim_1),
 
@@ -815,45 +819,68 @@ class Neuralsymbol(nn.Module):
         self.control_stack = S.Stack(n_control_stack, input_dim)
         self.control_sharp = nn.Parameter(torch.tensor([init_sharpen]))
 
+        # # Control Ops:
+        # #   Inp: control dim + input dim
+        # #   Out: control_op + control_val
+        # self.control_op = nn.Sequential(
+        #     Fn(lambda x, y: x * y),
+        #     NormalizedLinear(vec_size, hidden_dim),
+        #     # nn.ReLU(),
+        #     nn.Sigmoid(),
+        #     nn.Softmax(),
+
+        #     nn.Dropout(self.dropout_p),
+
+        #     # NormalizedLinear(hidden_dim, self.n_op_symbols + 3, bias=True),
+        #     # Split([1, 1, 1, n_op_symbols]),
+        #     # Parallel([nn.Sigmoid(), nn.Sigmoid(), nn.Sigmoid(),
+        #     #           nn.Sequential(nn.Sigmoid(), ReverseCosineSimilarity(OpCosSim_1))
+        #     #           ]),
+
+        #     NormalizedLinear(hidden_dim, 3, bias=True),
+        #     Split([1, 1, 1]),
+        #     Parallel([
+        #         nn.Sigmoid(), nn.Sigmoid(), nn.Sigmoid(),
+        #     ]),
+
+        # )
+
         # Control Ops:
         #   Inp: control dim + input dim
         #   Out: control_op + control_val
-        self.control_op = nn.Sequential(
-            Fn(lambda x, y: x * y),
-            NormalizedLinear(vec_size, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(self.dropout_p),
 
-            # nn.Linear(hidden_dim, self.n_op_symbols + 3, bias=True),
-            # Split([1, 1, 1, n_op_symbols]),
-            # Parallel([nn.Sigmoid(), nn.Sigmoid(), nn.Sigmoid(),
-            #           nn.Sequential(nn.Sigmoid(), ReverseCosineSimilarity(OpCosSim_1))
-            #           ]),
+        def control_op_1():
+            return nn.Sequential(
+                Fn(lambda x, y: x * y),
+                NormalizedLinear(vec_size, hidden_dim),
+                nn.ReLU(),
+                # nn.Sigmoid(),
+                nn.Softmax(),
+                nn.Dropout(self.dropout_p),
+                NormalizedLinear(hidden_dim, 1, bias=True),
+                nn.Sigmoid(),
+            )
 
-            nn.Linear(hidden_dim, 3, bias=True),
-            Split([1, 1, 1]),
-            Parallel([
-                nn.Sigmoid(), nn.Sigmoid(), nn.Sigmoid(),
-            ]),
+        self.cop1 = control_op_1()
+        self.cop2 = control_op_1()
+        self.cop3 = control_op_1()
 
-        )
-
-        # Control Ops:
-        #   Inp: control dim + input dim
-        #   Out: control_op + control_val
         self.control = nn.Sequential(
             Fn(lambda x, y: x * y),
             NormalizedLinear(vec_size, hidden_dim),
             nn.ReLU(),
+            # nn.Sigmoid(),
+            nn.Softmax(),
+
             nn.Dropout(self.dropout_p),
 
-            # nn.Linear(hidden_dim, self.n_op_symbols + 3, bias=True),
+            # NormalizedLinear(hidden_dim, self.n_op_symbols + 3, bias=True),
             # Split([1, 1, 1, n_op_symbols]),
             # Parallel([nn.Sigmoid(), nn.Sigmoid(), nn.Sigmoid(),
             #           nn.Sequential(nn.Sigmoid(), ReverseCosineSimilarity(OpCosSim_1))
             #           ]),
 
-            nn.Linear(hidden_dim, vec_size, bias=True),
+            NormalizedLinear(hidden_dim, vec_size, bias=True),
             nn.Tanh()
 
         )
@@ -869,35 +896,55 @@ class Neuralsymbol(nn.Module):
         #   Inp: work dim + input dim
         #   Out: work_op + work_val
 
-        self.work_op = nn.Sequential(
-            Fn(lambda x, y: x * y),
-            NormalizedLinear(vec_size, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(self.dropout_p),
-            nn.Linear(hidden_dim, 3, bias=True),
-            Split([1, 1, 1]),
-            Parallel([nn.Sigmoid(), nn.Sigmoid(), nn.Sigmoid(),]),
+        # self.work_op = nn.Sequential(
+        #     Fn(lambda x, y: x * y),
+        #     NormalizedLinear(vec_size, hidden_dim),
+        #     nn.ReLU(),
+        #     # nn.Sigmoid(),
+        #     nn.Softmax(),
+        #     nn.Dropout(self.dropout_p),
+        #     NormalizedLinear(hidden_dim, 3, bias=True),
+        #     Split([1, 1, 1]),
+        #     Parallel([nn.Sigmoid(), nn.Sigmoid(), nn.Sigmoid(),]),
 
+        #     # Stack(dim=1), # input = (control, input)
+        #     # CosSim,
+        #     # nn.GELU(), # prevent negative sim
+        #     # nn.Flatten(start_dim=1, end_dim=2), # (batch, 2 * n_symbols)
+        #     # NormalizedLinear(n_symbols * 2, 3), #(batch, work_decision + work_value)
+        #     # Split([1, 1, 1]),
+        #     # Parallel([nn.Sigmoid(), nn.Sigmoid(), nn.Sigmoid()]),
+        # )
 
-            # Stack(dim=1), # input = (control, input)
-            # CosSim,
-            # nn.GELU(), # prevent negative sim
-            # nn.Flatten(start_dim=1, end_dim=2), # (batch, 2 * n_symbols)
-            # nn.Linear(n_symbols * 2, 3), #(batch, work_decision + work_value)
-            # Split([1, 1, 1]),
-            # Parallel([nn.Sigmoid(), nn.Sigmoid(), nn.Sigmoid()]),
-        )
+        def work_op_1():
+            return nn.Sequential(
+                Fn(lambda x, y: x * y),
+                NormalizedLinear(vec_size, hidden_dim),
+                nn.ReLU(),
+                # nn.Sigmoid(),
+                nn.Softmax(),
+                nn.Dropout(self.dropout_p),
+                NormalizedLinear(hidden_dim, 1, bias=True),
+                nn.Sigmoid(),
+            )
+        self.wop1 = work_op_1()
+        self.wop2 = work_op_1()
+        self.wop3 = work_op_1()
+
 
         self.work = nn.Sequential(
             Fn(lambda x, y, z: x * y * z, nargs=3),
             NormalizedLinear(vec_size, hidden_dim),
             nn.ReLU(),
+            # nn.Sigmoid(),
+            # nn.Softmax(),
+
             nn.Dropout(self.dropout_p),
 
-            nn.Linear(hidden_dim, vec_size, bias=True),
+            NormalizedLinear(hidden_dim, vec_size, bias=True),
             nn.Tanh(),
 
-            # nn.Linear(hidden_dim, self.n_symbols, bias=True),
+            # NormalizedLinear(hidden_dim, self.n_symbols, bias=True),
             # nn.Sigmoid(),
             # ReverseCosineSimilarity(CosSim_1),
 
@@ -907,12 +954,14 @@ class Neuralsymbol(nn.Module):
             Fn(f=lambda x, y, z: x * y * z, nargs=3),
             NormalizedLinear(vec_size, hidden_dim),
             nn.ReLU(),
+            # nn.Sigmoid(),
+            # nn.Softmax(),
             nn.Dropout(self.dropout_p),
 
-            nn.Linear(hidden_dim, vec_size, bias=True),
+            NormalizedLinear(hidden_dim, vec_size, bias=True),
             nn.Tanh(),
 
-            # nn.Linear(hidden_dim, n_symbols, bias=True),
+            # NormalizedLinear(hidden_dim, n_symbols, bias=True),
             # nn.Sigmoid(),
             # ReverseCosineSimilarity(CosSim_1),
         )
@@ -953,9 +1002,14 @@ class Neuralsymbol(nn.Module):
 
             typ = self.isinstance(inp)
 
-            c_push, c_pop, c_null_op = self.control_op([control, typ])
+            # c_push, c_pop, c_null_op = self.control_op([control, typ])
+            cinp = [control, typ]
+            c_push, c_pop, c_null_op = self.cop1(cinp), self.cop2(cinp), self.cop3(cinp)
+
+            # w_push, w_pop, w_null_op = self.work_op([control, typ])
+            w_push, w_pop, w_null_op = self.wop1(cinp), self.wop2(cinp), self.wop3(cinp)
+
             new_control = self.control([control, typ])
-            w_push, w_pop, w_null_op = self.work_op([control, typ])
             new_work = self.work([work, inp, typ])
             out = self.ff([control, work, typ])
             outputs.append(out)
@@ -1012,7 +1066,6 @@ model.to(DEVICE)
 opt_params = list(filter(lambda p: p.requires_grad, model.parameters()))
 
 optimizer = optim.AdamW(opt_params, lr=LR, weight_decay=WD)
-# optimizer = optim.SGD(opt_params, lr=LR, weight_decay=WD, momentum=MOMENTUM)
 
 train_losses = []
 val_losses = []
@@ -1025,12 +1078,6 @@ optimizer = optim.Adam(opt_params, weight_decay=WD, lr=1e-2)
 optimizer = optim.Adam(opt_params, weight_decay=WD, lr=1e-3)
 optimizer = optim.Adam(opt_params, weight_decay=WD, lr=1e-4)
 
-
-optimizer = optim.SGD(opt_params, weight_decay=WD, momentum=MOMENTUM, lr=1e-1, )
-optimizer = optim.SGD(opt_params, weight_decay=WD, momentum=MOMENTUM, lr=1e-2, )
-optimizer = optim.SGD(opt_params, weight_decay=WD, momentum=MOMENTUM, lr=1e-3, )
-optimizer = optim.SGD(opt_params, weight_decay=WD, momentum=MOMENTUM, lr=1e-4, )
-
 SHARP = 5.0
 with torch.no_grad():
     model.control_sharp[:] = SHARP
@@ -1042,7 +1089,7 @@ for epoch in range(NUM_EPOCHS):
     train_loss = run_epoch(model, train_dl, optimizer, DEVICE, train_mode=True)
 
     # Experiment changing sharpen param
-    if True: # TODO: rm experiment
+    if False: # TODO: rm experiment
         with torch.no_grad():
             # model.control_sharp[:] = torch.randint(2, 10, (1,))
             # model.work_sharp[:]    = torch.randint(2, 10, (1,))
@@ -1050,12 +1097,14 @@ for epoch in range(NUM_EPOCHS):
             model.work_sharp[:]    = torch.randint(4, 12, (1,))
 
 
-    # # Experiment changing sharpen param
-    # if True: # TODO: rm experiment
-    #     with torch.no_grad():
-    #         a = epoch / NUM_EPOCHS
-    #         model.control_sharp[:] = (1-a) * 2 + a * 10
-    #         model.work_sharp[:]    = (1-a) * 2 + a * 10
+    # Experiment changing sharpen param
+    if True: # TODO: rm experiment
+        LO = 5
+        HI = 15
+        with torch.no_grad():
+            a = epoch / NUM_EPOCHS
+            model.control_sharp[:] = (1-a) * LO + a * HI
+            model.work_sharp[:]    = (1-a) * LO + a * HI
 
     if epoch % 10 == 0:
         val_loss = run_epoch(model, val_dl, None, DEVICE, train_mode=False)
