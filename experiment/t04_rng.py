@@ -19,7 +19,125 @@ LVL1: All data is generated with locked window size.
 
 LVL2: Agent has to infer the correct window size.
 
+
+--------------------------------------------------
+--------------------------------------------------
+--------------------------------------------------
+
+
+Variable Time Computation!
+
+Test Variable Time Computation by building an LM that can process strings of numbers added together
+
+----------
+GOOD RECIPES:
+  * DO NOT PROJECT SYMBOLS, merely interpolate them in/out
+  * All layers NormalizedLinear; repeatedly anneal sharp from fuzzy to sharp;
+
+  * Dumb things
+    * Don't do Sigmoid into Softmax, duh. ReLU into softmax seems ok
+    * Don't do NormalizedLinear into Sigmoid, duh.
+    * Watch where you put Dropout. IE right after a Softmax? You're gonna break something.
+
+
+----------
+RESULTS:
+
+* [X] Preloading known symbols into the CosineSimilarity weights helps training
+      immensely, but I'm not sure I want to keep using the CosSim layers.
+
+* [X] How does stack sharpening behave? Barely moves from init, but then after
+      crossing energy thresholds, it can move a little. Pretty stable though,
+      all things considered.
+
+* [X] Make "operation vocabulary" separate from other symbol
+      vocabulary. RESULT: GREAT! This gave a speed up, and improved learning,
+      and generalization.
+
+* [X] separate work decision and semantics. RESULTS: This seemed to really help generalization.
+
+* [X] Make new number system for projecting ints. bin -> xor projection. RESULTS: Works okish.
+
+* [X] Make separate path for adding numbers. Tested FFNN separately. RESULTS:
+      found better arch, namely, elem-wise multiply
+
+  HUGE: for the Addition sub network, having (x,y) go through a network cat'd
+  together sucked, but doing element wise * or + to have a single vec_size
+  vector go through the FFNN totally rocked.
+
+* [X] Simplify addition problem, make it addition with mod 10. RESULTS: Way
+      easier to learn, especially when dataset is sparse.
+
+* [X] Perfect LENGTH=2 First!
+
+
+* Linear encourages rote memorization, NormalizedLinear helps algorithmic generalization?
+
+* Dubious
+    * [X] DEBUG track pushes/pops/nops
+    * [X] Add (CLEAN UP) a token of "ok, now output the answer".
+    * [X] Add a token of "sequence init"
+    * [X] Change "sharpen" param throughout training?
+    * [X] Init with a particular control op
+    * [X] Upgrade handrolled problem with thinking tokens
+    * [X] Separate control op from val. RESULTS: *seemed* to help generalization go better.
+    * [X] Scale sharpen with epoch number. RESULTS: Worked great in one instance
+    * [X] SGD optimizer. RESULTS: much more sensitive to LR, converges slower, can't break through loss barriers.
+    * [X] Add softmax to "type"
+    * [X] Add norm linear to "type"
+    * [X] Split up all stack ops. RESULTS: helped a little?
+    * [X] Verify, was it WEIGHT DECAY messing things up?. RESULTS: no actually, Adam sets to 0.0, AdamW sets to 1e-2
+    * [X] ff should not project out of work_stack, but merely guard out of work_stack. RESULTS: super important!
+    * [X] Is CosineSimilarity worth it? Or should I just use FFNNs? RESULTS: it's too much complexity for now, but worth revisiting. In this vein, I want to experiment again with sharing layers between different pieces of the computation.
+
+* PREVENTING MEMORIZATION
+  * [ ] Noise training data per epoch
+  * [ ] Judicious Dropout
+  * [ ] weight_decay on certain layers?
+
+
+
+----------
+TODO:
+
+
+* [ ] Share symbol weights in different components
+
+* [ ] Push, Pop, Nop still seem reluctant to go to 0/1
+
+* [ ] Are we still projecting symbols somewhere? With an init sharpen of 10.0,
+      it's happy to memorize with no generalization at all.
+
+* [ ] is val loss right?
+
+* [ ] Norm weight inits
+
+* [ ] Different convolution operator than elem-multiply?
+
+* [ ] How to combine type info with values? F.conv1d?
+
+* [ ] `isinstance`. Add an "int identifier"/"tag"/"type". It looks like the
+      stack ops are struggling to always accurately push/pop/nop given a given
+      input.
+
+* [ ] Make use of NormalizedLinear, test it!
+
+* [ ] Identify paths of memorization!
+
+* [ ] Noramlizing Linear (like CosSim, but, think it through) Maybe this helps gradients stabilize?
+
+* [ ] increasing LR of sharpen params
+
+* [ ] bias stacks towards pushing at init (ie net nullop since it pops each step?)
+
+* [ ] Cheat and add work_stack.peek() to dataset + loss function
+
+* [ ] Add another stack/queue to help it handle Think tokens / decide when to output
+
+* [ ] REGEX MASKED LOSS: Parse out [LEFT_TAG, <Num>, RIGHT_TAG], and mask loss on that.
+
 '''
+
 
 import torch
 import random
@@ -31,64 +149,137 @@ import torch.nn as nn
 import torch.optim as optim
 import neurallambda.stack as S
 import neurallambda.latch as L
+import neurallambda.queue as Q
 from torch import cosine_similarity, einsum
 from torch.nn.functional import elu, selu, gelu, leaky_relu
+import neurallambda.symbol as Sym
+import copy
+from neurallambda.tensor import CosineSimilarity, Weight, ReverseCosineSimilarity
+from neurallambda.torch import NormalizedLinear, Fn, Parallel, Cat, Stack, Id
+import re
 
+from torch.nn.functional import elu, selu, gelu, leaky_relu
+
+torch.manual_seed(152 + 1)
 
 DEBUG = False
 
-DATASET = 'modulo_game'
-
-BATCH_SIZE = 32
-
-NUM_SAMPLES = 1000  # total number of samples in the dataset
-MAX_SEED_SIZE = 4  # maximum window size
-CONTINUATION_LEN = 10  # maximum length of the sequence
-
-LR = 1e-2
-
-NUM_EPOCHS = 50
-GRAD_CLIP = 10
-
-
-##########
-# Project Ints to Vectors
+PAUSE_IRRADIATION_P = 0.2
+MAX_THINK_TOKENS = 3 # "Think" tokens
+PAUSE_APPEND_INDEX = -3  # append tokens before [..., L, 42, R]
 
 DEVICE = 'cuda'
-VEC_SIZE = 2048
-int_range_start = -200
-int_range_end   =  200
+VEC_SIZE = 256
 
-# A matrix where each row ix represents the int, projected to VEC_SIZE
-int_vecs = torch.stack([
-    torch.randn((VEC_SIZE,))
-    for _ in range(int_range_start, int_range_end + 1)
-]).to(DEVICE)
+WINDOW_SIZE = 2
 
-def project_int(integer):
-    """Projects an integer to a vector space."""
-    index = integer - int_range_start
-    return int_vecs[index]
+NUM_TRAIN_SAMPLES = 1000  # total number of samples in the dataset
+MIN_TRAIN_SEQUENCE_LENGTH = 1  # maximum length of the sequence
+MAX_TRAIN_SEQUENCE_LENGTH = 3  # maximum length of the sequence
 
-def unproject_int(vector):
-    """Unprojects a vector from the vector space back to an integer.
+NUM_VAL_SAMPLES = 100
+MIN_VAL_SEQUENCE_LENGTH = MAX_TRAIN_SEQUENCE_LENGTH + 1
+MAX_VAL_SEQUENCE_LENGTH = MAX_TRAIN_SEQUENCE_LENGTH * 2  # maximum length of the sequence
 
-    Assumes matrix formatted `vector`.
-    """
-    cs = torch.cosine_similarity(vector.unsqueeze(0), int_vecs, dim=1)
-    max_index = torch.argmax(cs).item()
-    return max_index + int_range_start
+BATCH_SIZE = 100
+LR = 1e-2
+WD = 1e-2
 
-# Test round tripping
-for i in range(int_range_start, int_range_end):
-    assert i == unproject_int(project_int(i))
+INIT_SHARPEN = 2.0
 
-NULL_SYMBOL = -2
-PADDING_SYMBOL = -1
+NUM_EPOCHS = 100
 
 
-##########
-# Modulo Data
+##################################################
+# Pause Tokens
+
+def irradiate_tokens(data, percentage, symbol, null_symbol):
+    """Injects pause tokens at random positions in the data sequences based on a percentage of the sequence length."""
+    for item in data:
+        num_tokens_to_inject = max(1, int(len(item['inputs']) * percentage))
+        for _ in range(num_tokens_to_inject):
+            inject_pos = random.randint(0, len(item['inputs']) - 1)
+            item['inputs'].insert(inject_pos, symbol)
+            item['outputs'].insert(inject_pos, null_symbol)  # Maintain alignment
+            item['loss_mask'].insert(inject_pos, 0)  # No loss for injected tokens
+    return data
+
+def insert_at_ix(data, num_tokens, index, symbol, null_symbol):
+    """Inserts a block of pause tokens at a specified index in the data sequences."""
+    # Add F token
+    for item in data:
+        item['inputs'] = item['inputs'][:index] + [symbol] * (num_tokens - 1) + ['F'] + item['inputs'][index:]
+        item['outputs'] = item['outputs'][:index] + [null_symbol] * num_tokens + item['outputs'][index:]
+        item['loss_mask'] = item['loss_mask'][:index] + [0] * num_tokens + item['loss_mask'][index:]
+
+    return data
+
+
+# @@@@@@@@@@
+
+if False: # turning off bc I'm hacking in an "F" token for "final, now output an answer"
+    #  Test irradiate_tokens
+    data_sample = [{'inputs': ['1', '2', '3'], 'outputs': ['N', 'N', '6'], 'loss_mask': [0, 0, 1]}]
+    percentage = 0.5  # 50% of the sequence length
+
+    modified_data = irradiate_tokens(data_sample.copy(), percentage, 'T', 'N')
+
+    expected_length = len(data_sample[0]['inputs']) + int(len(data_sample[0]['inputs']) * percentage / 100)
+    for item in modified_data:
+        assert len(item['inputs']) == expected_length
+        assert len(item['outputs']) == expected_length
+        assert len(item['loss_mask']) == expected_length
+
+    # Test append_pause_tokens
+
+    data_sample = [{'inputs': ['1', '2', '3', 'N', 'N', 'N'], 'outputs': ['N', 'N', 'N', 'L', '6', 'R'], 'loss_mask': [0, 0, 0, 1, 1, 1]}]
+    num_tokens = 2
+    insert_index = -3  # Index before the answer
+
+    modified_data = insert_at_ix(copy.deepcopy(data_sample), num_tokens, insert_index, 'T', 'N')
+
+
+    expected_length = len(data_sample[0]['inputs']) + num_tokens
+    for item in modified_data:
+        assert len(item['inputs']) == expected_length
+        assert len(item['outputs']) == expected_length
+        assert len(item['loss_mask']) == expected_length
+        # Ensure the pause tokens are correctly positioned
+        if insert_index < 0:
+            s = insert_index - num_tokens
+            e = insert_index
+        else:
+            s = insert_index
+            e = insert_index + num_tokens
+        assert item['inputs'][s:e] == ['T'] * num_tokens
+
+# @@@@@@@@@@
+
+
+
+##################################################
+# Addition Data
+
+START_DATA_SYMBOL  = 'O'
+PADDING_SYMBOL  = 'P'
+START_SEQ_SYMBOL = 'S'
+NULL_SYMBOL     = 'N'
+THINKING_SYMBOL = 'T'
+FINISHED_THINKING_SYMBOL = 'F'
+LTAG = 'L' # answer start
+RTAG = 'R' # answer end
+
+tokens = [NULL_SYMBOL, PADDING_SYMBOL, THINKING_SYMBOL, FINISHED_THINKING_SYMBOL, LTAG, RTAG, START_DATA_SYMBOL, START_SEQ_SYMBOL]
+
+all_symbols = Sym.nums + Sym.chars + tokens
+
+# project symbols to vectors, and back
+# project, unproject, symbols_i2v, symbols_v2i, symbols_vec = Sym.symbol_map(VEC_SIZE, all_symbols, device=DEVICE)
+
+int_map = Sym.SymbolMapper(VEC_SIZE, all_symbols, device=DEVICE)
+project = int_map.project
+unproject = int_map.unproject
+# symbols_vec = int_map.projection_matrix
 
 def generate_sequence(seed, window_size, continuation_len):
     """
@@ -117,132 +308,154 @@ assert generate_sequence([1, 2], 2, continuation_len=10) == [1, 2, 3, 5, 8, 3, 1
 assert generate_sequence([1, 2, 3], 3, continuation_len=15) == [1, 2, 3, 6, 1, 0, 7, 8, 5, 0, 3, 8, 1, 2, 1, 4, 7, 2]
 # @@@@@@@@@@
 
-def generate_synthetic_data(num_samples, max_seed_size, continuation_len):
+
+def generate_addition_synthetic_data(num_samples, min_length, max_length, max_think_tokens):
+    """Generates synthetic data for the addition task.
+
+    Example 1:
+
+     ins 4 1 5 9 7  N
+    outs N N N N N 26
+    mask 0 0 0 0 0  1
+
+    Example 2:
+
+     ins P P 2 2 3  N
+    outs P P N N N  7
+    mask 0 0 0 0 0  1
+
+    """
+    window_size = WINDOW_SIZE
     data = []
     for _ in range(num_samples):
-        seed_size = random.randint(2, max_seed_size)
-        seed = [random.randint(0, 9) for _ in range(seed_size)]
-        sequence = generate_sequence(seed, seed_size, continuation_len)
+        length = random.randint(min_length, max_length)
+        n_think = random.randint(1, max_think_tokens)
+        seed = [random.randint(0, 9) for _ in range(window_size)]
+        numbers = generate_sequence(seed, window_size, length)
+        inputs = (
+            [START_SEQ_SYMBOL] +
+            numbers +
+            [THINKING_SYMBOL] * (n_think - 1) +
+            [FINISHED_THINKING_SYMBOL] +
+            [NULL_SYMBOL] * 3 # *3 because of LTAG and RTAG
+        )
+        outputs = [NULL_SYMBOL] * (len(numbers) + 1 + n_think) + [LTAG, sum(numbers) % 10, RTAG]
 
-        inputs = seed + [NULL_SYMBOL] * continuation_len
-        outputs = sequence.copy()
-        outputs[:seed_size] = [NULL_SYMBOL] * seed_size
+        # loss mask helps to ignore loss on the random seed data
+        loss_mask = [0] * (len(numbers) + 1 + n_think) + [1, 1, 1]
 
-        assert len(inputs) == len(outputs)
-
+        assert len(inputs) == len(outputs) == len(loss_mask)
         data.append({
-            'seed': seed,
             'inputs': inputs,
             'outputs': outputs,
+            'loss_mask': loss_mask,
         })
     return data
 
-synthetic_data = generate_synthetic_data(NUM_SAMPLES, MAX_SEED_SIZE, CONTINUATION_LEN)
-train_size = int(0.8 * len(synthetic_data))
-train_data = synthetic_data[:train_size]
-val_data = synthetic_data[train_size:]
+# TRAIN
+train_data = generate_addition_synthetic_data(NUM_TRAIN_SAMPLES, MIN_TRAIN_SEQUENCE_LENGTH, MAX_TRAIN_SEQUENCE_LENGTH, MAX_THINK_TOKENS)
+# Inject pause tokens
+# train_data = insert_at_ix(train_data, MAX_THINK_TOKENS, PAUSE_APPEND_INDEX, symbol=THINKING_SYMBOL, null_symbol=NULL_SYMBOL)
+# train_data = irradiate_tokens(train_data, PAUSE_IRRADIATION_P, symbol=THINKING_SYMBOL, null_symbol=NULL_SYMBOL)
 
-#####
-# Collate Datasets
 
-# Convert to Hugging Face Dataset
-train_dataset = Dataset.from_list(train_data)
-val_dataset   = Dataset.from_list(val_data)
+# VAL
+val_data = generate_addition_synthetic_data(NUM_TRAIN_SAMPLES, MIN_VAL_SEQUENCE_LENGTH, MAX_VAL_SEQUENCE_LENGTH, MAX_THINK_TOKENS)
+# Inject pause tokens
+# val_data = insert_at_ix(val_data, MAX_THINK_TOKENS, PAUSE_APPEND_INDEX, symbol=THINKING_SYMBOL, null_symbol=NULL_SYMBOL)
+# val_data = irradiate_tokens(val_data, PAUSE_IRRADIATION_P, symbol=THINKING_SYMBOL, null_symbol=NULL_SYMBOL)
 
-# Define the padding vector as a zero vector with the same dimension as VEC_SIZE
-zero_offset = 1e-3
-# padding_vec = torch.zeros(VEC_SIZE, device=DEVICE) + zero_offset
-padding_vec = project_int(PADDING_SYMBOL)
+
+padding_vec = project(PADDING_SYMBOL)
+start_data_vec = project(START_DATA_SYMBOL)
 
 def collate_fn(batch):
+    """Collate function to handle variable-length sequences, and project symbols to
+    vectors.
+
+    """
     # Find the longest sequence in the batch
     max_seq_len = max(len(item['inputs']) for item in batch)
 
-    # Initialize the list to store the padded vector inputss
-    loss_mask_batch = []
     inputs_batch = []
     outputs_batch = []
+    loss_masks_batch = []
 
     for item in batch:
-        seed = item['seed']
         inputs = item['inputs']
         outputs = item['outputs']
+        loss_mask = item['loss_mask']
 
-        # Left-pad inputs
-        inputs = [project_int(i) for i in inputs]
-        num_padding = max_seq_len - len(inputs)
-        padded_inputs = [padding_vec] * num_padding + inputs
+        inputs_vec = [project(i) for i in inputs]
+        num_padding = max_seq_len - len(inputs_vec)
+        # padded_inputs_vec = [padding_vec] * num_padding + inputs_vec
+        padded_inputs_vec = [start_data_vec] + [padding_vec] * num_padding + inputs_vec
 
-        # Left-pad outputs
-        outputs = [project_int(i) for i in outputs]
-        num_padding = max_seq_len - len(outputs)
-        padded_outputs = [padding_vec] * num_padding + outputs
+        padded_outputs_vec = [padding_vec] * (num_padding + 1) + [project(x) for x in outputs]
+        padded_loss_mask = [0] * (num_padding + 1) + loss_mask
 
-        # Loss mask
-        zero_len = num_padding + len(seed)
-        loss_mask = [0] * zero_len + [1.0] * (max_seq_len - zero_len)
+        assert len(padded_inputs_vec) == len(padded_outputs_vec) == len(padded_loss_mask), f'''
+        padded_inputs_vec={len(padded_inputs_vec)} == padded_outputs_vec={len(padded_outputs_vec)} == padded_loss_mask={len(padded_loss_mask)}
+        '''.strip()
 
-        assert len(padded_inputs) == len(padded_outputs) == len(loss_mask)
+        inputs_batch.append(torch.stack(padded_inputs_vec))
+        outputs_batch.append(torch.stack(padded_outputs_vec))
+        loss_masks_batch.append(torch.tensor(padded_loss_mask))
 
-        # Stack the vectors and add to the batch
-        inputs_batch.append(torch.stack(padded_inputs))
-        outputs_batch.append(torch.stack(padded_outputs))
-        loss_mask_batch.append(torch.tensor(loss_mask))
 
-    # Stack all the padded inputss into a single tensor
-    inputs_tensor = torch.stack(inputs_batch)
-    outputs_tensor = torch.stack(outputs_batch)
-    loss_mask_tensor = torch.stack(loss_mask_batch)
+    # Stack all the padded inputs into a single tensor
+    inputs_tensor = torch.stack(inputs_batch).to(DEVICE)
+    outputs_tensor = torch.stack(outputs_batch).to(DEVICE)
+    loss_masks_tensor = torch.stack(loss_masks_batch).to(DEVICE)
 
-    # Return the tensor with the batch of padded inputss
-    return inputs_tensor, outputs_tensor, loss_mask_tensor
+    # Return the tensors with the batch of padded inputs and outputs
+    return inputs_tensor, outputs_tensor, loss_masks_tensor
 
 # Create DataLoaders with the new collate_fn
 train_dl = DataLoader(train_data, batch_size=BATCH_SIZE, collate_fn=collate_fn, shuffle=True)
 val_dl = DataLoader(val_data, batch_size=BATCH_SIZE, collate_fn=collate_fn)
 
 
-##########
-# Debugging
-
 def print_grid(data, labels=None):
-    data = list(data)
-    column_widths = []
-    max_columns = 0
+    data = list(data)  # Convert the data to a list if it's not already. Data should be iterable of iterables.
+    column_widths = []  # This will store the maximum width needed for each column.
+    max_columns = 0  # Stores the maximum number of columns in any row.
 
     # Calculate the max number of columns in any row
     for row in data:
         for column in row:
-            max_columns = max(max_columns, len(str(column)))
+            max_columns = max(max_columns, len(rm_format(str(column))))  # Update max_columns based on length of each column.
 
     # Initialize column widths to 0
-    column_widths = [0] * max_columns
+    column_widths = [0] * max_columns  # Initialize column widths array with zeros based on max_columns.
 
     # Update column widths based on the data
     for i, row in enumerate(data):
         for j, column in enumerate(row):
             for k, item in enumerate(column):
                 if isinstance(item, float):
-                    w = 6  # assumes fmt :>.2f
+                    w = 6  # For floating point numbers, fix width to 6 (including decimal point and numbers after it).
                 else:
-                    w = len(str(item))
-                column_widths[k] = max(column_widths[k], w)
+                    w = len(rm_format(str(item)))  # For other types, set width to the length of item when converted to string.
+                column_widths[k] = max(column_widths[k], w)  # Update column width if current item's width is larger.
 
     # Print the grid with aligned columns
     for row in data:
         if labels is None:
-            labels = [''] * len(row)
-        max_label = max(map(len, labels))
+            labels = [''] * len(row)  # If no labels provided, create empty labels for alignment.
+        max_label = max(map(len, labels))  # Find the maximum label width for alignment.
         for lab, column in zip(labels, row):
-            print(f"{lab.rjust(max_label)}", end=" ")
+            print(f"{lab.rjust(max_label)}", end=" ")  # Print label right-justified based on max_label width.
             for i, item in enumerate(column):
                 if isinstance(item, float):
-                    x = f'{item:>.2f}'
+                    x = f'{item:>.2f}'  # Format floating point numbers to 2 decimal places.
                 else:
-                    x = str(item)
-                print(f"{x.rjust(column_widths[i])}", end=" ")
-            print()
-        print("-" * (sum(column_widths) + max_label + 1))  # Separator between different sets
+                    x = str(item)  # Convert other types to string.
+                print(f"{x.rjust(column_widths[i])}", end=" ")  # Right-justify item based on column width.
+            print()  # Newline after each column.
+        print("-" * (sum(column_widths) + max_label + 1))  # Print separator line after each row.
+
+
 
 if False:
     for ins, outs, mask in train_dl:
@@ -255,22 +468,136 @@ if False:
         # print()
         # for i, o, m in zip(ins, outs, mask):
         #     print()
-        #     print([unproject_int(x) for x in i])
-        #     print([unproject_int(x) for x in o])
+        #     print([unproject(x) for x in i])
+        #     print([unproject(x) for x in o])
         #     print(m.tolist())
 
         print()
-        ins = [[unproject_int(x.to('cuda')) for x in xs] for xs in ins]
-        outs = [[unproject_int(x.to('cuda')) for x in xs] for xs in outs]
+        ins = [[unproject(x.to('cuda')) for x in xs] for xs in ins]
+        outs = [[unproject(x.to('cuda')) for x in xs] for xs in outs]
         mask = [x.to(int).tolist() for x in mask]
         xx = zip(ins, outs, mask)
-        print_grid(xx, ['ins', 'outs', 'mask'])
+        print_grid(xx, labels=['ins', 'outs', 'mask'])
         BRK
 
 
 ##################################################
-# Models
+# Training Functions
 
+def run_epoch(model, dl, optimizer, device, train_mode=True):
+    if train_mode:
+        model.train()
+    else:
+        model.eval()
+    epoch_loss = 0
+    steps = 0
+    process = torch.enable_grad if train_mode else torch.no_grad
+    with process():
+        for i, (src, trg, mask) in enumerate(dl):
+            src, trg, mask = src.to(device), trg.to(device), mask.to(device)
+            if train_mode:
+                optimizer.zero_grad()
+            output, latch_states = model(src)
+            loss = ((1 - torch.cosine_similarity(output, trg, dim=2)) * mask).mean()
+            if train_mode:
+                loss.backward()
+                optimizer.step()
+            epoch_loss += loss.item()
+    return epoch_loss / max(steps, 1)
+
+
+def extract_integers_from_seq(sequence, mask):
+    """Extract integers between LTAG and RTAG, ignoring masked elements."""
+    integers = []
+    in_answer = False
+    for v, m in zip(sequence, mask):
+        if m < 0.00000001:
+            continue  # Skip masked elements
+        symbol = unproject(v)
+        if symbol == LTAG:
+            in_answer = True
+        elif symbol == RTAG:
+            in_answer = False
+        elif in_answer and isinstance(symbol, int):
+            integers.append(symbol)
+    return integers
+
+
+def debug_output(src, trg, output, mask, batch_idx, states):
+    """Print debug information for the first element of the batch."""
+    # Unproject and display the sequences for debugging
+    ins_seq = [unproject(x.to('cuda')) for x in src[batch_idx]]  # List of symbols
+    trgs_seq = [unproject(x.to('cuda')) for x in trg[batch_idx]]  # List of symbols
+    outs_seq = [unproject(x.to('cuda')) for x in output[batch_idx]]  # List of symbols
+    mask_seq = mask[batch_idx].to(int).tolist()  # List of integers (0 or 1)
+    ss = []
+    labels = ['inps', 'trgs', 'outs', 'mask']
+    for k, v in states.items():
+        labels.append(k)
+        data = v['data'][batch_idx]  # Tensor: [seq_len, vec_size]
+        fn = v['fn']
+        if fn is not None:
+            ss_seq = [fn(x.to('cuda')) for x in data]  # List of symbols or other representations
+        else:
+            ss_seq = data.tolist()  # List of list of floats
+        ss.append(ss_seq)
+    all_seqs = [[ins_seq], [trgs_seq], [outs_seq], [mask_seq]] + [[s] for s in ss]
+    print_grid(zip(*all_seqs), labels)  # Print the debug information
+
+
+def accuracy(model, val_dl, device, debug=False):
+    model.eval()
+    correct_predictions = 0
+    total_predictions = 0
+    with torch.no_grad():
+        for i, (src, trg, mask) in enumerate(val_dl):
+            output, states = model(src)  # output: Tensor [batch_size, seq_len, vec_size]
+            for batch_idx in range(src.size(0)):  # Iterate over each element in the batch
+                # Extract the sequence for the current batch element
+                mask_seq = mask[batch_idx]
+                predicted_integers = extract_integers_from_seq(output[batch_idx], mask[batch_idx])
+                target_integers = extract_integers_from_seq(trg[batch_idx], mask[batch_idx])
+                # Only compare if both lists are of the same length
+                if len(predicted_integers) == len(target_integers):
+                    total_predictions += len(predicted_integers)
+                    correct_predictions += (torch.tensor(predicted_integers) == torch.tensor(target_integers)).sum().item()
+                else:
+                    total_predictions += max(len(predicted_integers), len(target_integers))
+                if debug and batch_idx < 1:
+                    debug_output(src, trg, output, mask, batch_idx, states)
+    acc = correct_predictions / total_predictions if total_predictions > 0 else 0
+    return acc
+
+
+##########
+# Coloring
+
+def colored(x):
+    # Define the ANSI escape codes for the desired colors
+    BLACK = '\033[30m'
+    YELLOW = '\033[33m'
+    RED = '\033[31m'
+    RESET = '\033[0m'  # Resets the color to default terminal color
+
+    # Retrieve the value
+    value = x.item()
+
+    # Determine the color based on the value
+    if 0.0 <= value < 0.4:
+        color = BLACK
+    elif 0.4 <= value < 0.6:
+        color = YELLOW
+    else:
+        color = RED
+    return f'{color}{value:>.1f}{RESET}'
+
+def rm_format(text):
+    '''replace all occurrences of the ANSI escape codes with an empty string'''
+    ansi_escape_pattern = re.compile(r'\x1B\[[0-9;]*m')
+    return re.sub(ansi_escape_pattern, '', text)
+
+
+##################################################
 
 ##########
 # LSTM
@@ -283,7 +610,7 @@ class LSTMModel(nn.Module):
         self.output_dim = output_dim
         self.lc1 = nn.LSTMCell(input_dim, hidden_dim)
         self.lc2 = nn.LSTMCell(hidden_dim, hidden_dim)
-        self.fc = nn.Linear(hidden_dim, output_dim)
+        self.fc = NormalizedLinear(hidden_dim, output_dim)
 
     def forward(self, x):
         # Initialize the hidden and cell states to zeros
@@ -318,226 +645,314 @@ class LSTMModel(nn.Module):
         return out, {}
 
 
-##########
-# Neuralsymbolics
 
-class NeuralstackOnly(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
-        super(NeuralstackOnly, self).__init__()
 
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
+##################################################
+#
+
+def op(n_inp, vec_size, hidden_dim):
+    ''' (vec, vec, vec) -> scalar
+    Useful in stack/queue operations.
+    '''
+    if n_inp == 1:
+        fn = Id
+    elif n_inp == 2:
+        fn = Fn(lambda a, b: a * b)
+    elif n_inp == 3:
+        fn = Fn(lambda a, b, c: a * b * c)
+    elif n_inp == 4:
+        fn = Fn(lambda a, b, c, d: a * b * c * d)
+    elif n_inp == 5:
+        fn = Fn(lambda a, b, c, d, e: a * b * c * d * e)
+    elif n_inp == 6:
+        fn = Fn(lambda a, b, c, d, e, f: a * b * c * d * e * f)
+
+    return nn.Sequential(
+        fn,
+        nn.Linear(vec_size, hidden_dim, bias=False),
+        nn.ReLU(),
+        nn.Linear(hidden_dim, hidden_dim, bias=False),
+        nn.Softmax(dim=1),
+        nn.Linear(hidden_dim, 1, bias=False),
+        nn.Sigmoid(),
+    )
+
+
+class Neuralsymbol(nn.Module):
+    def __init__(self,
+                 input_dim, hidden_dim, output_dim,
+                 ):
+        super(Neuralsymbol, self).__init__()
+
+        init_sharpen = INIT_SHARPEN
+        dropout_p = 0.0
+        control_stack_size = 4
+        work_stack_size = 4
+
+        n_queues = 2
+        queue_size = 8
+
+        vec_size = input_dim
+        self.vec_size = vec_size
+
+        self.input_dim       = input_dim
+        self.hidden_dim      = hidden_dim
+        self.output_dim      = output_dim
+        self.dropout_p       = dropout_p
+        self.control_stack_size = control_stack_size
+        self.work_stack_size    = work_stack_size
+
+        self.zero_offset = 1e-6
+
 
         ##########
-        # Stack
-        self.n_stack = 12
-        self.initial_sharpen = 5
-        self.stack_vec_size = input_dim
-        self.stack = S.Stack(self.n_stack, self.stack_vec_size)
-        self.sharpen_pointer = nn.Parameter(torch.tensor([5.0]))
+        # Type
+
+        isinstance_dim = 4 # intentional bottleneck
+        self.isinstance = nn.Sequential(
+            NormalizedLinear(vec_size, isinstance_dim, bias=False),
+            nn.ReLU(),
+            nn.Softmax(dim=1),
+            NormalizedLinear(isinstance_dim, vec_size, bias=False),
+            nn.Tanh(),
+        )
 
         ##########
-        # Latch
-        self.latch = L.DataLatch(input_dim, init_scale=1e-2, dropout=0.02)
+        # Queues
+
+        self.queues = nn.ModuleList()
+        self.queues_ps = nn.ParameterList()
+
+        for _ in range(n_queues):
+            q = Q.Queue(queue_size, vec_size)
+            head_sharp = nn.Parameter(torch.tensor([init_sharpen]))
+            tail_sharp = nn.Parameter(torch.tensor([init_sharpen]))
+            qop1 = op(2, vec_size, hidden_dim)
+            qop2 = op(2, vec_size, hidden_dim)
+            qop3 = op(2, vec_size, hidden_dim)
+
+            mods = nn.ModuleDict({
+                'queue': q,
+                'qop1': qop1,
+                'qop2': qop2,
+                'qop3': qop3,
+            })
+            self.queues.append(mods)
+
+            params = nn.ParameterDict({
+                'head_sharp': head_sharp,
+                'tail_sharp': tail_sharp,
+            })
+            self.queues_ps.append(params)
+
 
         ##########
-        # NNs
+        # Control Stack
 
-        HIDDEN_DIM = 128
+        self.stack_init_vec = torch.randn(vec_size)
 
-        self.should_pop = nn.Parameter(torch.randn(input_dim))
-        self.null_symbol = nn.Parameter(torch.randn(output_dim))
-        self.dropout = torch.nn.Dropout(0.02)
+        self.control_stack = S.Stack(control_stack_size, input_dim)
+        self.control_sharp = nn.Parameter(torch.tensor([init_sharpen]))
 
-        # with torch.no_grad():
-        #     print()
-        #     print('CHEATING')
-        #     self.latch.enable[:] = project_int(REFLECT_SYMBOL)
-        #     self.should_pop[:] = project_int(REFLECT_SYMBOL)
-        #     # self.null_symbol[:] = project_int(NULL_SYMBOL)
+        # Control Ops:
+        #   Inp: control dim + input dim
+        self.cop1 = op(2, vec_size, hidden_dim)
+        self.cop2 = op(2, vec_size, hidden_dim)
+        self.cop3 = op(2, vec_size, hidden_dim)
+
+        self.control = nn.Sequential(
+            Fn(lambda x, y: x * y),
+            NormalizedLinear(vec_size, hidden_dim),
+            nn.ReLU(),
+            # nn.Softmax(),
+            nn.Dropout(self.dropout_p),
+            NormalizedLinear(hidden_dim, vec_size, bias=False),
+            nn.Tanh()
+
+        )
+
+
+        ##########
+        # Working Stack
+
+        self.work_stack = S.Stack(work_stack_size, input_dim)
+        self.work_sharp = nn.Parameter(torch.tensor([init_sharpen]))
+
+        # Control Ops:
+        #   Inp: work dim + input dim
+        self.wop1 = op(2, vec_size, hidden_dim)
+        self.wop2 = op(2, vec_size, hidden_dim)
+        self.wop3 = op(2, vec_size, hidden_dim)
+
+        self.work = nn.Sequential(
+            Fn(lambda a, b, c, q1, q2: a * b * c * q1 * q2, nargs=5),
+            NormalizedLinear(vec_size, hidden_dim, bias=False),
+            nn.ReLU(),
+            nn.Dropout(self.dropout_p),
+            NormalizedLinear(hidden_dim, vec_size, bias=False),
+            nn.Tanh(),
+        )
+
+        self.n_out_sym = 4
+        self.out_sym = nn.Parameter(torch.randn(self.n_out_sym, vec_size))
+        self.select_out = nn.Sequential(
+            Parallel([nn.Dropout(self.dropout_p), nn.Dropout(self.dropout_p), nn.Dropout(self.dropout_p)]),
+            Fn(f=lambda x, y, z: x * y * z, nargs=3),
+            NormalizedLinear(vec_size, hidden_dim, bias=False),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, self.n_out_sym + 1, bias=False), # n_out + work
+            nn.Softmax(dim=1)
+        )
+
 
     def forward(self, x):
-        # Stack Init
+        # Containers Init
         device = x.device
         batch_size = x.shape[0]
-        vec_size = x.shape[2]
-        # stack = S.Stack(self.n_stack, self.stack_vec_size)
-        self.stack.init(batch_size, zero_offset, device)
+        self.control_stack.init(batch_size, self.zero_offset, device)
+        self.work_stack.init(batch_size, self.zero_offset, device)
 
-        # Latch Init
-        # latch_state = torch.zeros((batch_size, self.input_dim), device=device) + zero_offset
-        latch_state = torch.randn((batch_size, self.input_dim), device=device)
+        # Push first instruction
+        stack_init_vec = self.stack_init_vec.to(device=device)
+        self.control_stack.push(stack_init_vec.unsqueeze(0))
+        self.work_stack.   push(stack_init_vec.unsqueeze(0))
 
-        outputs = []
+        # Push first queue elements
+        #
+        # For 1st queue, put 0 times
+        # For 2nd queue, put 1 time
+        # For 3rd queue, put 2 times
+        # etc.
+        #
+        # This allows it to keep an N-back record if these queues stay in sync
+        # throughout `forward`
+
+        for i, qd in enumerate(self.queues):
+            queue = qd['queue']
+            queue.init(batch_size, self.zero_offset, device, init_head_ix=1, init_tail_ix=0)
+            for _ in range(i):
+                queue.put(stack_init_vec.unsqueeze(0))
 
         # Debugging
-        latch_states = []
         pops = []
-        stack_tops = []
+        debug = {
+            'control_pop': [],
+            'control_push': [],
+            'control_null_op': [],
+            'work_pop': [],
+            'work_push': [],
+            'work_null_op': [],
 
-        relay = [latch_state, ]
+            'q1_pop': [],
+            'q1_push': [],
+            'q1_null_op': [],
+            'q2_pop': [],
+            'q2_push': [],
+            'q2_null_op': [],
+        }
 
         # Loop over sequence
+        outputs = []
         for i in range(x.size(1)):
             inp = x[:, i, :]
 
-            lsr = relay[0]
+            ##########
+            # Containers
 
-            # Decide what to do
-            pop = cosine_similarity(self.should_pop.unsqueeze(0), lsr)
-            pop = elu(pop)
-            pop = self.dropout(pop)
-            # pop = gelu(pop)
-            # pop = leaky_relu(pop)
-            pops.append(pop)
+            # pop stacks no matter what
+            control = self.control_stack.pop()
+            work = self.work_stack.pop()
+            typ = self.isinstance(inp)
+            op_inp = [control, typ]
 
-            push    = 1 - pop
-            null_op = torch.zeros_like(pop)
+            # read queues
+            q_vals = []
+            for q in self.queues:
+                q_vals.append(q['queue'].read())
 
-            # Update Stack
-            self.stack(self.sharpen_pointer, push, pop, null_op, inp)
-            s = self.stack.read()
+            # control ops
+            c_push_, c_pop_, c_null_op_ = self.cop1(op_inp), self.cop2(op_inp), self.cop3(op_inp)
+            c_push, c_pop, c_null_op = c_push_, c_pop_, c_null_op_
+            # c_push, c_pop, c_null_op = torch.split(torch.softmax(torch.hstack([c_push_, c_pop_, c_null_op_]), dim=1), [1, 1, 1], dim=1)
 
-            out = (
-                einsum('b, bv -> bv', pop, s)
-                # einsum('b,  v -> bv', 1 - pop, self.null_symbol)
-            )
-            # out = self.dropout(out)
+            # work ops
+            w_push_, w_pop_, w_null_op_ = self.wop1(op_inp), self.wop2(op_inp), self.wop3(op_inp)
+            w_push, w_pop, w_null_op = w_push_, w_pop_, w_null_op_
+            # w_push, w_pop, w_null_op = torch.split(torch.softmax(torch.hstack([w_push_, w_pop_, w_null_op_]), dim=1), [1, 1, 1], dim=1)
+
+            # queue ops
+            q_ops = []
+            for q in self.queues:
+                qop1, qop2, qop3 = q['qop1'], q['qop2'], q['qop3']
+                q_ops.append((qop1(op_inp), qop2(op_inp), qop3(op_inp)))
+
+            new_control = self.control([control, typ])
+            new_work = self.work([work, inp, typ] + q_vals)
+
+            select_out = self.select_out([control, work, typ])
+            options = torch.cat([
+                work.unsqueeze(1),  # [batch, 1, vec_size]
+                self.out_sym.unsqueeze(0).repeat(batch_size, 1, 1) # [1, n_out_sym, vec_size]
+            ], dim=1)
+            out = einsum('bn, bnv -> bv', select_out, options)
             outputs.append(out)
 
-            if DEBUG and False:
-                print()
+            if True:
+                debug['control_pop'].append(c_pop)
+                debug['control_push'].append(c_push)
+                debug['control_null_op'].append(c_null_op)
 
-                lat = unproject_int(latch_state[0])
-                lat_sim = cosine_similarity(latch_state[0], project_int(lat), dim=0).item()
-                print(f'lat: {lat}  {lat_sim:>.3f}')
-                print('inp:', unproject_int(x[0, i]))
-                print('out:', unproject_int(out[0]))
+                debug['work_pop'].append(w_pop)
+                debug['work_push'].append(w_push)
+                debug['work_null_op'].append(w_null_op)
+
+                debug['q1_pop'].append(q_ops[0][0])
+                debug['q1_push'].append(q_ops[0][1])
+                debug['q1_null_op'].append(q_ops[0][2])
+
+                debug['q2_pop'].append(q_ops[1][0])
+                debug['q2_push'].append(q_ops[1][1])
+                debug['q2_null_op'].append(q_ops[1][2])
 
 
 
-            # Update Latch
-            latch_state = self.latch(latch_state, enable=inp, data=inp)
-            latch_states.append(latch_state)
-            relay.append(latch_state)
-            relay = relay[1:]
-            stack_tops.append(self.stack.read())
+            ##########
+            # Apply Ops
 
-        outputs = torch.stack(outputs, dim=1)
+            # Control Stack
+            c_push, c_pop, c_null_op = c_push.squeeze(1), c_pop.squeeze(1), c_null_op.squeeze(1)
+            self.control_stack(self.control_sharp, c_push, c_pop, c_null_op, new_control)
 
-        return outputs, {
-            'latch': {'data':torch.stack(latch_states, dim=1), 'fn': unproject_int},
-            'pops': {'data':torch.stack(pops, dim=1), 'fn': lambda x: x.tolist()},
-            'stack': {'data': torch.stack(stack_tops, dim=1), 'fn': unproject_int},
-        }
+            # Work Stack
+            w_push, w_pop, w_null_op = w_push.squeeze(1), w_pop.squeeze(1), w_null_op.squeeze(1)
+            self.work_stack(self.work_sharp, w_push, w_pop, w_null_op, new_work)
 
+            # Queues
+            for q, q_ps, (q_push, q_pop, q_null_op) in zip(self.queues, self.queues_ps, q_ops):
+                q_push, q_pop, q_null_op = q_push.squeeze(1), q_pop.squeeze(1), q_null_op.squeeze(1)
+                q['queue'](q_ps['head_sharp'], q_ps['tail_sharp'],
+                           q_push, q_pop, q_null_op,
+                           inp)
+
+        out = torch.stack(outputs, dim=1)
+
+        for k, v in debug.items():
+            debug[k] = {
+                'data': torch.stack(v, dim=1),
+                'fn': colored,
+            }
+        return out, debug
 
 
 ##################################################
 # Training
 
-def train_epoch(model, dl, optimizer, device, clip):
-    '''
-    Args:
-      warm_up: ignore loss for this many steps
-    '''
-    model.train()
-    epoch_loss = 0
-
-    for i, (src, trg, mask) in enumerate(dl):
-        src = src.to(device)   # shape=[batch, seq, vec_size]
-        trg = trg.to(device)   # shape=[batch, seq, vec_size]
-        mask = mask.to(device) # shape=[batch, seq]
-
-        optimizer.zero_grad()
-        output, latch_states = model(src) # shape=[batch, seq, vec_size]
-
-        # loss = criterion(output, trg) * mask
-        loss = ((1 - torch.cosine_similarity(output, trg, dim=2)) * mask).mean()
-
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
-        optimizer.step()
-
-        epoch_loss += loss.item()
-
-    return epoch_loss / len(dl)
-
-def evaluate(model, dl, device):
-    model.eval()
-    epoch_loss = 0
-
-    with torch.no_grad():
-        for i, (src, trg, mask) in enumerate(dl):
-            src = src.to(device)
-            trg = trg.to(device)
-            mask = mask.to(device)
-
-            output, latch_states = model(src)
-
-            # loss = criterion(output, trg) * mask
-            loss = ((1 - torch.cosine_similarity(output, trg, dim=2)) * mask).mean()
-            epoch_loss += loss.item()
-
-    return epoch_loss / len(dl)
-
-def accuracy(model, val_dl, device, debug=False):
-    model.eval()
-    correct_predictions = 0
-    total_predictions = 0
-
-    with torch.no_grad():
-        for i, (src, trg, mask) in enumerate(val_dl):
-            src = src.to(device)
-            trg = trg.to(device)
-            mask = mask.to(device)
-            mask_ix = mask > 0.00000001
-
-            output, states = model(src)
-            predicted_vectors = output
-
-            # Unproject the predicted vectors to integers
-            predicted_integers = [unproject_int(v) for v in predicted_vectors[mask_ix]]
-            target_integers = [unproject_int(v) for v in trg[mask_ix]]
-
-            # Compare the predicted integers with the actual integers
-            total_predictions += len(predicted_integers)
-            correct_predictions += (torch.tensor(predicted_integers) == torch.tensor(target_integers)).sum()
-
-            # Debug
-            if debug:
-                MAX_PRINT = 1
-
-                labels = ['inps', 'trgs', 'outs', 'mask']
-                ins  = [[unproject_int(x.to('cuda')) for x in xs] for xs in src][:MAX_PRINT]
-                trgs = [[unproject_int(x.to('cuda')) for x in xs] for xs in trg][:MAX_PRINT]
-                outs = [[unproject_int(x.to('cuda')) for x in xs] for xs in predicted_vectors][:MAX_PRINT]
-                mask = [x.to(int).tolist() for x in mask][:MAX_PRINT]
-
-                ss = []
-
-                for k,v in states.items():
-                    labels.append(k)
-                    data = v['data'][:MAX_PRINT]
-                    fn = v['fn']
-                    if fn is not None:
-                        ss.append([[fn(x.to('cuda')) for x in xs] for xs in data])
-                    else:
-                        ss.append(data)
-                all_seqs = [ins, trgs, outs, mask] + ss
-                print_grid(zip(*all_seqs), labels)
-
-    acc = correct_predictions / total_predictions
-    return acc
-
 
 ##########
 # Setup
 
-
 # MyModel = LSTMModel
-MyModel = NeuralLambdaOnly
+MyModel = Neuralsymbol
 
 model = MyModel(
     input_dim=VEC_SIZE,
@@ -546,25 +961,80 @@ model = MyModel(
 )
 model.to(DEVICE)
 
-optimizer = optim.Adam(model.parameters(), lr=LR)
+# print('disabling gradients for sharpening')
+# model.control_sharp.requires_grad = False
+# model.work_sharp.requires_grad = False
+
+opt_params = list(filter(lambda p: p.requires_grad, model.parameters()))
+
+optimizer = optim.AdamW(opt_params, lr=LR, weight_decay=WD)
 
 train_losses = []
 val_losses = []
 train_accuracies = []
 val_accuracies = []
 
+def update_lr(optimizer, lr):
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+
+'''
+optimizer = optim.Adam(opt_params, weight_decay=WD, lr=1e-1)
+optimizer = optim.Adam(opt_params, weight_decay=WD, lr=1e-2)
+optimizer = optim.Adam(opt_params, weight_decay=WD, lr=1e-3)
+optimizer = optim.Adam(opt_params, weight_decay=WD, lr=1e-4)
+
+SHARP = 5.0
+with torch.no_grad():
+    model.control_sharp[:] = SHARP
+    model.work_sharp[:] = SHARP
+
+'''
+
 for epoch in range(NUM_EPOCHS):
-    train_loss = train_epoch(model, train_dl, optimizer, DEVICE, GRAD_CLIP)
-    val_loss = evaluate(model, val_dl, DEVICE)
-    tacc = accuracy(model, train_dl, DEVICE)
-    vacc = accuracy(model, val_dl, DEVICE)
+    train_loss = run_epoch(model, train_dl, optimizer, DEVICE, train_mode=True)
 
-    train_losses.append(train_loss)
-    val_losses.append(val_loss)
-    train_accuracies.append(tacc)
-    val_accuracies.append(vacc)
+    # Experiment changing sharpen param
+    if False: # TODO: rm experiment
+        with torch.no_grad():
+            # model.control_sharp[:] = torch.randint(2, 10, (1,))
+            # model.work_sharp[:]    = torch.randint(2, 10, (1,))
+            model.control_sharp[:] = torch.randint(4, 12, (1,))
+            model.work_sharp[:]    = torch.randint(4, 12, (1,))
+            for q in model.queues_ps:
+                q.head_sharp[:] = torch.randint(4, 12, (1,))
+                q.tail_sharp[:] = torch.randint(4, 12, (1,))
 
-    print(f'Epoch: {epoch + 1:02} | Train Loss: {train_loss:.3f} | Val. Loss: {val_loss:.3f} | Train Acc: {tacc:.3f} | Val Acc: {vacc:.3f}')
+    # Experiment changing sharpen param
+    if True: # TODO: rm experiment
+        LO = 5
+        HI = 15
+        with torch.no_grad():
+            a = epoch / NUM_EPOCHS
+            model.control_sharp[:] = (1-a) * LO + a * HI
+            model.work_sharp[:]    = (1-a) * LO + a * HI
+
+            for q in model.queues_ps:
+                q.head_sharp[:] = (1-a) * LO + a * HI
+                q.tail_sharp[:] = (1-a) * LO + a * HI
+
+
+    if epoch % 10 == 0:
+        val_loss = run_epoch(model, val_dl, None, DEVICE, train_mode=False)
+        tacc = accuracy(model, train_dl, DEVICE)
+        vacc = accuracy(model, val_dl, DEVICE)
+
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+        train_accuracies.append(tacc)
+        val_accuracies.append(vacc)
+        print(f'Epoch: {epoch + 1:02} | Train Loss: {train_loss:.5f} | Val. Loss: {val_loss:.3f} | Train Acc: {tacc:.3f} | Val Acc: {vacc:.3f}')
+    else:
+        if isinstance(model, Neuralsymbol):
+            print(f'Epoch: {epoch + 1:02} | Train Loss: {train_loss:.5f} | C: {model.control_sharp.item():.3f} | W: {model.work_sharp.item():.3f} | Q1H: {model.queues_ps[0].head_sharp.item():.3f} | Q1T: {model.queues_ps[0].tail_sharp.item():.3f} | Q2H: {model.queues_ps[1].head_sharp.item():.3f} | Q2T: {model.queues_ps[1].tail_sharp.item():.3f}')
+        else:
+            print(f'Epoch: {epoch + 1:02} | Train Loss: {train_loss:.5f}')
+
 
 # Plot training and validation loss
 plt.figure()
@@ -579,7 +1049,13 @@ plt.legend()
 plt.grid()
 plt.show()
 
+# Ablation Study
 
-##########
+# with torch.no_grad():
+#     model.wop1[1].weight[:] = torch.randn_like(model.wop1[1].weight)
+#     model.wop2[1].weight[:] = torch.randn_like(model.wop2[1].weight)
+#     model.wop3[1].weight[:] = torch.randn_like(model.wop3[1].weight)
 
+
+# Debug performance
 tacc = accuracy(model, val_dl, DEVICE, debug=True)
