@@ -18,14 +18,14 @@ class Queue(nn.Module):
 
     '''
 
-    def __init__(self, n_queue, vec_size):
+    def __init__(self, queue_size, vec_size):
         '''Initialize the Neuralqueue.
 
         Args:
 
         '''
         super(Queue, self).__init__()
-        self.n_queue = n_queue
+        self.queue_size = queue_size
         self.vec_size = vec_size
 
         # run init to populate
@@ -102,6 +102,12 @@ class Queue(nn.Module):
         '''
         return einsum('bnv, bn -> bv', self.queue, self.head)
 
+    def put(self, val):
+        '''Use this if you're sure you want to `put` only, and this will be
+        baked into the architecture (IE it can't learn to *not* `put`, wherever
+        you use this.'''
+        self.queue, self.tail = self.put_(val)
+
     def put_(self, val):
         ''' Library consumers should NOT call this function. You must only call
         `forward`.
@@ -155,10 +161,10 @@ class Queue(nn.Module):
         '''
         self.device = device
 
-        self.head = torch.zeros((batch_size, self.n_queue), device=device, dtype=dtype)
+        self.head = torch.zeros((batch_size, self.queue_size), device=device, dtype=dtype)
         self.head[:, init_head_ix] = 1  # start queue head at ix=1
 
-        self.tail = torch.zeros((batch_size, self.n_queue), device=device, dtype=dtype)
+        self.tail = torch.zeros((batch_size, self.queue_size), device=device, dtype=dtype)
         self.tail[:, init_tail_ix] = 1  # start queue tail at ix=0
 
 
@@ -167,7 +173,7 @@ class Queue(nn.Module):
         #       one value.
         self.queue = torch.zeros(
             (batch_size,
-             self.n_queue,
+             self.queue_size,
              self.vec_size), device=device, dtype=dtype) + zero_offset
 
         self.zero_vec = torch.zeros(
