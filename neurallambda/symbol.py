@@ -63,9 +63,9 @@ class SymbolMapper:
         self.symbols_v2i = {v: i for i, v in self.symbols_i2v.items()}
 
 
-        nbits = math.ceil(torch.log(torch.tensor([len(symbols) * 1.0])) / torch.log(torch.tensor([2])))
-        n_projections = math.ceil(vec_size / nbits)
-        self.int_mapper = IntMapper(nbits, n_projections)
+        # nbits = math.ceil(torch.log(torch.tensor([len(symbols) * 1.0])) / torch.log(torch.tensor([2])))
+        # n_projections = math.ceil(vec_size / nbits)
+        # self.int_mapper = IntMapper(nbits, n_projections)
 
         self.symbols_vec = torch.stack([
 

@@ -15,7 +15,7 @@ import torch.nn.functional as F
 import neurallambda.memory as M
 import neurallambda.stack as S
 import neurallambda.symbol as Sym
-from torch import cosine_similarity
+from neurallambda.torch import cosine_similarity
 import math
 
 
@@ -23,13 +23,18 @@ import math
 # Misc
 
 def address_similarity(address, addresses):
-    ##########
-    # Cos Sim Solution
-    if len(addresses.shape) == 2: # no batches
+    ''' Compare one address against many addresses, and return the scalar
+    similarity of each address in `addresses` to the `address` (may be
+    batched).'''
+    if address.ndim == 1 and addresses.ndim == 2: # no batches
         cs = cosine_similarity(address, addresses, dim=1)
         return cs
-    elif len(addresses.shape) == 3:  # each batch has own addresses
-        cs = cosine_similarity(address, addresses, dim=2)
+    elif address.ndim == 2 and addresses.ndim == 3:  # each batch has own addresses
+        assert address.size(0) == addresses.size(0), f'Batch size must be the same: address={address.shape} vs addresses={addresses.shape}'
+        assert address.size(1) == addresses.size(2), f'Vector dimension must be the same: address={address.shape} vs addresses={addresses.shape}'
+
+        br_address = address.unsqueeze(1).expand_as(addresses)
+        cs = cosine_similarity(br_address, addresses, dim=2)
         return cs
 
 
@@ -39,12 +44,16 @@ def address_similarity(address, addresses):
 def replace(new_value, prev_value, tensr):
     ''' Replace any `prev_value` with `new_value`, according to cos_sim of
     prev_value with values in tensr'''
-    # prev_valuex.shape = [BATCH, DIM]
-    # prev_value.shape   = [BATCH, DIM]
-    # tensr.shape     = [BATCH, N_ADDRESSES, DIM]
+    assert new_value.shape == prev_value.shape
+    assert tensr.size(0) == new_value.size(0) == prev_value.size(0), 'Inputs all need same batch size'
+    assert tensr.size(-1) == new_value.size(-1) == prev_value.size(-1), 'Inputs all need same vector size'
+    # new_value.shape  = [BATCH, DIM]
+    # prev_value.shape = [BATCH, DIM]
+    # tensr.shape      = [BATCH, N_ADDRESSES, DIM]
 
     # we'll interpolate into the `to` location with `sim_to`
-    sim_to = cosine_similarity(prev_value.unsqueeze(1), tensr, dim=2)  # shape = [BATCH, N_ADDERSSES]
+    br_prev_value, br_tensr = torch.broadcast_tensors(prev_value.unsqueeze(1), tensr)
+    sim_to = cosine_similarity(br_prev_value, br_tensr, dim=2)  # shape = [BATCH, N_ADDERSSES]
     keep = einsum('bnd, bn -> bnd', tensr, 1 - sim_to)
     rep = einsum('bn, bd -> bnd', sim_to, new_value)
     return  keep + rep
@@ -74,11 +83,10 @@ def kv_insert(state_k, state_v, k, x, eps=1e-8, cos_sim_keys=True):
         return state_v
 
     elif state_k.ndim == 3:  # batched
-        alpha = cosine_similarity(
-            state_k,
-            k.unsqueeze(1),
-            dim=2
-        ) # the similarity of each rule key, to each state key
+        assert state_k.ndim == state_v.ndim == 3, f'Expected state_k, and state_v to have same ndim: state_k={state_k.shape}, state_v={state_v.shape}'
+        assert k.ndim == x.ndim == 2, f'Expected k and x to have same ndim: k={k.shape}, x={x.shape}'
+        br_k, br_state_k = torch.broadcast_tensors(k.unsqueeze(1), state_k)
+        alpha = cosine_similarity(br_state_k, br_k, dim=2 ) # the similarity of each rule key, to each state key
         if eps:
             alpha = torch.where(alpha > eps, alpha, 0) # TODO: is this harmful to grads? Consider smooth Relus
 
@@ -313,7 +321,9 @@ class Neurallambda:
 
         Assumes matrix formatted `vector`.
         """
-        cs = cosine_similarity(vector.unsqueeze(0), self.int_vecs, dim=1)
+        assert vector.ndim == 1, f'Expecting vectors, but got: {vector.shape}'
+        bvector = vector.unsqueeze(0).expand_as(self.int_vecs)
+        cs = cosine_similarity(bvector, self.int_vecs, dim=1)
         max_index = torch.argmax(cs).item()
         return max_index + self.int_range_start
 
@@ -322,22 +332,23 @@ class Neurallambda:
 
     def vec_to_tag(self, vec):
         ''' return the most similar (cos_sim) tag index for a given vec. '''
-        if vec.ndim == 1:
-            sim = cosine_similarity(vec, self.tag_vecs, dim=1)
-            return tag_names[sim.argmax().item()]
-
-        raise ValueError(f'vec_to_tag called on vec with unexpected shape: ndim={vec.ndim}, shape={vec.shape}')
-
+        assert vec.ndim == 1, f'Expecting vectors, but got: {vec.shape}'
+        bvec = vec.unsqueeze(0).expand_as(self.tag_vecs)
+        sim = cosine_similarity(bvec, self.tag_vecs, dim=1)
+        return tag_names[sim.argmax().item()]
 
     def vec_to_address(self, vec, addresses):
         ''' return the most similar (cos_sim) tag index for a given vec.
 
         Args:
-          vec: ndarray([address_size])
-          addresses: ndarray([batch?, n_addresses, address_size])
+          vec: ndarray([vec_size])
+          addresses: ndarray([batch?, n_addresses, vec_size])
         '''
+        assert vec.size(-1) == addresses.size(-1), f'Inputs must have same vec size: vec={vec.shape}, addresses={addresses.shape}'
+
         if addresses.ndim == 2:  # static addresses per all batches
-            sim = cosine_similarity(vec, addresses, dim=1)
+            br_vec, br_addresses = torch.broadcast_tensors(vec, addresses)
+            sim = cosine_similarity(br_vec, br_addresses, dim=1)
             return sim.argmax().item()
 
         raise ValueError(f'vec_to_address called on vec with unexpected shape: ndim={vec.ndim}, shape={vec.shape}')
@@ -352,10 +363,9 @@ class Neurallambda:
 
         Warning: values can exceed (-1, 1)
         '''
-        sims = cosine_similarity(
-            x.unsqueeze(1),
-            self.base_types_vecs.unsqueeze(0),
-            dim=2).clip(0, 1).sum(dim=1)
+        assert x.size(1) == self.base_types_vecs.size(1), f'Expected same vec_size: x={x.shape}, base_types_vecs={base_types_vecs.shape}'
+        br_x, br_base_types_vecs = torch.broadcast_tensors(x.unsqueeze(1), self.base_types_vecs.unsqueeze(0))
+        sims = cosine_similarity(br_x, br_base_types_vecs, dim=2).clip(0, 1).sum(dim=1)
         return sims
 
 

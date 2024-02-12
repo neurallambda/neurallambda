@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from neurallambda.util import transform_runs
 import neurallambda.debug as D
-from torch import cosine_similarity
+from neurallambda.torch import cosine_similarity
 
 class Queue(nn.Module):
     '''A Neural queue. Push, pop, pointer to top of queue, read from top.

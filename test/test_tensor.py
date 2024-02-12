@@ -8,6 +8,7 @@ import torch
 import neurallambda.tensor as T
 import neurallambda.symbol as S
 from neurallambda.tensor import CosineSimilarity, Weight, ReverseCosineSimilarity
+from neurallambda.torch import cosine_similarity
 
 nl = T.build_empty_neurallambda(
     batch_size=1,
@@ -153,7 +154,7 @@ def test_reverse_cosine_similarity_for_weird():
     for i in range(3):
         expected[i, 0, 2, 0] = 1.0
 
-    out = torch.cosine_similarity(b, inputs, dim=2)
+    out = cosine_similarity(b, inputs, dim=2)
 
     assert out.shape == expected.shape, f'out: {out.shape}, expected: {expected.shape}'
     assert torch.allclose(out, expected, atol=0.2), "Cosine similarity of identical vectors should be close to 1."
