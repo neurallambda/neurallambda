@@ -319,11 +319,3 @@ with torch.no_grad():
     )
 
 S.pp_stack(nb.stack, nl)
-
-'''
-
-  S.pp_sim_addresses(stack_ix, stack_val, zero_vec_mat, addresses)
-
-  S.pp_stack(nb.stack, nb.nl.addresses)
-
-'''

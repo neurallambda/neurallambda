@@ -12,7 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from neurallambda.util import transform_runs
 import neurallambda.debug as D
-from torch import cosine_similarity
+from neurallambda.torch import cosine_similarity
 
 class Latch(nn.Module):
     def __init__(self, vec_size):
@@ -25,10 +25,12 @@ class Latch(nn.Module):
     def forward(self, inp):
         # inp    : [batch_size, vec_size]
         # output : [batch_size, vec_size]
+        assert inp.ndim == 2
         predicate = self.predicate.unsqueeze(0)
         true = self.true
         false = self.false
-        matched = torch.cosine_similarity(predicate.real, inp.real, dim=1)
+        br_predicate, br_inp = torch.broadcast_tensors(predicate.real, inp.real)
+        matched = cosine_similarity(br_predicate, br_inp, dim=1)
         return (
             torch.einsum('v, b -> bv', true, matched) +
             torch.einsum('v, b -> bv', false, 1 - matched)
@@ -46,8 +48,11 @@ class DataLatch(nn.Module):
         # state  : [batch_size, vec_size]
         # enable : [batch_size, vec_size]
         # data   : [batch_size, vec_size]
+        assert state.shape == enable.shape == data.shape
+        assert state.ndim == 2
 
-        matched = cosine_similarity(self.enable.unsqueeze(0), enable, dim=1)
+        br_self_enable, br_enable = torch.broadcast_tensors(self.enable.unsqueeze(0), enable)
+        matched = cosine_similarity(br_self_enable, br_enable, dim=1)
         matched = torch.nn.functional.elu(matched)
         # matched = torch.nn.functional.selu(matched)
         # matched = torch.nn.functional.gelu(matched)

@@ -8,6 +8,26 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+from neurallambda.util import bold, red, green
+
+##################################################
+# Better Torch
+
+def cosine_similarity(tensor1, tensor2, dim=1, eps=1e-8):
+    if tensor1.shape != tensor2.shape:
+        error_message = (
+            f"Tensor shapes must be identical. tensor1: {green(tensor1.shape)}. tensor2: {green(tensor2.shape)}.\n" \
+            "Suggestions:\n" \
+            f"- Use {bold('torch.broadcast_tensors')}: bx, by = torch.broadcast_tensors(x, y)\n" \
+            f"- Use {bold('tensor.view(...)')} to reshape one of the tensors. For example, if you need to match the tensor of shape " \
+            f"{tensor1.shape}, you can reshape tensor2 with tensor2.view{tensor1.shape} (adjust dimensions as needed).\n" \
+            f"- Use {bold('tensor.expand(...)')} to match shapes without changing the data. For example, tensor2.expand_as(tensor1) " \
+            "if tensor1 has the desired shape.\n" \
+        )
+        raise ValueError(error_message)
+
+    return F.cosine_similarity(tensor1, tensor2, dim=dim, eps=eps)
+
 
 ##################################################
 # Modules

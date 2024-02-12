@@ -48,3 +48,72 @@ def transform_runs(input_list, is_equivalent, transform_func):
     output_list.append(transform_func(final_run))
 
     return output_list
+
+
+##################################################
+# ANSI Colors/Formatting
+
+def bold(text):
+    return f"\033[1m{str(text)}\033[0m"
+
+def italics(text):
+    return f"\033[3m{str(text)}\033[0m"
+
+def underline(text):
+    return f"\033[4m{str(text)}\033[0m"
+
+def blink(text):
+    return f"\033[5m{str(text)}\033[0m"
+
+
+##########
+# Foreground
+
+def red(text):
+    return f"\033[31m{str(text)}\033[0m"
+
+def green(text):
+    return f"\033[32m{str(text)}\033[0m"
+
+def yellow(text):
+    return f"\033[33m{str(text)}\033[0m"
+
+def blue(text):
+    return f"\033[34m{str(text)}\033[0m"
+
+def magenta(text):
+    return f"\033[35m{str(text)}\033[0m"
+
+def cyan(text):
+    return f"\033[36m{str(text)}\033[0m"
+
+def white(text):
+    return f"\033[37m{str(text)}\033[0m"
+
+
+##########
+# Background
+
+def bg_black(text):
+    return f"\033[40m{str(text)}\033[0m"
+
+def bg_red(text):
+    return f"\033[41m{str(text)}\033[0m"
+
+def bg_green(text):
+    return f"\033[42m{str(text)}\033[0m"
+
+def bg_yellow(text):
+    return f"\033[43m{str(text)}\033[0m"
+
+def bg_blue(text):
+    return f"\033[44m{str(text)}\033[0m"
+
+def bg_magenta(text):
+    return f"\033[45m{str(text)}\033[0m"
+
+def bg_cyan(text):
+    return f"\033[46m{str(text)}\033[0m"
+
+def bg_white(text):
+    return f"\033[47m{str(text)}\033[0m"

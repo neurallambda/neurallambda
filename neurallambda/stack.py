@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from neurallambda.util import transform_runs
 import neurallambda.debug as D
-from torch import cosine_similarity
+from neurallambda.torch import cosine_similarity
 
 class Stack(nn.Module):
     '''A Neural stack. Push, pop, pointer to top of stack, read from top.
@@ -175,10 +175,12 @@ class Stack(nn.Module):
 
 def pp_sim_addresses(nl, stack_ix, stack_val, zero_vec, addresses):
     txts = []
-    null_sim = cosine_similarity(stack_val, nl.zero_vec[0], dim=0)
+    br_stack_val, br_zero_vec = torch.broadcast_tensors(stack_val, nl.zero_vec[0])
+    null_sim = cosine_similarity(br_stack_val, br_zero_vec, dim=0)
     txts.append(D.colorize(f'NULL', value=null_sim.item()))
     for i, a in enumerate(addresses):
-        sim = cosine_similarity(stack_val, a, dim=0)
+        br_stack_val, br_a = torch.broadcast_tensors(stack_val, a)
+        sim = cosine_similarity(br_stack_val, br_a, dim=0)
         txt = D.colorize(f'{i:> 2d} ', value=sim.item())
         txts.append(txt)
     return (stack_ix, null_sim, txts)
