@@ -1,20 +1,5 @@
 '''.
 
-
-
-
-
-
-NOTE: further work continued at t04_addition_02.py
-NOTE: further work continued at t04_addition_02.py
-NOTE: further work continued at t04_addition_02.py
-
-NOTE: further work continued at t04_addition_02.py
-NOTE: further work continued at t04_addition_02.py
-NOTE: further work continued at t04_addition_02.py
-
-
-
 Variable Time Computation!
 
 Test Variable Time Computation by building an LM that can process strings of numbers added together
@@ -83,6 +68,9 @@ RESULTS:
 ----------
 TODO:
 
+* [ ] Build a complementary dataset of how each component needs to act, train
+      each sub component separately before full model run.
+
 * [ ] Limit symbol selection
 
 * [ ] Share symbol weights in different components
@@ -134,14 +122,13 @@ import torch.optim as optim
 import neurallambda.stack as S
 import neurallambda.latch as L
 import neurallambda.queue as Q
-from neurallambda.torch import cosine_similarity
-from torch import einsum
+from torch import cosine_similarity, einsum
 import torch.nn.functional as F
 from torch.nn.functional import elu, selu, gelu, leaky_relu
 import neurallambda.symbol as Sym
 import copy
 from neurallambda.tensor import CosineSimilarity, Weight, ReverseCosineSimilarity
-from neurallambda.torch import NormalizedLinear, Fn, Parallel, Cat, Stack, Diagnose, Id
+from neurallambda.torch import NormalizedLinear, Fn, Parallel, Cat, Stack, Diagnose, Id, cosine_similarity
 import re
 
 torch.manual_seed(152 + 1)
@@ -173,6 +160,28 @@ NUM_EPOCHS = 60
 
 
 ##################################################
+# Util
+
+import torch.fft
+
+def convolve(x1, x2, dim=-1):
+    """Performs circular convolution on two vectors using FFT and IFFT."""
+    fft_x1 = torch.fft.fft(x1, dim=dim)
+    fft_x2 = torch.fft.fft(x2, dim=dim)
+    fft_product = fft_x1 * fft_x2
+    output = torch.fft.ifft(fft_product, dim=dim)
+    return output.real
+
+def deconvolve(bound_vec, one_original_vec, dim=-1):
+    """Performs the inverse operation of circular convolution to retrieve the original vector."""
+    fft_bound_vec = torch.fft.fft(bound_vec, dim=dim)
+    fft_one_original_vec = torch.fft.fft(one_original_vec, dim=dim)
+    fft_other_original_vec = fft_bound_vec / fft_one_original_vec
+    other_original_vec = torch.fft.ifft(fft_other_original_vec, dim=dim)
+    return other_original_vec.real
+
+
+##################################################
 # Pause Tokens
 
 def irradiate_tokens(data, percentage, symbol, null_symbol):
@@ -188,17 +197,6 @@ def irradiate_tokens(data, percentage, symbol, null_symbol):
 
 def insert_at_ix(data, num_tokens, index, symbol, null_symbol):
     """Inserts a block of pause tokens at a specified index in the data sequences."""
-    # for item in data:
-    #     item['inputs'] = item['inputs'][:index] + [symbol] * num_tokens + item['inputs'][index:]
-    #     item['outputs'] = item['outputs'][:index] + [null_symbol] * num_tokens + item['outputs'][index:]
-    #     item['loss_mask'] = item['loss_mask'][:index] + [0] * num_tokens + item['loss_mask'][index:]
-
-    # # Add F token
-    # for item in data:
-    #     item['inputs'] = item['inputs'][:index] + [symbol] * num_tokens + ['F'] + item['inputs'][index:]
-    #     item['outputs'] = item['outputs'][:index] + [null_symbol] * (num_tokens + 1) + item['outputs'][index:]
-    #     item['loss_mask'] = item['loss_mask'][:index] + [0] * (num_tokens + 1) + item['loss_mask'][index:]
-
     # Add F token
     for item in data:
         item['inputs'] = item['inputs'][:index] + [symbol] * (num_tokens - 1) + ['F'] + item['inputs'][index:]
@@ -298,8 +296,7 @@ def generate_addition_synthetic_data(num_samples, min_length, max_length, max_th
         # a list of numbers
 
         # numbers = [random.randint(-9, 9) for _ in range(length)] # include negatives
-        # numbers = [random.randint(0, 9) for _ in range(length)] # positives only
-        numbers = [random.randint(0, 3) for _ in range(length)] # positives only
+        numbers = [random.randint(0, 9) for _ in range(length)] # positives only
 
         # numbers = [random.randint(-2, 2) for _ in range(length)] # a few numbers only
         inputs = (
@@ -468,8 +465,9 @@ def run_epoch(model, dl, optimizer, device, train_mode=True):
             src, trg, mask = src.to(device), trg.to(device), mask.to(device)
             if train_mode:
                 optimizer.zero_grad()
-            output, latch_states = model(src)
-            loss = ((1 - torch.cosine_similarity(output, trg, dim=2)) * mask).mean()
+            output, debug_states = model(src)
+            loss = ((1 - cosine_similarity(output, trg, dim=2)) * mask).mean()
+            # loss = (F.mse_loss(br_output, br_trg) * mask).mean()
             if train_mode:
                 loss.backward()
                 optimizer.step()
@@ -616,104 +614,109 @@ class LSTMModel(nn.Module):
         return out, {}
 
 
-
-
 ##################################################
 #
 
-import torch.fft
+class Choice(nn.Module):
+    ''' N-vectors -> [0, 1] '''
+    def __init__(self, vec_size, n_vecs, n_hidden, has_guard=False, has_outer_proj=False):
+        super(Choice, self).__init__()
+        self.vec_size = vec_size
+        self.n_vecs = n_vecs
+        self.n_hidden = n_hidden
+        self.has_guard = has_guard
+        self.has_outer_proj = has_outer_proj
 
-def circular_convolution(input1, input2):
-    """
-    Performs circular convolution on two batches of vectors.
+        if n_vecs == 1:
+            Vecs = Id()
+        elif n_vecs == 2:
+            Vecs = Fn(lambda a, b: torch.hstack([a, b]), nargs=2)
+        elif n_vecs == 3:
+            Vecs = Fn(lambda a, b, c: torch.hstack([a, b, c]), nargs=3)
+        elif n_vecs == 4:
+            Vecs = Fn(lambda a, b, c, d: torch.hstack([a, b, c, d]), nargs=4)
+        elif n_vecs == 5:
+            Vecs = Fn(lambda a, b, c, d, e: torch.hstack([a, b, c, d, e]), nargs=5)
+        elif n_vecs == 6:
+            Vecs = Fn(lambda a, b, c, d, e, f: torch.hstack([a, b, c, d, e, f]), nargs=6)
 
-    Args:
-    - input1: A tensor of shape (batch_size, vector_length)
-    - input2: A tensor of shape (batch_size, vector_length)
+        self.ff = nn.Sequential(Vecs, nn.Linear(vec_size * n_vecs, n_hidden, bias=False), nn.Sigmoid())
 
-    Returns:
-    - output: The result of circular convolution, of shape (batch_size, vector_length)
-    """
-    # Check if inputs are of the same shape
-    assert input1.shape == input2.shape, "Input tensors must have the same shape"
+        if has_guard:
+            self.guard = nn.Sequential(Vecs, nn.Linear(vec_size * n_vecs, n_hidden, bias=False), nn.Sigmoid())
 
-    # Perform FFT on both inputs
-    fft_input1 = torch.fft.fft(input1, dim=1)
-    fft_input2 = torch.fft.fft(input2, dim=1)
+        if has_outer_proj:
+            self.proj = nn.Sequential(
+                nn.Linear((n_hidden//2) ** 2, n_hidden, bias=True),
+                nn.ReLU(),
+                nn.Linear(n_hidden, 1, bias=True),
+                nn.Sigmoid()
+            )
 
-    # Element-wise multiplication in the frequency domain
-    fft_product = fft_input1 * fft_input2
+    def forward(self, inp):
+        if self.has_guard:
+            f = self.ff(inp)
+            g = self.guard(inp)
+            outs = f * g
+        else:
+            outs = self.ff(inp)
+        h = self.n_hidden // 2
 
-    # Inverse FFT to transform back to the time domain
-    output = torch.fft.ifft(fft_product, dim=1)
+        # y0 = torch.stack(outs[:h], dim=1).max(dim=1).values
+        # y1 = torch.stack(outs[h:], dim=1).max(dim=1).values
 
-    # Since ifft returns complex numbers, we take the real part as the output
-    return output.real
+        if self.has_outer_proj:
+            y0 = outs[:, :h]
+            y1 = outs[:, h:]
+            return self.proj(einsum('bx, by -> bxy', y0, y1).flatten(start_dim=1, end_dim=2))#.squeeze(1)
+        else:
+            y0 = outs[:, :h].max(dim=1).values.unsqueeze(1)
+            y1 = outs[:, h:].max(dim=1).values.unsqueeze(1)
+            return (y1 - y0 + 1) / 2
 
-def op(n_inp, vec_size, hidden_dim, symbol_weights):
+            # y0 = outs[:, :h].mean(dim=1).unsqueeze(1)
+            # y1 = outs[:, h:].mean(dim=1).unsqueeze(1)
+            # return (y1 - y0 + 1) / 2
+
+
+def Twist(n_inp, typ='mul'):
+    if typ=='mul' or typ=='multiply':
+        if n_inp == 1:
+            return Id()
+        elif n_inp == 2:
+            return Fn(lambda a, b: a * b, nargs=2)
+        elif n_inp == 3:
+            return Fn(lambda a, b, c: a * b * c, nargs=3)
+        elif n_inp == 4:
+            return Fn(lambda a, b, c, d: a * b * c * d, nargs=4)
+        elif n_inp == 5:
+            return Fn(lambda a, b, c, d, e: a * b * c * d * e, nargs=5)
+        elif n_inp == 6:
+            return Fn(lambda a, b, c, d, e, f: a * b * c * d * e * f, nargs=6)
+
+    if typ=='convolve':
+        co = convolve
+        if n_inp == 1:
+            return Id()
+        elif n_inp == 2:
+            return Fn(lambda a, b: co(a, b), nargs=2)
+        elif n_inp == 3:
+            return Fn(lambda a, b, c: co(co(a, b), c), nargs=3)
+        elif n_inp == 4:
+            return Fn(lambda a, b, c, d: co(co(co(a, b), c), d), nargs=4)
+        elif n_inp == 5:
+            return Fn(lambda a, b, c, d, e: co(co(co(co(a, b), c), d), e), nargs=5)
+        elif n_inp == 6:
+            return Fn(lambda a, b, c, d, e, f: co(co(co(co(co(a, b), c), d), e), f), nargs=6)
+
+def op(n_inp, vec_size, hidden_dim):
     ''' (vec, vec, vec) -> scalar
     Useful in stack/queue operations.
     '''
-    if n_inp == 1:
-        fn = Id()
-    elif n_inp == 2:
-        fn = Fn(lambda a, b: a * b, nargs=2)
-    elif n_inp == 3:
-        fn = Fn(lambda a, b, c: a * b * c, nargs=3)
-    elif n_inp == 4:
-        fn = Fn(lambda a, b, c, d: a * b * c * d, nargs=4)
-    elif n_inp == 5:
-        fn = Fn(lambda a, b, c, d, e: a * b * c * d * e, nargs=5)
-    elif n_inp == 6:
-        fn = Fn(lambda a, b, c, d, e, f: a * b * c * d * e * f, nargs=6)
-
     return nn.Sequential(
-
-        ##########
-        # Circular Convolution
-        Parallel([Fn(lambda x: F.normalize(x, dim=1)), Fn(lambda x: F.normalize(x, dim=1))]),
-        Fn(circular_convolution, nargs=2),
-
-
-        NormalizedLinear(vec_size, hidden_dim, weight=symbol_weights, bias=False),
-
-        nn.Linear(hidden_dim, hidden_dim),
-        nn.Softmax(dim=1),
-
-        nn.Linear(hidden_dim, 1),
-        nn.Sigmoid(),
-        Fn(lambda x: x.squeeze(1), nargs=1),
-
-        # Fn(lambda x: x.max(dim=1).values, nargs=1),
-
-
-        # ##########
-        # # Conv
-        # Stack(dim=1),
-        # nn.Conv1d(in_channels=2, out_channels=1, kernel_size=3, stride=1, padding=1),
-        # Fn(lambda x: x.squeeze(1), nargs=1), # [batch, 1, vec_size] -> [batch, vec_size]
-        # NormalizedLinear(vec_size, hidden_dim, weight=symbol_weights, bias=False),
-        # Fn(lambda x: x.max(dim=1).values, nargs=1),
-
-
-        # ##########
-        # # Symbol Matching
-
-        # fn,
-        # NormalizedLinear(vec_size, hidden_dim, weight=symbol_weights, bias=False),
-
-        # # # CosineSimilarity(symbol_weights, dim=1, unsqueeze_inputs=[], unsqueeze_weights=[]),
-        # # #nn.Linear(vec_size, hidden_dim, bias=False),
-        # # # nn.ReLU(),
-        # # # nn.Linear(hidden_dim, hidden_dim, bias=False),
-        # # # nn.Softmax(dim=1),
-        # # # nn.Linear(symbol_weights.size(0), 1, bias=False),
-        # # # nn.Sigmoid(),
-
-        # Fn(lambda x: x.max(dim=1).values, nargs=1),
-
+        Choice(vec_size, 2, n_hidden=16, has_guard=True, has_outer_proj=True),
+        Fn(lambda x: x.squeeze(-1)),
     )
-
 
 class Neuralsymbol(nn.Module):
     def __init__(self,
@@ -744,21 +747,33 @@ class Neuralsymbol(nn.Module):
 
         ##########
         # Symbols
+        N_IN = 8
+        N_OUT = 8
 
-        self.sym_w = nn.Parameter(torch.randn((n_symbols, vec_size)))
-
+        N_OP = 8
 
         ##########
         # Type
 
-        isinstance_dim = 4 # intentional bottleneck
-        self.isinstance = nn.Sequential(
-            NormalizedLinear(vec_size, isinstance_dim, bias=False),
+        sym_type_hidden = 8
+        self.sym_type = nn.Sequential(
+
+            NormalizedLinear(vec_size, sym_type_hidden, bias=False),
             # nn.ReLU(),
             nn.Softmax(dim=1),
-            # NormalizedLinear(isinstance_dim, vec_size, bias=False),
-            nn.Linear(isinstance_dim, vec_size, bias=False),
+            # NormalizedLinear(sym_type_hidden, vec_size, bias=False),
+            nn.Linear(sym_type_hidden, vec_size, bias=False),
             nn.Tanh(),
+
+            # nn.Linear(vec_size, N_IN, bias=False),
+            # nn.Softmax(dim=1),
+            # nn.Linear(N_IN, N_OUT, bias=False),
+            # nn.Softmax(dim=1),
+            # nn.Linear(N_OUT, vec_size, bias=False),
+
+            # nn.Linear(vec_size, 8, bias=False),
+            # nn.Softmax(dim=1),
+            # nn.Linear(8, vec_size, bias=False),
         )
 
         ##########
@@ -771,57 +786,34 @@ class Neuralsymbol(nn.Module):
 
         # Control Ops:
         #   Inp: control dim + input dim
-        self.cop1 = op(2, vec_size, hidden_dim, self.sym_w)
-        self.cop2 = op(2, vec_size, hidden_dim, self.sym_w)
-        self.cop3 = op(2, vec_size, hidden_dim, self.sym_w)
+        self.cop1 = op(2, vec_size, N_OP)
+        self.cop2 = op(2, vec_size, N_OP)
+        self.cop3 = op(2, vec_size, N_OP)
 
         self.control = nn.Sequential(
 
-            # ##########
-            # # Conventional
-            # Fn(lambda x, y: x * y, nargs=2),
-            # NormalizedLinear(vec_size, hidden_dim, weight=self.sym_w, bias=False),
-            # nn.ReLU(),
-            # # nn.Softmax(),
-            # nn.Dropout(self.dropout_p),
-            # NormalizedLinear(hidden_dim, vec_size, weight=self.sym_w, bias=False, reverse=True),
-            # nn.Tanh()
-
-
-            ##########
-            # Symbol Matching
-
-            # Fn(lambda x, y: x * y, nargs=2),
-            # NormalizedLinear(vec_size, hidden_dim, weight=self.sym_w, bias=False),
-            # nn.ReLU(),
-            # # nn.Softmax(),
-            # nn.Dropout(self.dropout_p),
-            # NormalizedLinear(hidden_dim, vec_size, weight=self.sym_w, bias=False, reverse=True),
-            # nn.Tanh()
-
-
-            ##########
-            # Convolutional
-
-            # Stack(dim=1),
-            # nn.Conv1d(in_channels=2, out_channels=1, kernel_size=3, stride=1, padding=1),
-            # Fn(lambda x: x.squeeze(1), nargs=1), # [batch, 1, vec_size] -> [batch, vec_size]
-
-            ##########
-            # Circular Convolution
-            Parallel([Fn(lambda x: F.normalize(x, dim=1)), Fn(lambda x: F.normalize(x, dim=1))]),
-            Fn(circular_convolution, nargs=2),
-            NormalizedLinear(vec_size, hidden_dim, weight=self.sym_w, bias=False),
+            Fn(lambda a, b: a * b, nargs=2),
+            NormalizedLinear(vec_size, hidden_dim, bias=False),
             # nn.Linear(vec_size, hidden_dim, bias=True),
             nn.ReLU(),
             # nn.Softmax(),
-            nn.Dropout(self.dropout_p),
-            # NormalizedLinear(hidden_dim, vec_size, weight=self.sym_w, bias=False, reverse=True),
+            # NormalizedLinear(hidden_dim, vec_size, bias=False, reverse=True),
             nn.Linear(hidden_dim, vec_size, bias=False),
             nn.Tanh()
 
-        )
+            # Twist(2, 'mul'),
+            # nn.Linear(vec_size, N_IN, bias=False),
+            # nn.Softmax(dim=1),
+            # nn.Linear(N_IN, N_OUT, bias=False),
+            # nn.Softmax(dim=1),
+            # nn.Linear(N_OUT, vec_size, bias=False),
 
+            # Twist(2, 'mul'),
+            # nn.Linear(vec_size, 8, bias=False),
+            # nn.Softmax(dim=1),
+            # nn.Linear(8, vec_size, bias=False),
+
+        )
 
         ##########
         # Working Stack
@@ -831,61 +823,91 @@ class Neuralsymbol(nn.Module):
 
         # Control Ops:
         #   Inp: work dim + input dim
-        self.wop1 = op(2, vec_size, hidden_dim, self.sym_w)
-        self.wop2 = op(2, vec_size, hidden_dim, self.sym_w)
-        self.wop3 = op(2, vec_size, hidden_dim, self.sym_w)
+        self.wop1 = op(2, vec_size, N_OP)
+        self.wop2 = op(2, vec_size, N_OP)
+        self.wop3 = op(2, vec_size, N_OP)
 
         self.work = nn.Sequential(
 
-            # ##########
-            # # Conventional
-            # Fn(lambda x, y, z: x * y * z, nargs=3),
-            # NormalizedLinear(vec_size, hidden_dim, weight=self.sym_w, bias=False),
-            # nn.ReLU(),
-            # nn.Dropout(self.dropout_p),
-            # NormalizedLinear(hidden_dim, vec_size, weight=self.sym_w, reverse=True, bias=False),
-            # nn.Tanh(),
-
-            # ##########
-            # # Convolutional
-            # Stack(dim=1),
-            # nn.Conv1d(in_channels=3, out_channels=1, kernel_size=3, stride=1, padding=1),
-            # Fn(lambda x: x.squeeze(1), nargs=1), # [batch, 1, vec_size] -> [batch, vec_size]
-
-            ##########
-            # Circular Convolution
-            Parallel([Fn(lambda x: F.normalize(x, dim=1)),
-                      Fn(lambda x: F.normalize(x, dim=1)),
-                      Fn(lambda x: F.normalize(x, dim=1)),]),
-
-            Fn(lambda a, b, c: circular_convolution(circular_convolution(a, b), c), nargs=3),
+            Fn(lambda a, b, c: a * b * c, nargs=3),
             # nn.Linear(vec_size, hidden_dim, bias=True),
-            NormalizedLinear(vec_size, hidden_dim, weight=self.sym_w, bias=False),
+            NormalizedLinear(vec_size, hidden_dim, bias=False),
             nn.ReLU(),
-            nn.Dropout(self.dropout_p),
-            # NormalizedLinear(hidden_dim, vec_size, weight=self.sym_w, reverse=True, bias=False),
+            # NormalizedLinear(hidden_dim, vec_size, reverse=True, bias=False),
             nn.Linear(hidden_dim, vec_size, bias=False),
             nn.Tanh(),
 
+
+            # # MAKE WORK A GUARDED FN of (work, inp) guarded on type(inp)
+
+            # Twist(3, 'mul'),
+            # nn.Linear(vec_size, N_IN, bias=False),
+            # nn.Softmax(dim=1),
+            # nn.Linear(N_IN, N_OUT, bias=False),
+            # nn.Softmax(dim=1),
+            # nn.Linear(N_OUT, vec_size, bias=False),
+
+
+            # Twist(3, 'mul'),
+            # nn.Linear(vec_size, 8, bias=False),
+            # nn.Softmax(dim=1),
+            # nn.Linear(8, vec_size, bias=False),
+
+
+            # Twist(3, 'mul'),
+            # nn.Linear(vec_size, n_symbols, bias=False),
+            # nn.Sigmoid(),
+            # Fn(lambda x: einsum('bj, ij -> bi', x)),
         )
 
         self.n_out_sym = 4
         self.out_sym = nn.Parameter(torch.randn(self.n_out_sym, vec_size))
         self.select_out = nn.Sequential(
-            Parallel([Fn(lambda x: F.normalize(x, dim=1)),
-                      Fn(lambda x: F.normalize(x, dim=1)),
-                      Fn(lambda x: F.normalize(x, dim=1)),]),
 
-            Parallel([nn.Dropout(self.dropout_p), nn.Dropout(self.dropout_p), nn.Dropout(self.dropout_p)]),
             # Fn(f=lambda x, y, z: x * y * z, nargs=3),
-            Fn(lambda a, b, c: circular_convolution(circular_convolution(a, b), c), nargs=3),
+            Fn(lambda a, b, c: a * b * c, nargs=3),
             NormalizedLinear(vec_size, hidden_dim, bias=False),
             # nn.Linear(vec_size, hidden_dim, bias=True),
             nn.ReLU(),
             nn.Linear(hidden_dim, self.n_out_sym + 1, bias=False), # n_out + work
             nn.Softmax(dim=1)
-        )
 
+            # Twist(3, 'mul'),
+            # nn.Linear(vec_size, N_IN, bias=False),
+            # nn.Softmax(dim=1),
+            # nn.Linear(N_IN, self.n_out_sym + 1, bias=False),
+            # nn.Softmax(dim=1),
+
+            # Twist(3, 'mul'),
+            # nn.Linear(vec_size, self.n_out_sym + 1, bias=True),
+            # nn.Sigmoid(),
+
+            # Twist(3, 'mul'),
+            # nn.Linear(vec_size, hidden_dim, bias=False),
+            # nn.ReLU(),
+            # nn.Linear(hidden_dim, self.n_out_sym + 1, bias=False),
+            # nn.Softmax(dim=1),
+
+            # Parallel([Fn(lambda x: F.normalize(x, dim=1)),
+            #           Fn(lambda x: F.normalize(x, dim=1)),
+            #           Fn(lambda x: F.normalize(x, dim=1)),]),
+            # Parallel([nn.Dropout(self.dropout_p), nn.Dropout(self.dropout_p), nn.Dropout(self.dropout_p)]),
+            # # Fn(f=lambda x, y, z: x * y * z, nargs=3),
+            # Fn(lambda a, b, c: a * b * c, nargs=3),
+            # NormalizedLinear(vec_size, hidden_dim, bias=False),
+            # # nn.Linear(vec_size, hidden_dim, bias=True),
+            # nn.ReLU(),
+            # nn.Linear(hidden_dim, self.n_out_sym + 1, bias=False), # n_out + work
+            # nn.Softmax(dim=1)
+
+            # Fn(f=lambda x, y, z: x * y * z, nargs=3),
+            # NormalizedLinear(vec_size, hidden_dim, bias=False),
+            # # nn.Linear(vec_size, hidden_dim, bias=True),
+            # nn.ReLU(),
+            # nn.Linear(hidden_dim, self.n_out_sym + 1, bias=False), # n_out + work
+            # nn.Softmax(dim=1)
+
+        )
 
     def forward(self, x):
         # Containers Init
@@ -919,29 +941,22 @@ class Neuralsymbol(nn.Module):
             # Containers
 
             # pop stacks no matter what
+            # control = self.control_stack.pop()
+            # work = self.work_stack.pop()
+
             control = self.control_stack.read()
             work = self.work_stack.read()
 
-            typ = self.isinstance(inp)
 
-            # TODO: rm ablation experiment
-            # control = control * 0
-            # control = control + 1e-5
+            typ = self.sym_type(inp)
+            # typ = inp
 
             # control ops
             op_inp = [control, typ]
-            c_push_, c_pop_, c_null_op_ = self.cop1(op_inp), self.cop2(op_inp), self.cop3(op_inp)
-            c_push, c_pop, c_null_op = c_push_, c_pop_, c_null_op_
-
-            # c_push_, c_pop_, c_null_op_ = c_push.unsqueeze(-1), c_pop.unsqueeze(-1), c_null_op.unsqueeze(-1)
-            # c_push, c_pop, c_null_op = torch.split(torch.softmax(torch.hstack([c_push_, c_pop_, c_null_op_]), dim=1), [1, 1, 1], dim=1)
+            c_push, c_pop, c_null_op = self.cop1(op_inp), self.cop2(op_inp), self.cop3(op_inp)
 
             # work ops
-            w_push_, w_pop_, w_null_op_ = self.wop1(op_inp), self.wop2(op_inp), self.wop3(op_inp)
-            w_push, w_pop, w_null_op = w_push_, w_pop_, w_null_op_
-
-            # w_push_, w_pop_, w_null_op_ = w_push.unsqueeze(-1), w_pop.unsqueeze(-1), w_null_op.unsqueeze(-1)
-            # w_push, w_pop, w_null_op = torch.split(torch.softmax(torch.hstack([w_push_, w_pop_, w_null_op_]), dim=1), [1, 1, 1], dim=1)
+            w_push, w_pop, w_null_op = self.wop1(op_inp), self.wop2(op_inp), self.wop3(op_inp)
 
             new_control = self.control([control, typ])
             new_work = self.work([work, inp, typ])
@@ -964,9 +979,6 @@ class Neuralsymbol(nn.Module):
 
             ##########
             # Apply Ops
-            # c_push, c_pop, c_null_op = c_push.squeeze(1), c_pop.squeeze(1), c_null_op.squeeze(1)
-            # w_push, w_pop, w_null_op = w_push.squeeze(1), w_pop.squeeze(1), w_null_op.squeeze(1)
-
             self.control_stack(self.control_sharp, c_push, c_pop, c_null_op, new_control)
             self.work_stack(self.work_sharp, w_push, w_pop, w_null_op, new_work)
 
@@ -997,9 +1009,44 @@ model = MyModel(
 )
 model.to(DEVICE)
 
-# print('disabling gradients for sharpening')
+def format_number(num):
+    """
+    Formats a number with suffixes 'k', 'M', or 'B' for thousands, millions, and billions respectively.
+
+    Parameters:
+    - num (int): The number to format.
+
+    Returns:
+    - str: The formatted number as a string.
+    """
+    if abs(num) >= 1_000_000_000:  # Billion
+        formatted_num = f"{num / 1_000_000_000:.1f}B"
+    elif abs(num) >= 1_000_000:  # Million
+        formatted_num = f"{num / 1_000_000:.1f}M"
+    elif abs(num) >= 1_000:  # Thousand
+        formatted_num = f"{num / 1_000:.1f}k"
+    else:
+        formatted_num = str(num)
+
+    return formatted_num
+
+n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+print(f'Total Params: {format_number(n_params)}')
+
+
+
+# print('DISABLING GRADIENTS')
 # model.control_sharp.requires_grad = False
 # model.work_sharp.requires_grad = False
+# model.control.requires_grad = False
+# model.work.requires_grad = False
+# model.cop1.requires_grad = False
+# model.cop2.requires_grad = False
+# model.cop3.requires_grad = False
+# model.wop1.requires_grad = False
+# model.wop2.requires_grad = False
+# model.wop3.requires_grad = False
+
 
 opt_params = list(filter(lambda p: p.requires_grad, model.parameters()))
 
@@ -1033,8 +1080,6 @@ for epoch in range(NUM_EPOCHS):
     # Experiment changing sharpen param
     if True: # TODO: rm experiment
         with torch.no_grad():
-            # model.control_sharp[:] = torch.randint(2, 10, (1,))
-            # model.work_sharp[:]    = torch.randint(2, 10, (1,))
             model.control_sharp[:] = torch.randint(4, 12, (1,))
             model.work_sharp[:]    = torch.randint(4, 12, (1,))
 
