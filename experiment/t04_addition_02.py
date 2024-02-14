@@ -140,7 +140,7 @@ MAX_THINK_TOKENS = 3 # "Think" tokens
 PAUSE_APPEND_INDEX = -3  # append tokens before [..., L, 42, R]
 
 DEVICE = 'cuda'
-VEC_SIZE = 256
+VEC_SIZE = 128
 
 NUM_TRAIN_SAMPLES = 1000  # total number of samples in the dataset
 MIN_TRAIN_SEQUENCE_LENGTH = 1  # maximum length of the sequence
@@ -149,6 +149,10 @@ MAX_TRAIN_SEQUENCE_LENGTH = 3  # maximum length of the sequence
 NUM_VAL_SAMPLES = 100
 MIN_VAL_SEQUENCE_LENGTH = MAX_TRAIN_SEQUENCE_LENGTH + 1
 MAX_VAL_SEQUENCE_LENGTH = MAX_TRAIN_SEQUENCE_LENGTH * 2  # maximum length of the sequence
+
+# CHOICE_METHOD = 'softmax'
+CHOICE_METHOD = 'outer_projection'
+REDUNDANCY = 4
 
 BATCH_SIZE = 100
 LR = 1e-2
@@ -619,14 +623,17 @@ class LSTMModel(nn.Module):
 
 class Choice(nn.Module):
     ''' N-vectors -> [0, 1] '''
-    def __init__(self, vec_size, n_vecs, n_hidden, has_guard=False, has_outer_proj=False):
+    def __init__(self, vec_size, n_vecs, n_choices, redundancy, has_guard=False, method='mean'):
         super(Choice, self).__init__()
         self.vec_size = vec_size
         self.n_vecs = n_vecs
-        self.n_hidden = n_hidden
+        self.n_choices = n_choices
+        self.redundancy = redundancy
         self.has_guard = has_guard
-        self.has_outer_proj = has_outer_proj
+        self.method = method
+        assert method in {'mean', 'max', 'softmax', 'outer_projection'}
 
+        # Stack inputs
         if n_vecs == 1:
             Vecs = Id()
         elif n_vecs == 2:
@@ -640,17 +647,29 @@ class Choice(nn.Module):
         elif n_vecs == 6:
             Vecs = Fn(lambda a, b, c, d, e, f: torch.hstack([a, b, c, d, e, f]), nargs=6)
 
-        self.ff = nn.Sequential(Vecs, nn.Linear(vec_size * n_vecs, n_hidden, bias=False), nn.Sigmoid())
+        self.ff = nn.Sequential(Vecs, nn.Linear(vec_size * n_vecs, redundancy * n_choices, bias=False), nn.Sigmoid())
 
         if has_guard:
-            self.guard = nn.Sequential(Vecs, nn.Linear(vec_size * n_vecs, n_hidden, bias=False), nn.Sigmoid())
+            self.guard = nn.Sequential(Vecs, nn.Linear(vec_size * n_vecs, redundancy * n_choices, bias=False), nn.Sigmoid())
 
-        if has_outer_proj:
+        if method == 'outer_projection':
+            if n_choices == 2:
+                self.outer = lambda xs: torch.einsum('za, zb -> zab', *xs).flatten(start_dim=1, end_dim=-1)
+            elif n_choices == 3:
+                self.outer = lambda xs: torch.einsum('za, zb, zc -> zabc', *xs).flatten(start_dim=1, end_dim=-1)
+            elif n_choices == 4:
+                self.outer = lambda xs: torch.einsum('za, zb, zc, zd -> zabcd', *xs).flatten(start_dim=1, end_dim=-1)
+            elif n_choices == 5:
+                self.outer = lambda xs: torch.einsum('za, zb, zc, zd, ze -> zabcde', *xs).flatten(start_dim=1, end_dim=-1)
+            elif n_choices > 5:
+                raise ValueError(f'The outer_projection method scales as O(redundancy ** n_choices). You probably dont want n_choices>5, but you picked n_choices={n_choices}')
+
             self.proj = nn.Sequential(
-                nn.Linear((n_hidden//2) ** 2, n_hidden, bias=True),
+                nn.Linear(redundancy ** n_choices, redundancy, bias=True),
                 nn.ReLU(),
-                nn.Linear(n_hidden, 1, bias=True),
-                nn.Sigmoid()
+                nn.Linear(redundancy, n_choices, bias=True),
+                nn.Sigmoid(),
+                # nn.Softmax(dim=1)
             )
 
     def forward(self, inp):
@@ -660,62 +679,26 @@ class Choice(nn.Module):
             outs = f * g
         else:
             outs = self.ff(inp)
-        h = self.n_hidden // 2
 
-        # y0 = torch.stack(outs[:h], dim=1).max(dim=1).values
-        # y1 = torch.stack(outs[h:], dim=1).max(dim=1).values
-
-        if self.has_outer_proj:
-            y0 = outs[:, :h]
-            y1 = outs[:, h:]
-            return self.proj(einsum('bx, by -> bxy', y0, y1).flatten(start_dim=1, end_dim=2))#.squeeze(1)
-        else:
-            y0 = outs[:, :h].max(dim=1).values.unsqueeze(1)
-            y1 = outs[:, h:].max(dim=1).values.unsqueeze(1)
-            return (y1 - y0 + 1) / 2
-
-            # y0 = outs[:, :h].mean(dim=1).unsqueeze(1)
-            # y1 = outs[:, h:].mean(dim=1).unsqueeze(1)
-            # return (y1 - y0 + 1) / 2
+        if self.method == 'outer_projection':
+            chunks = torch.chunk(outs, self.n_choices, dim=1)
+            return self.proj(self.outer(chunks))
+        elif self.method == 'mean':
+            return torch.mean(outs.view(-1, self.n_choices, self.redundancy), dim=2)
+        elif self.method == 'max':
+            return torch.max(outs.view(-1, self.n_choices, self.redundancy), dim=2).values
+        elif self.method == 'softmax':
+            return torch.sum(outs.softmax(dim=1).view(-1, self.n_choices, self.redundancy), dim=2)
 
 
-def Twist(n_inp, typ='mul'):
-    if typ=='mul' or typ=='multiply':
-        if n_inp == 1:
-            return Id()
-        elif n_inp == 2:
-            return Fn(lambda a, b: a * b, nargs=2)
-        elif n_inp == 3:
-            return Fn(lambda a, b, c: a * b * c, nargs=3)
-        elif n_inp == 4:
-            return Fn(lambda a, b, c, d: a * b * c * d, nargs=4)
-        elif n_inp == 5:
-            return Fn(lambda a, b, c, d, e: a * b * c * d * e, nargs=5)
-        elif n_inp == 6:
-            return Fn(lambda a, b, c, d, e, f: a * b * c * d * e * f, nargs=6)
-
-    if typ=='convolve':
-        co = convolve
-        if n_inp == 1:
-            return Id()
-        elif n_inp == 2:
-            return Fn(lambda a, b: co(a, b), nargs=2)
-        elif n_inp == 3:
-            return Fn(lambda a, b, c: co(co(a, b), c), nargs=3)
-        elif n_inp == 4:
-            return Fn(lambda a, b, c, d: co(co(co(a, b), c), d), nargs=4)
-        elif n_inp == 5:
-            return Fn(lambda a, b, c, d, e: co(co(co(co(a, b), c), d), e), nargs=5)
-        elif n_inp == 6:
-            return Fn(lambda a, b, c, d, e, f: co(co(co(co(co(a, b), c), d), e), f), nargs=6)
-
-def op(n_inp, vec_size, hidden_dim):
+def op(n_inp, vec_size, redundancy):
     ''' (vec, vec, vec) -> scalar
     Useful in stack/queue operations.
     '''
     return nn.Sequential(
-        Choice(vec_size, 2, n_hidden=16, has_guard=True, has_outer_proj=True),
-        Fn(lambda x: x.squeeze(-1)),
+        Choice(vec_size, n_inp, n_choices=2, redundancy=REDUNDANCY, has_guard=True, method=CHOICE_METHOD),
+        Fn(lambda x: (x[:,0] - x[:,1] + 1) / 2, nargs=1), # convert softmax choice to scalar
+        Fn(lambda x: x.unsqueeze(-1)),
     )
 
 class Neuralsymbol(nn.Module):
@@ -749,8 +732,8 @@ class Neuralsymbol(nn.Module):
         # Symbols
         N_IN = 8
         N_OUT = 8
-
         N_OP = 8
+        n_choices = 4
 
         ##########
         # Type
@@ -758,22 +741,19 @@ class Neuralsymbol(nn.Module):
         sym_type_hidden = 8
         self.sym_type = nn.Sequential(
 
-            NormalizedLinear(vec_size, sym_type_hidden, bias=False),
-            # nn.ReLU(),
-            nn.Softmax(dim=1),
-            # NormalizedLinear(sym_type_hidden, vec_size, bias=False),
-            nn.Linear(sym_type_hidden, vec_size, bias=False),
-            nn.Tanh(),
+            Choice(vec_size, n_vecs=1, n_choices=2, redundancy=REDUNDANCY, has_guard=True, method=CHOICE_METHOD),
+            nn.Linear(2, vec_size, bias=True),
 
-            # nn.Linear(vec_size, N_IN, bias=False),
-            # nn.Softmax(dim=1),
-            # nn.Linear(N_IN, N_OUT, bias=False),
-            # nn.Softmax(dim=1),
-            # nn.Linear(N_OUT, vec_size, bias=False),
+            # ##########
+            # # ORIG WORKS OK
 
-            # nn.Linear(vec_size, 8, bias=False),
+            # NormalizedLinear(vec_size, sym_type_hidden, bias=False),
+            # # nn.ReLU(),
             # nn.Softmax(dim=1),
-            # nn.Linear(8, vec_size, bias=False),
+            # # NormalizedLinear(sym_type_hidden, vec_size, bias=False),
+            # nn.Linear(sym_type_hidden, vec_size, bias=False),
+            # nn.Tanh(),
+
         )
 
         ##########
@@ -790,28 +770,22 @@ class Neuralsymbol(nn.Module):
         self.cop2 = op(2, vec_size, N_OP)
         self.cop3 = op(2, vec_size, N_OP)
 
+
         self.control = nn.Sequential(
+            Choice(vec_size, n_vecs=2, n_choices=n_choices, redundancy=REDUNDANCY, has_guard=True, method=CHOICE_METHOD),
+            nn.Linear(n_choices, vec_size, bias=False),
 
-            Fn(lambda a, b: a * b, nargs=2),
-            NormalizedLinear(vec_size, hidden_dim, bias=False),
-            # nn.Linear(vec_size, hidden_dim, bias=True),
-            nn.ReLU(),
-            # nn.Softmax(),
-            # NormalizedLinear(hidden_dim, vec_size, bias=False, reverse=True),
-            nn.Linear(hidden_dim, vec_size, bias=False),
-            nn.Tanh()
+            ##########
+            # ORIG WORKS OK
 
-            # Twist(2, 'mul'),
-            # nn.Linear(vec_size, N_IN, bias=False),
-            # nn.Softmax(dim=1),
-            # nn.Linear(N_IN, N_OUT, bias=False),
-            # nn.Softmax(dim=1),
-            # nn.Linear(N_OUT, vec_size, bias=False),
-
-            # Twist(2, 'mul'),
-            # nn.Linear(vec_size, 8, bias=False),
-            # nn.Softmax(dim=1),
-            # nn.Linear(8, vec_size, bias=False),
+            # Fn(lambda a, b: a * b, nargs=2),
+            # NormalizedLinear(vec_size, hidden_dim, bias=False),
+            # # nn.Linear(vec_size, hidden_dim, bias=True),
+            # nn.ReLU(),
+            # # nn.Softmax(),
+            # # NormalizedLinear(hidden_dim, vec_size, bias=False, reverse=True),
+            # nn.Linear(hidden_dim, vec_size, bias=False),
+            # nn.Tanh()
 
         )
 
@@ -827,80 +801,32 @@ class Neuralsymbol(nn.Module):
         self.wop2 = op(2, vec_size, N_OP)
         self.wop3 = op(2, vec_size, N_OP)
 
+        self.work_guard = op(1, vec_size, N_OP)
+
         self.work = nn.Sequential(
 
+            # Choice(vec_size, n_vecs=3, n_choices=n_choices, redundancy=3, has_guard=True, method=CHOICE_METHOD),
+            # nn.Linear(n_choices, vec_size, bias=False),
+
             Fn(lambda a, b, c: a * b * c, nargs=3),
-            # nn.Linear(vec_size, hidden_dim, bias=True),
-            NormalizedLinear(vec_size, hidden_dim, bias=False),
+            nn.Linear(vec_size, hidden_dim, bias=True),
             nn.ReLU(),
-            # NormalizedLinear(hidden_dim, vec_size, reverse=True, bias=False),
-            nn.Linear(hidden_dim, vec_size, bias=False),
-            nn.Tanh(),
+            nn.Linear(hidden_dim, vec_size, bias=True),
+            Fn(lambda x: F.normalize(x, dim=1)),
 
-
-            # # MAKE WORK A GUARDED FN of (work, inp) guarded on type(inp)
-
-            # Twist(3, 'mul'),
-            # nn.Linear(vec_size, N_IN, bias=False),
-            # nn.Softmax(dim=1),
-            # nn.Linear(N_IN, N_OUT, bias=False),
-            # nn.Softmax(dim=1),
-            # nn.Linear(N_OUT, vec_size, bias=False),
-
-
-            # Twist(3, 'mul'),
-            # nn.Linear(vec_size, 8, bias=False),
-            # nn.Softmax(dim=1),
-            # nn.Linear(8, vec_size, bias=False),
-
-
-            # Twist(3, 'mul'),
-            # nn.Linear(vec_size, n_symbols, bias=False),
-            # nn.Sigmoid(),
-            # Fn(lambda x: einsum('bj, ij -> bi', x)),
         )
 
         self.n_out_sym = 4
         self.out_sym = nn.Parameter(torch.randn(self.n_out_sym, vec_size))
         self.select_out = nn.Sequential(
 
-            # Fn(f=lambda x, y, z: x * y * z, nargs=3),
-            Fn(lambda a, b, c: a * b * c, nargs=3),
-            NormalizedLinear(vec_size, hidden_dim, bias=False),
-            # nn.Linear(vec_size, hidden_dim, bias=True),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, self.n_out_sym + 1, bias=False), # n_out + work
-            nn.Softmax(dim=1)
+            Choice(vec_size, n_vecs=3, n_choices=self.n_out_sym + 1, redundancy=REDUNDANCY, has_guard=True, method=CHOICE_METHOD),
 
-            # Twist(3, 'mul'),
-            # nn.Linear(vec_size, N_IN, bias=False),
-            # nn.Softmax(dim=1),
-            # nn.Linear(N_IN, self.n_out_sym + 1, bias=False),
-            # nn.Softmax(dim=1),
+            # ##########
+            # # ORIG WORKS OK
 
-            # Twist(3, 'mul'),
-            # nn.Linear(vec_size, self.n_out_sym + 1, bias=True),
-            # nn.Sigmoid(),
-
-            # Twist(3, 'mul'),
-            # nn.Linear(vec_size, hidden_dim, bias=False),
-            # nn.ReLU(),
-            # nn.Linear(hidden_dim, self.n_out_sym + 1, bias=False),
-            # nn.Softmax(dim=1),
-
-            # Parallel([Fn(lambda x: F.normalize(x, dim=1)),
-            #           Fn(lambda x: F.normalize(x, dim=1)),
-            #           Fn(lambda x: F.normalize(x, dim=1)),]),
-            # Parallel([nn.Dropout(self.dropout_p), nn.Dropout(self.dropout_p), nn.Dropout(self.dropout_p)]),
             # # Fn(f=lambda x, y, z: x * y * z, nargs=3),
             # Fn(lambda a, b, c: a * b * c, nargs=3),
-            # NormalizedLinear(vec_size, hidden_dim, bias=False),
-            # # nn.Linear(vec_size, hidden_dim, bias=True),
-            # nn.ReLU(),
-            # nn.Linear(hidden_dim, self.n_out_sym + 1, bias=False), # n_out + work
-            # nn.Softmax(dim=1)
-
-            # Fn(f=lambda x, y, z: x * y * z, nargs=3),
             # NormalizedLinear(vec_size, hidden_dim, bias=False),
             # # nn.Linear(vec_size, hidden_dim, bias=True),
             # nn.ReLU(),
@@ -944,9 +870,8 @@ class Neuralsymbol(nn.Module):
             # control = self.control_stack.pop()
             # work = self.work_stack.pop()
 
-            control = self.control_stack.read()
-            work = self.work_stack.read()
-
+            control = self.control_stack.pop()
+            work = self.work_stack.pop()
 
             typ = self.sym_type(inp)
             # typ = inp
@@ -954,12 +879,17 @@ class Neuralsymbol(nn.Module):
             # control ops
             op_inp = [control, typ]
             c_push, c_pop, c_null_op = self.cop1(op_inp), self.cop2(op_inp), self.cop3(op_inp)
+            c_push, c_pop, c_null_op = c_push.squeeze(1), c_pop.squeeze(1), c_null_op.squeeze(1)
+            c_push, c_pop = (c_push - c_pop + 1)/2, (c_pop - c_push + 1)/2
 
             # work ops
             w_push, w_pop, w_null_op = self.wop1(op_inp), self.wop2(op_inp), self.wop3(op_inp)
+            w_push, w_pop, w_null_op = w_push.squeeze(1), w_pop.squeeze(1), w_null_op.squeeze(1)
+            w_push, w_pop = (w_push - w_pop + 1)/2, (w_pop - w_push + 1)/2
 
             new_control = self.control([control, typ])
-            new_work = self.work([work, inp, typ])
+            # work_guard = self.work_guard(typ)
+            new_work = self.work([work, inp, typ]) # * work_guard
 
             select_out = self.select_out([control, work, typ])
             options = torch.cat([
