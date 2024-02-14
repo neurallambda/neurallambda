@@ -165,12 +165,11 @@ inps = ['O', 'P', 'S',  1,   2,   3,  'T', 'T', "F", "N", "N", "N", 'N']
 exps = ['N', 'N', 'N', "N", "N", "N", 'N', 'N', 'N', "L",  6,  "R", 'N']
 
 work_stack = Stack()
-work_queue = Queue()
 control_stack = Stack()
-control_queue = Queue()
 
-debug = []
-debug2 = []
+outs = []
+control_ops = []
+work_ops = []
 for inp, exp in zip(inps, exps):
     work = work_stack.pop()
     control = control_stack.pop()
@@ -180,14 +179,17 @@ for inp, exp in zip(inps, exps):
     apply_stack_op(work_stack, work_op, work, new_work_val)
     apply_stack_op(control_stack, control_op, control, new_control_val)
 
-    debug2.append(str(out))
-    debug.append([[out],
-                  [exp],
-                  [work_stack.peek()],
-                  [work_queue.peek()],
-                  [control_stack.peek()],
-                  [control_queue.peek()],
-                  ])
+    outs.append(out)
+    control_ops.append(control_op)
+    work_ops.append(work_op)
 
-print_grid(debug, labels=['out', 'exp', 'WS', 'WQ', 'CS', 'CQ'])
-print(', '.join(debug2))
+short = {
+    'NULL_OP': '_',
+    'PUSH': 'U',
+    'POP': 'O',
+}
+
+print(', '.join([str(x) for x in inps]))
+print(', '.join([str(short[x]) for x in control_ops]))
+print(', '.join([str(short[x]) for x in work_ops]))
+print(', '.join([str(x) for x in outs]))

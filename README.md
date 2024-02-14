@@ -76,6 +76,10 @@ Demonstration:
   * [ ] Sort inputs
   * [ ] Find and replace
   * [ ] Find and emit
+  * [ ] N-back
+  * [ ] "Conditioned N-back", where some condition determines N realtime
+  * [ ] Function over N-window-back
+  * [ ] Fn Composition
 
 * Pedagogy:
   * Motivation of 4 tensors: tag tensor allows sum types, columns 1 and 2 allow product types
