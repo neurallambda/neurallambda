@@ -93,76 +93,72 @@ class Queue:
         return self.queue[0]
 
 
-def running_sum(inp, work, control):
-    def control_stack_decision(control, inp):
-        ''' push/pop/null_op refer to what should be the final action of the whole function '''
-        match control:
-            case 'RETURN_ANSWER_OPEN':
-                return ('PUSH', 'RETURN_SUM')
-            case 'RETURN_SUM':
-                return ('PUSH', 'RETURN_ANSWER_CLOSE')
-            case 'RETURN_ANSWER_CLOSE':
-                return ('PUSH', 'N')
-            case _ if isinstance(inp, int):
-                return ('NULL_OP', None)
-            case _ if inp == 'F':
-                return ('PUSH', 'RETURN_ANSWER_OPEN')
-            case _:
-                return ('NULL_OP', None)
+##########
 
-    def work_stack_decision(control, inp):
-        ''' push/pop/null_op refer to what should be the final action of the whole function '''
-        match control:
-            case 'RETURN_ANSWER_OPEN' | 'RETURN_ANSWER_CLOSE':
-                return 'NULL_OP'
-            case 'RETURN_SUM':
-                return 'POP'
-            case _ if isinstance(inp, int):
-                return 'PUSH'
-            case _:
-                return 'NULL_OP'
+# GLOBAL inputs sources:
+#
 
-    def work_stack_semantics(work, inp):
-        if isinstance(inp, int):
-            return work + inp if work is not None else inp
-        return None
+def control_pop():
+    pass
 
-    def out_computation(control, work):
-        # Output decision based on control state
-        match control:
-            case 'RETURN_ANSWER_OPEN':
-                return 'L'
-            case 'RETURN_SUM':
-                return work
-            case 'RETURN_ANSWER_CLOSE':
-                return 'R'
-            case _:
-                return 'N'
+def work_pop(control, inp):
+    ''' push/pop/null_op refer to what should be the final action of the whole function '''
+    match control:
+        case 'RETURN_ANSWER_OPEN' | 'RETURN_ANSWER_CLOSE':
+            return 'NULL_OP'
+        case 'RETURN_SUM':
+            return 'POP'
+        case _ if isinstance(inp, int):
+            return 'PUSH'
+        case _:
+            return 'NULL_OP'
 
-    work_val = work_stack_semantics(work, inp)
-    control_op, control_val = control_stack_decision(control, inp)
-    work_op = work_stack_decision(control, inp)
-    out = out_computation(control, work)
+def control_push(control, inp):
+    ''' push/pop/null_op refer to what should be the final action of the whole function '''
+    match control:
+        case 'RETURN_ANSWER_OPEN':
+            return ('PUSH', 'RETURN_SUM')
+        case 'RETURN_SUM':
+            return ('PUSH', 'RETURN_ANSWER_CLOSE')
+        case 'RETURN_ANSWER_CLOSE':
+            return ('PUSH', 'N')
+        case _ if isinstance(inp, int):
+            return ('NULL_OP', None)
+        case _ if inp == 'F':
+            return ('PUSH', 'RETURN_ANSWER_OPEN')
+        case _:
+            return ('NULL_OP', None)
 
-    return (
-        out,
-        work_op, work_val,
-        control_op, control_val
-    )
+def work_push():
+    pass
 
-def apply_stack_op(stack, op, old_val, new_val):
-    '''WARN: this is weird. It expects that a pop was already performed, so
-       operations are shifted by one. IE if you say POP, it will recognize that
-       one was already performed, so don't do anything. '''
+def work_push_val(work, inp):
+    if isinstance(inp, int):
+        return work + inp if work is not None else inp
+    return None
+
+def out_computation(control, work):
+    # Output decision based on control state
+    match control:
+        case 'RETURN_ANSWER_OPEN':
+            return 'L'
+        case 'RETURN_SUM':
+            return work
+        case 'RETURN_ANSWER_CLOSE':
+            return 'R'
+        case _:
+            return 'N'
+
+def apply_stack_op(stack, op, new_val):
     if op == 'NULL_OP':
-        stack.push(old_val)  # Restore if no operation was performed
+        return None
     elif op == 'PUSH':
-        stack.push(new_val)
+        return stack.push(new_val)
     elif op == 'POP':
-        pass # the original `pop` stands
+        return stack.pop()
 
-inps = ['O', 'P', 'S',  1,   2,   3,  'T', 'T', "F", "N", "N", "N", 'N']
-exps = ['N', 'N', 'N', "N", "N", "N", 'N', 'N', 'N', "L",  6,  "R", 'N']
+inps = ['S',  1,   2,   3,  "F", "N", "N", "N", 'N']
+exps = ['N', "N", "N", "N", 'N', "L",  6,  "R", 'N']
 
 work_stack = Stack()
 control_stack = Stack()
@@ -171,13 +167,19 @@ outs = []
 control_ops = []
 work_ops = []
 for inp, exp in zip(inps, exps):
-    work = work_stack.pop()
-    control = control_stack.pop()
 
-    out, work_op, new_work_val, control_op, new_control_val = running_sum(inp, work, control)
+    # Peek
+    work = work_stack.peek()
+    control = control_stack.peek()
 
-    apply_stack_op(work_stack, work_op, work, new_work_val)
-    apply_stack_op(control_stack, control_op, control, new_control_val)
+    # Pop Decision
+    work_val = work_stack_semantics(work, inp)
+    control_op, control_val = control_stack_decision(control, inp)
+    work_op = work_stack_decision(control, inp)
+    out = out_computation(control, work)
+
+    apply_stack_op(work_stack, work_op, new_work_val)
+    apply_stack_op(control_stack, control_op, new_control_val)
 
     outs.append(out)
     control_ops.append(control_op)

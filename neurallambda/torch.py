@@ -129,10 +129,14 @@ class Squeeze(nn.Module):
         return x.squeeze(self.dim)
 
 class Fn(nn.Module):
-    def __init__(self, f, nargs=1):
+    def __init__(self, f, nargs=1, parameters=[]):
         super(Fn, self).__init__()
         self.f = f
         self.nargs = nargs
+        if isinstance(parameters, nn.ParameterList):
+            self.parameters = parameters
+        else:
+            self.parameters = nn.ParameterList(parameters)
     def forward(self, input):
         if self.nargs == 1:
             return self.f(input)

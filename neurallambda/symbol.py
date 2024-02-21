@@ -83,14 +83,16 @@ class SymbolMapper:
         index = self.symbols_v2i[val]
         return self.symbols_vec[index]
 
-    def unproject(self, vector):
+    def unproject(self, vector, return_sim=False):
         """Unprojects a vector from the vector space back to an integer.
-
-        Assumes matrix formatted `vector`.
         """
         cs = torch.cosine_similarity(vector.unsqueeze(0), self.symbols_vec, dim=1)
-        sim_ix = torch.argmax(cs).item()
-        return self.symbols_i2v[sim_ix]
+        am = torch.argmax(cs)
+        sim_ix = am.item()
+        if return_sim:
+            return self.symbols_i2v[sim_ix], cs.max()
+        else:
+            return self.symbols_i2v[sim_ix]
 
 
 ##################################################

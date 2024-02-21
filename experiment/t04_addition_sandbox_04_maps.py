@@ -491,10 +491,23 @@ class Choice(nn.Module):
         elif n_vecs == 6:
             Vecs = Fn(lambda a, b, c, d, e, f: torch.hstack([a, b, c, d, e, f]), nargs=6)
 
-        self.ff = nn.Sequential(Vecs, nn.Linear(vec_size * n_vecs, redundancy * n_choices, bias=False), nn.Sigmoid())
+        self.ff = nn.Sequential(
+            Vecs,
+            NormalizedLinear(vec_size * n_vecs, redundancy * n_choices, bias=False),
+
+            # nn.Linear(vec_size * n_vecs, redundancy * n_choices, bias=False),
+            # nn.Sigmoid()
+        )
 
         if has_guard:
-            self.guard = nn.Sequential(Vecs, nn.Linear(vec_size * n_vecs, redundancy * n_choices, bias=False), nn.Sigmoid())
+            self.guard = nn.Sequential(
+                Vecs,
+
+                NormalizedLinear(vec_size * n_vecs, redundancy * n_choices, bias=False),
+
+                # nn.Linear(vec_size * n_vecs, redundancy * n_choices, bias=False),
+                # nn.Sigmoid()
+            )
 
         if method == 'outer_projection':
             if n_choices == 2:
@@ -508,11 +521,21 @@ class Choice(nn.Module):
             elif n_choices > 5:
                 raise ValueError(f'The outer_projection method scales as O(redundancy ** n_choices). You probably dont want n_choices>5, but you picked n_choices={n_choices}')
 
+
+            # self.proj = nn.Sequential(
+            #     nn.Linear(redundancy ** n_choices, redundancy, bias=True),
+            #     nn.ReLU(),
+            #     nn.Linear(redundancy, n_choices, bias=True),
+            #     nn.Sigmoid(),
+            #     # nn.Softmax(dim=1)
+            # )
+
             self.proj = nn.Sequential(
-                nn.Linear(redundancy ** n_choices, redundancy, bias=True),
-                nn.ReLU(),
-                nn.Linear(redundancy, n_choices, bias=True),
-                nn.Sigmoid(),
+                NormalizedLinear(redundancy ** n_choices, n_choices, bias=False),
+
+                # nn.Linear(redundancy ** n_choices, n_choices, bias=True),
+
+                # nn.Sigmoid(),
                 # nn.Softmax(dim=1)
             )
 
@@ -586,7 +609,7 @@ train_odd_dl = DataLoader(odd_dataset, batch_size=BATCH_SIZE, shuffle=True)
 # METHOD = 'max'
 METHOD = 'outer_projection'
 odd_model = nn.Sequential(
-    Choice(VEC_SIZE, 2, n_choices=2, redundancy=3, has_guard=True, method=METHOD),
+    Choice(VEC_SIZE, 2, n_choices=2, redundancy=3, has_guard=False, method=METHOD),
     Fn(lambda x: (x[:,0] - x[:,1] + 1) / 2, nargs=1), # convert softmax choice to scalar
     Fn(lambda x: x.unsqueeze(-1)),
 )
@@ -620,6 +643,7 @@ for epoch in range(NUM_EPOCHS):
         optimizer.zero_grad()
         output = odd_model(src)
         loss = F.mse_loss(output, trg)
+        # loss = (1 - F.cosine_similarity(output, trg)).mean()
         loss.backward()
         optimizer.step()
         epoch_loss += loss.item()

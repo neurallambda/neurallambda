@@ -76,6 +76,10 @@ class Stack(nn.Module):
         popped_val = einsum('bv, b -> bv', popped_val, should_pop)
         return popped_val
 
+
+    ####################
+    # Single Ops: read, push, pop
+
     def read(self):
         '''Read the top of the stack.
 
@@ -101,6 +105,82 @@ class Stack(nn.Module):
         '''
         self.stack, self.pointer, out = self.pop_()
         return out
+
+
+    ####################
+    # Double Ops: push_or_null_op, pop_or_null_op
+
+    def push_or_null_op(self,
+                        sharpen_pointer,
+                        should_push,
+                        should_null_op,
+                        value):
+        '''Apply push and null_op operations in superposition, and hopefully
+        scaled appropriately to signify the *actual* operation you intended.
+
+        Args:
+
+          should_push, should_null_op: ndarray([BATCH_SIZE]), values
+            in (0, 1). 0 means "dont do this operation", 1 means "do this
+            operation".
+
+          value: value to push, if pushing. ndarray([BATCH_SIZE, VEC_SIZE])
+
+        '''
+        push_stack, push_pointers = self.push_(value)
+        self.stack = (
+            einsum('bnv, b -> bnv', self.stack, should_null_op) +
+            einsum('bnv, b -> bnv', push_stack, should_push)
+        )
+        self.pointer = (
+            einsum('bn, b -> bn', self.pointer, should_null_op) +
+            einsum('bn, b -> bn', push_pointers, should_push)
+        )
+        # Sharpen (softmax) pointers
+        self.pointer = torch.softmax(self.pointer * sharpen_pointer, dim=1)
+        psum = self.pointer.sum(dim=1).unsqueeze(1)
+        self.pointer = self.pointer / torch.maximum(psum, torch.zeros_like(psum) + 1e-8)
+
+    def pop_or_null_op(self,
+                       sharpen_pointer,
+                       should_pop,
+                       should_null_op):
+        '''Apply pop and null_op stack operations in superposition, and
+        hopefully scaled appropriately to signify the *actual* operation you
+        intended.
+
+        Args:
+
+          should_pop, should_null_op: ndarray([BATCH_SIZE]), values
+            in (0, 1). 0 means "dont do this operation", 1 means "do this
+            operation".
+
+          value: value to push, if pushing. ndarray([BATCH_SIZE, VEC_SIZE])
+
+        '''
+        pop_stack, pop_pointers, popped_val = self.pop_()
+        self.stack = (
+            einsum('bnv, b -> bnv', self.stack, should_null_op) +
+            einsum('bnv, b -> bnv', pop_stack, should_pop)
+        )
+        self.pointer = (
+            einsum('bn, b -> bn', self.pointer, should_null_op) +
+            einsum('bn, b -> bn', pop_pointers, should_pop)
+        )
+
+        ##########
+        # Sharpen (softmax) pointers
+        self.pointer = torch.softmax(self.pointer * sharpen_pointer, dim=1)
+        psum = self.pointer.sum(dim=1).unsqueeze(1)
+        self.pointer = self.pointer / torch.maximum(psum, torch.zeros_like(psum) + 1e-8)
+
+        popped_val = einsum('bv, b -> bv', popped_val, should_pop)
+        return popped_val
+
+
+
+    ####################
+    #
 
     def push_(self, val):
         ''' Library consumers should NOT call this function. You must only call

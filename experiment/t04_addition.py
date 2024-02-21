@@ -443,8 +443,8 @@ if False:
         #     print(m.tolist())
 
         print()
-        ins = [[unproject(x.to('cuda')) for x in xs] for xs in ins]
-        outs = [[unproject(x.to('cuda')) for x in xs] for xs in outs]
+        ins = [[unproject(x.to(DEVICE)) for x in xs] for xs in ins]
+        outs = [[unproject(x.to(DEVICE)) for x in xs] for xs in outs]
         mask = [x.to(int).tolist() for x in mask]
         xx = zip(ins, outs, mask)
         print_grid(xx, labels=['ins', 'outs', 'mask'])
@@ -497,9 +497,9 @@ def extract_integers_from_seq(sequence, mask):
 def debug_output(src, trg, output, mask, batch_idx, states):
     """Print debug information for the first element of the batch."""
     # Unproject and display the sequences for debugging
-    ins_seq = [unproject(x.to('cuda')) for x in src[batch_idx]]  # List of symbols
-    trgs_seq = [unproject(x.to('cuda')) for x in trg[batch_idx]]  # List of symbols
-    outs_seq = [unproject(x.to('cuda')) for x in output[batch_idx]]  # List of symbols
+    ins_seq = [unproject(x.to(DEVICE)) for x in src[batch_idx]]  # List of symbols
+    trgs_seq = [unproject(x.to(DEVICE)) for x in trg[batch_idx]]  # List of symbols
+    outs_seq = [unproject(x.to(DEVICE)) for x in output[batch_idx]]  # List of symbols
     mask_seq = mask[batch_idx].to(int).tolist()  # List of integers (0 or 1)
     ss = []
     labels = ['inps', 'trgs', 'outs', 'mask']
@@ -508,7 +508,7 @@ def debug_output(src, trg, output, mask, batch_idx, states):
         data = v['data'][batch_idx]  # Tensor: [seq_len, vec_size]
         fn = v['fn']
         if fn is not None:
-            ss_seq = [fn(x.to('cuda')) for x in data]  # List of symbols or other representations
+            ss_seq = [fn(x.to(DEVICE)) for x in data]  # List of symbols or other representations
         else:
             ss_seq = data.tolist()  # List of list of floats
         ss.append(ss_seq)
