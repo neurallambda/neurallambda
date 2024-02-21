@@ -68,8 +68,30 @@ RESULTS:
 ----------
 TODO:
 
-* [ ] Build a complementary dataset of how each component needs to act, train
-      each sub component separately before full model run.
+
+* [X] Add Control Ops to dataset
+* [X] Incorporate new dataset
+* [X] Remove "Think" tokens for now
+* [X] Add Control signals to debug_state
+* [X] add to loss
+* [ ] Freeze symbols, train selectors
+* [ ] Train with/without control signals
+* [ ] `work` is calculated with nonlinearity
+
+
+
+* [ ] model.push_or_null & model.pop_or_null, do both per step
+
+* [ ] Normalize weights of Linears following Choices at the start of forward
+* [ ] Freeze all params except Control Ops
+* [ ] Apply Think tokens/noise outside datasaet (so each epoch is different)
+
+
+-----
+
+* [ ] Inspiration via ResNet?
+
+* [ ] Train sub components separately before full model run.
 
 * [ ] Limit symbol selection
 
@@ -100,11 +122,7 @@ TODO:
 
 * [ ] increasing LR of sharpen params
 
-* [ ] bias stacks towards pushing at init (ie net nullop since it pops each step?)
-
-* [ ] Cheat and add work_stack.peek() to dataset + loss function
-
-* [ ] Add another stack/queue to help it handle Think tokens / decide when to output
+* [ ] bias stacks towards nullop
 
 * [ ] REGEX MASKED LOSS: Parse out [LEFT_TAG, <Num>, RIGHT_TAG], and mask loss on that.
 
@@ -130,14 +148,17 @@ import copy
 from neurallambda.tensor import CosineSimilarity, Weight, ReverseCosineSimilarity
 from neurallambda.torch import NormalizedLinear, Fn, Parallel, Cat, Stack, Diagnose, Id, cosine_similarity
 import re
+import pandas as pd
+import itertools
+
 
 torch.manual_seed(152 + 1)
 
 DEBUG = False
 
 PAUSE_IRRADIATION_P = 0.2
-MAX_THINK_TOKENS = 3 # "Think" tokens
-PAUSE_APPEND_INDEX = -3  # append tokens before [..., L, 42, R]
+MAX_THINK_TOKENS    = 3 # "Think" tokens
+PAUSE_APPEND_INDEX  = -3  # append tokens before [..., L, 42, R]
 
 DEVICE = 'cuda'
 VEC_SIZE = 128
@@ -164,181 +185,117 @@ NUM_EPOCHS = 60
 
 
 ##################################################
-# Util
-
-import torch.fft
-
-def convolve(x1, x2, dim=-1):
-    """Performs circular convolution on two vectors using FFT and IFFT."""
-    fft_x1 = torch.fft.fft(x1, dim=dim)
-    fft_x2 = torch.fft.fft(x2, dim=dim)
-    fft_product = fft_x1 * fft_x2
-    output = torch.fft.ifft(fft_product, dim=dim)
-    return output.real
-
-def deconvolve(bound_vec, one_original_vec, dim=-1):
-    """Performs the inverse operation of circular convolution to retrieve the original vector."""
-    fft_bound_vec = torch.fft.fft(bound_vec, dim=dim)
-    fft_one_original_vec = torch.fft.fft(one_original_vec, dim=dim)
-    fft_other_original_vec = fft_bound_vec / fft_one_original_vec
-    other_original_vec = torch.fft.ifft(fft_other_original_vec, dim=dim)
-    return other_original_vec.real
-
-
-##################################################
-# Pause Tokens
-
-def irradiate_tokens(data, percentage, symbol, null_symbol):
-    """Injects pause tokens at random positions in the data sequences based on a percentage of the sequence length."""
-    for item in data:
-        num_tokens_to_inject = max(1, int(len(item['inputs']) * percentage))
-        for _ in range(num_tokens_to_inject):
-            inject_pos = random.randint(0, len(item['inputs']) - 1)
-            item['inputs'].insert(inject_pos, symbol)
-            item['outputs'].insert(inject_pos, null_symbol)  # Maintain alignment
-            item['loss_mask'].insert(inject_pos, 0)  # No loss for injected tokens
-    return data
-
-def insert_at_ix(data, num_tokens, index, symbol, null_symbol):
-    """Inserts a block of pause tokens at a specified index in the data sequences."""
-    # Add F token
-    for item in data:
-        item['inputs'] = item['inputs'][:index] + [symbol] * (num_tokens - 1) + ['F'] + item['inputs'][index:]
-        item['outputs'] = item['outputs'][:index] + [null_symbol] * num_tokens + item['outputs'][index:]
-        item['loss_mask'] = item['loss_mask'][:index] + [0] * num_tokens + item['loss_mask'][index:]
-
-    return data
-
-
-# @@@@@@@@@@
-
-if False: # turning off bc I'm hacking in an "F" token for "final, now output an answer"
-    #  Test irradiate_tokens
-    data_sample = [{'inputs': ['1', '2', '3'], 'outputs': ['N', 'N', '6'], 'loss_mask': [0, 0, 1]}]
-    percentage = 0.5  # 50% of the sequence length
-
-    modified_data = irradiate_tokens(data_sample.copy(), percentage, 'T', 'N')
-
-    expected_length = len(data_sample[0]['inputs']) + int(len(data_sample[0]['inputs']) * percentage / 100)
-    for item in modified_data:
-        assert len(item['inputs']) == expected_length
-        assert len(item['outputs']) == expected_length
-        assert len(item['loss_mask']) == expected_length
-
-    # Test append_pause_tokens
-
-    data_sample = [{'inputs': ['1', '2', '3', 'N', 'N', 'N'], 'outputs': ['N', 'N', 'N', 'L', '6', 'R'], 'loss_mask': [0, 0, 0, 1, 1, 1]}]
-    num_tokens = 2
-    insert_index = -3  # Index before the answer
-
-    modified_data = insert_at_ix(copy.deepcopy(data_sample), num_tokens, insert_index, 'T', 'N')
-
-
-    expected_length = len(data_sample[0]['inputs']) + num_tokens
-    for item in modified_data:
-        assert len(item['inputs']) == expected_length
-        assert len(item['outputs']) == expected_length
-        assert len(item['loss_mask']) == expected_length
-        # Ensure the pause tokens are correctly positioned
-        if insert_index < 0:
-            s = insert_index - num_tokens
-            e = insert_index
-        else:
-            s = insert_index
-            e = insert_index + num_tokens
-        assert item['inputs'][s:e] == ['T'] * num_tokens
-
-# @@@@@@@@@@
-
-
-
-##################################################
-# Addition Data
+# Problem Data
 
 START_DATA_SYMBOL  = 'O'
-PADDING_SYMBOL  = 'P'
+PADDING_SYMBOL  = '.'
 START_SEQ_SYMBOL = 'S'
-NULL_SYMBOL     = 'N'
+WILD_SYMBOL     = '_'
 THINKING_SYMBOL = 'T'
 FINISHED_THINKING_SYMBOL = 'F'
-LTAG = 'L' # answer start
-RTAG = 'R' # answer end
+LTAG = '<' # answer start
+RTAG = '>' # answer end
 
-tokens = [NULL_SYMBOL, PADDING_SYMBOL, THINKING_SYMBOL, FINISHED_THINKING_SYMBOL, LTAG, RTAG, START_DATA_SYMBOL, START_SEQ_SYMBOL]
+# Stack ops
+NULL_OP_SYMBOL = 'NOP'
+PUSH_SYMBOL    = 'PSH'
+POP_SYMBOL     = 'POP'
+
+# Control Vals
+SEQUENCE_STARTED_SYMBOL = 'SS'
+SEQUENCE_FINISHED_SYMBOL = 'FF'
+RETURN_L_SYMBOL = "RL"
+RETURN_SUM_SYMBOL = "RS"
+RETURN_R_SYMBOL = "RR"
+
+tokens = [
+    WILD_SYMBOL, PADDING_SYMBOL, THINKING_SYMBOL, FINISHED_THINKING_SYMBOL,
+    LTAG, RTAG, START_DATA_SYMBOL, START_SEQ_SYMBOL,
+    NULL_OP_SYMBOL, PUSH_SYMBOL, POP_SYMBOL,
+    SEQUENCE_STARTED_SYMBOL, SEQUENCE_FINISHED_SYMBOL, RETURN_L_SYMBOL, RETURN_SUM_SYMBOL, RETURN_R_SYMBOL
+]
 
 all_symbols = Sym.nums + Sym.chars + tokens
+sym_map = Sym.SymbolMapper(VEC_SIZE, all_symbols, device=DEVICE)
+project = sym_map.project
+unproject = sym_map.unproject
 
-# project symbols to vectors, and back
-# project, unproject, symbols_i2v, symbols_v2i, symbols_vec = Sym.symbol_map(VEC_SIZE, all_symbols, device=DEVICE)
 
-int_map = Sym.SymbolMapper(VEC_SIZE, all_symbols, device=DEVICE)
-project = int_map.project
-unproject = int_map.unproject
-# symbols_vec = int_map.projection_matrix
+##########
+# Read Haskell-generated CSV.
+#
+#   Each column contains a sequence which must be parsed into a list.
 
-def generate_addition_synthetic_data(num_samples, min_length, max_length, max_think_tokens):
-    """Generates synthetic data for the addition task.
+pattern = re.compile(r'\(PSH +[^\^ ^)]+\)|[^ ]+')
 
-    Example 1:
+def parse_cell(cell):
+    xs = pattern.findall(cell)
+    return xs
 
-     ins 4 1 5 9 7  N
-    outs N N N N N 26
-    mask 0 0 0 0 0  1
+# @@@@@@@@@@
+if False:
+    cell_content = "(PSH value) command1 (PSH value) command2"
+    parsed_elements = parse_cell(cell_content)
+    print(parsed_elements)
+# @@@@@@@@@@
 
-    Example 2:
+def create_loss_mask(seq:[str])->[int]:
+    ''' Given a list of strings, replace every element with 0 except for those
+    in the sub-sequence `L ... R` which get a 1 '''
+    # Initialize a mask with zeros of the same length as the sequence
+    mask = [0] * len(seq)
+    try:
+        start_index = seq.index(LTAG)
+        end_index = seq.index(RTAG)
+        # Mark elements between 'L' and 'R' inclusive as 1
+        for i in range(start_index, end_index + 1):
+            mask[i] = 1
+    except ValueError:
+        pass
+    return mask
 
-     ins P P 2 2 3  N
-    outs P P N N N  7
-    mask 0 0 0 0 0  1
+def read_csv(data_path):
+    df = pd.read_csv(data_path, sep="|")
+    # df = df[['Input', 'Output', 'PreGlobalOp', 'PreWorkOp', 'PostGlobalOp', 'PostWorkOp']]
+    for col in df.columns:
+        df[col] = df[col].apply(parse_cell)
+    # Add Loss Mask
+    df['LossMask'] = df['Output'].apply(create_loss_mask)
+    return df
 
-    """
-    data = []
-    for _ in range(num_samples):
-        length = random.randint(min_length, max_length)
-        n_think = random.randint(1, max_think_tokens)
+data_path_3 = "experiment/t04_addition/mod_sum_length_3.csv"
+data_path_5 = "experiment/t04_addition/mod_sum_length_5.csv"
+data_path_10 = "experiment/t04_addition/mod_sum_length_10.csv"
+data_path_20 = "experiment/t04_addition/mod_sum_length_20.csv"
 
-        # a list of numbers
-
-        # numbers = [random.randint(-9, 9) for _ in range(length)] # include negatives
-        numbers = [random.randint(0, 9) for _ in range(length)] # positives only
-
-        # numbers = [random.randint(-2, 2) for _ in range(length)] # a few numbers only
-        inputs = (
-            [START_SEQ_SYMBOL] +
-            numbers +
-            [THINKING_SYMBOL] * (n_think - 1) +
-            [FINISHED_THINKING_SYMBOL] +
-            [NULL_SYMBOL] * 3 # *3 because of LTAG and RTAG
-        )
-        outputs = [NULL_SYMBOL] * (len(numbers) + 1 + n_think) + [LTAG, sum(numbers) % 10, RTAG]
-
-        # loss mask helps to ignore loss on the random seed data
-        loss_mask = [0] * (len(numbers) + 1 + n_think) + [1, 1, 1]
-
-        assert len(inputs) == len(outputs) == len(loss_mask)
-        data.append({
-            'inputs': inputs,
-            'outputs': outputs,
-            'loss_mask': loss_mask,
-        })
-    return data
+df = read_csv(data_path_3)
 
 # TRAIN
-train_data = generate_addition_synthetic_data(NUM_TRAIN_SAMPLES, MIN_TRAIN_SEQUENCE_LENGTH, MAX_TRAIN_SEQUENCE_LENGTH, MAX_THINK_TOKENS)
+train_data = Dataset.from_pandas(read_csv(data_path_3))
 # Inject pause tokens
-# train_data = insert_at_ix(train_data, MAX_THINK_TOKENS, PAUSE_APPEND_INDEX, symbol=THINKING_SYMBOL, null_symbol=NULL_SYMBOL)
-# train_data = irradiate_tokens(train_data, PAUSE_IRRADIATION_P, symbol=THINKING_SYMBOL, null_symbol=NULL_SYMBOL)
+# train_data = insert_at_ix(train_data, MAX_THINK_TOKENS, PAUSE_APPEND_INDEX, symbol=THINKING_SYMBOL, null_symbol=WILD_SYMBOL)
+# train_data = irradiate_tokens(train_data, PAUSE_IRRADIATION_P, symbol=THINKING_SYMBOL, null_symbol=WILD_SYMBOL)
 
 
 # VAL
-val_data = generate_addition_synthetic_data(NUM_TRAIN_SAMPLES, MIN_VAL_SEQUENCE_LENGTH, MAX_VAL_SEQUENCE_LENGTH, MAX_THINK_TOKENS)
+val_data = Dataset.from_pandas(read_csv(data_path_5))
 # Inject pause tokens
-# val_data = insert_at_ix(val_data, MAX_THINK_TOKENS, PAUSE_APPEND_INDEX, symbol=THINKING_SYMBOL, null_symbol=NULL_SYMBOL)
-# val_data = irradiate_tokens(val_data, PAUSE_IRRADIATION_P, symbol=THINKING_SYMBOL, null_symbol=NULL_SYMBOL)
+# val_data = insert_at_ix(val_data, MAX_THINK_TOKENS, PAUSE_APPEND_INDEX, symbol=THINKING_SYMBOL, null_symbol=WILD_SYMBOL)
+# val_data = irradiate_tokens(val_data, PAUSE_IRRADIATION_P, symbol=THINKING_SYMBOL, null_symbol=WILD_SYMBOL)
 
 
 padding_vec = project(PADDING_SYMBOL)
 start_data_vec = project(START_DATA_SYMBOL)
+nop_vec = project(NULL_OP_SYMBOL)
+wild_vec = project(WILD_SYMBOL)
+
+def project_(x):
+    ''' Try to cast strings to ints '''
+    try:
+        x = int(x)
+    except:
+        pass
+    return project(x)
 
 def collate_fn(batch):
     """Collate function to handle variable-length sequences, and project symbols to
@@ -346,46 +303,98 @@ def collate_fn(batch):
 
     """
     # Find the longest sequence in the batch
-    max_seq_len = max(len(item['inputs']) for item in batch)
+    max_seq_len = max(len(item['Input']) for item in batch)
 
-    inputs_batch = []
-    outputs_batch = []
-    loss_masks_batch = []
+    out = {k:[] for k in batch[0].keys()}
+
+    # symbol versions (ie not vecs)
+    out['PreGlobalOp_'] = []
+    out['PreWorkOp_'] = []
+    out['PostGlobalOp_'] = []
+    out['PostGlobalVal_'] = []
+    out['PostWorkOp_'] = []
+    out['PostWorkVal_'] = []
 
     for item in batch:
-        inputs = item['inputs']
-        outputs = item['outputs']
-        loss_mask = item['loss_mask']
 
-        inputs_vec = [project(i) for i in inputs]
+        # Input
+        inputs = item['Input']
+        inputs_vec = [project_(i) for i in inputs]
         num_padding = max_seq_len - len(inputs_vec)
-        # padded_inputs_vec = [padding_vec] * num_padding + inputs_vec
-        padded_inputs_vec = [start_data_vec] + [padding_vec] * num_padding + inputs_vec
+        inputs_vec = torch.stack([start_data_vec] + [padding_vec] * num_padding + inputs_vec)
+        out['Input'].append(inputs_vec)
 
-        padded_outputs_vec = [padding_vec] * (num_padding + 1) + [project(x) for x in outputs]
-        padded_loss_mask = [0] * (num_padding + 1) + loss_mask
+        # Output
+        outputs = item['Output']
+        outputs_vec = torch.stack([padding_vec] * (num_padding + 1) + [project_(x) for x in outputs])
+        out['Output'].append(outputs_vec)
 
-        assert len(padded_inputs_vec) == len(padded_outputs_vec) == len(padded_loss_mask), f'''
-        padded_inputs_vec={len(padded_inputs_vec)} == padded_outputs_vec={len(padded_outputs_vec)} == padded_loss_mask={len(padded_loss_mask)}
-        '''.strip()
+        # loss_mask
+        loss_mask = item['LossMask']
+        loss_mask_vec = torch.tensor([0] * (num_padding + 1) + loss_mask)
+        out['LossMask'].append(loss_mask_vec)
 
-        inputs_batch.append(torch.stack(padded_inputs_vec))
-        outputs_batch.append(torch.stack(padded_outputs_vec))
-        loss_masks_batch.append(torch.tensor(padded_loss_mask))
+        # stack projected vecs
+        out['PreGlobalOp'].append   (torch.stack([nop_vec] * (num_padding + 1) + [project_(x) for x in item['PreGlobalOp']]))
+        out['PreWorkOp'].append     (torch.stack([nop_vec] * (num_padding + 1) + [project_(x) for x in item['PreWorkOp']]))
+        out['PostGlobalOp'].append  (torch.stack([nop_vec] * (num_padding + 1) + [project_(x) for x in item['PostGlobalOp']]))
+        out['PostGlobalVal'].append (torch.stack([wild_vec] * (num_padding + 1) + [project_(x) for x in item['PostGlobalVal']]))
+        out['PostWorkOp'].append    (torch.stack([nop_vec] * (num_padding + 1) + [project_(x) for x in item['PostWorkOp']]))
+        out['PostWorkVal'].append   (torch.stack([wild_vec] * (num_padding + 1) + [project_(x) for x in item['PostWorkVal']]))
+
+        # non projected vecs
+        out['PreGlobalOp_'].append(item['PreGlobalOp'])
+        out['PreWorkOp_'].append(item['PreWorkOp'])
+        out['PostGlobalOp_'].append(item['PostGlobalOp'])
+        out['PostGlobalVal_'].append(item['PostGlobalVal'])
+        out['PostWorkOp_'].append(item['PostWorkOp'])
+        out['PostWorkVal_'].append(item['PostWorkVal'])
 
 
     # Stack all the padded inputs into a single tensor
-    inputs_tensor = torch.stack(inputs_batch).to(DEVICE)
-    outputs_tensor = torch.stack(outputs_batch).to(DEVICE)
-    loss_masks_tensor = torch.stack(loss_masks_batch).to(DEVICE)
+    out['Input'] = torch.stack(out['Input'])
+    out['Output'] = torch.stack(out['Output'])
+    out['LossMask'] = torch.stack(out['LossMask'])
+    out['PreGlobalOp'] = torch.stack(out['PreGlobalOp'])
+    out['PreWorkOp'] = torch.stack(out['PreWorkOp'])
+    out['PostGlobalOp'] = torch.stack(out['PostGlobalOp'])
+    out['PostGlobalVal'] = torch.stack(out['PostGlobalVal'])
+    out['PostWorkOp'] = torch.stack(out['PostWorkOp'])
+    out['PostWorkVal'] = torch.stack(out['PostWorkVal'])
+
+    # # non projected vecs
+    # out['PreGlobalOp_'] = out['PreGlobalOp_']
+    # out['PreWorkOp_'] = out['PreWorkOp_']
+    # out['PostGlobalOp_'] = out['PostGlobalOp_']
+    # out['PostGlobalOpVal_'] = out['PostGlobalOpVal_']
+    # out['PostWorkOp_'] = out['PostWorkOp_']
+    # out['PostWorkOpVal_'] = out['PostWorkOpVal_']
+
+
+    # assert shapes
+    ignore_names = {
+        'PreGlobalOp_',
+        'PreWorkOp_',
+        'PostGlobalOp_',
+        'PostGlobalVal_',
+        'PostWorkOp_',
+        'PostWorkVal_',
+    }
+    for name, v in out.items():
+        if name in ignore_names:
+            continue
+        elif name in {'LossMask'}:
+            assert v.size(0) == out['Input'].size(0)
+            assert v.size(1) == out['Input'].size(1)
+        else:
+            assert out['Input'].shape == v.shape, f'Shapes must be the same, input={out["Input"].shape}, {name}={v.shape}'
 
     # Return the tensors with the batch of padded inputs and outputs
-    return inputs_tensor, outputs_tensor, loss_masks_tensor
+    return out
 
 # Create DataLoaders with the new collate_fn
 train_dl = DataLoader(train_data, batch_size=BATCH_SIZE, collate_fn=collate_fn, shuffle=True)
 val_dl = DataLoader(val_data, batch_size=BATCH_SIZE, collate_fn=collate_fn)
-
 
 def print_grid(data, labels=None):
     data = list(data)  # Convert the data to a list if it's not already. Data should be iterable of iterables.
@@ -427,7 +436,6 @@ def print_grid(data, labels=None):
         print("-" * (sum(column_widths) + max_label + 1))  # Print separator line after each row.
 
 
-
 if False:
     for ins, outs, mask in train_dl:
         assert ins.shape[0] == BATCH_SIZE
@@ -455,6 +463,11 @@ if False:
 ##################################################
 # Training Functions
 
+def mask_stack_op(xs: [str], keep_op):
+    assert keep_op in {'PSH', 'POP', 'NOP'}
+    out = [1 if x == keep_op else 0 for x in xs]
+    return torch.tensor(out)
+
 
 def run_epoch(model, dl, optimizer, device, train_mode=True):
     if train_mode:
@@ -465,13 +478,73 @@ def run_epoch(model, dl, optimizer, device, train_mode=True):
     steps = 0
     process = torch.enable_grad if train_mode else torch.no_grad
     with process():
-        for i, (src, trg, mask) in enumerate(dl):
-            src, trg, mask = src.to(device), trg.to(device), mask.to(device)
+        for i, data in enumerate(dl):
+            for k, v in data.items():
+                if k.endswith('_'): # ignore the non-projected symbols
+                    continue
+                data[k] = v.to(device)
+            src = data['Input']
+            trg = data['Output']
+            mask = data['LossMask']
+
+            with torch.no_grad():
+                trg_pre_c_op = data['PreGlobalOp']
+                trg_pre_w_op = data['PreWorkOp']
+                trg_post_c_op = data['PostGlobalOp']
+                trg_post_c_val = data['PostGlobalVal']
+                trg_post_w_op = data['PostWorkOp']
+                trg_post_w_val = data['PostWorkVal']
+
             if train_mode:
                 optimizer.zero_grad()
-            output, debug_states = model(src)
+            output, debug = model(src)
+
+            pre_c_pop = debug['pre_c_pop']['data']
+            pre_c_nop = debug['pre_c_nop']['data']
+            pre_w_pop = debug['pre_w_pop']['data']
+            pre_w_nop = debug['pre_w_nop']['data']
+            post_c_push = debug['post_c_push']['data']
+            post_c_val = debug['post_c_val']['data']
+            post_c_nop = debug['post_c_nop']['data']
+            post_w_push = debug['post_w_push']['data']
+            post_w_val = debug['post_w_val']['data']
+            post_w_nop = debug['post_w_nop']['data']
+
             loss = ((1 - cosine_similarity(output, trg, dim=2)) * mask).mean()
             # loss = (F.mse_loss(br_output, br_trg) * mask).mean()
+
+            # REGULARIZATION EXPERIMENT
+            #   TODO: rm experiment
+
+            op_loss = 0
+            for bix in range(src.size(0)):
+                for i in range(src.size(1)):
+
+                    # post control
+                    trg = trg_post_c_op[bix][i]
+                    utrg = unproject(trg)
+                    if utrg == 'NOP':
+                        op_loss += 1 - post_c_nop[bix][i]
+                    elif utrg == 'PSH':
+                        op_loss += 1 - post_c_push[bix][i]
+
+                    # post work
+                    trg = trg_post_w_op[bix][i]
+                    utrg = unproject(trg)
+                    if utrg == 'NOP':
+                        op_loss += 1 - post_w_nop[bix][i]
+                    elif utrg == 'PSH':
+                        op_loss += 1 - post_w_push[bix][i]
+            op_loss = op_loss / (src.size(0) * src.size(1))
+
+            val_loss = (
+                (1 - cosine_similarity(trg_post_c_val, post_c_val, dim=2)) +
+                (1 - cosine_similarity(trg_post_w_val, post_w_val, dim=2))
+            ).mean()
+
+            loss = loss + op_loss * 0.1  + val_loss * 0.1
+
+
             if train_mode:
                 loss.backward()
                 optimizer.step()
@@ -523,7 +596,14 @@ def accuracy(model, val_dl, device, debug=False):
     correct_predictions = 0
     total_predictions = 0
     with torch.no_grad():
-        for i, (src, trg, mask) in enumerate(val_dl):
+        for i, data in enumerate(val_dl):
+            # for k, v in data.items():
+            #     if k.endswith('_'): # ignore non projected stack ops
+            #         continue
+            #     data[k] = v.to(device)
+            src = data['Input'].to(device)
+            trg = data['Output'].to(device)
+            mask = data['LossMask'].to(device)
             output, states = model(src)  # output: Tensor [batch_size, seq_len, vec_size]
             for batch_idx in range(src.size(0)):  # Iterate over each element in the batch
                 # Extract the sequence for the current batch element
@@ -552,8 +632,12 @@ def colored(x):
     RED = '\033[31m'
     RESET = '\033[0m'  # Resets the color to default terminal color
 
-    # Retrieve the value
-    value = x.item()
+    # Retrieve the single torch value
+    if isinstance(x, tuple):
+        string, value = x
+    else:
+        value = x.item()
+        string = f'{value:>.1f}'
 
     # Determine the color based on the value
     if 0.0 <= value < 0.4:
@@ -562,7 +646,7 @@ def colored(x):
         color = YELLOW
     else:
         color = RED
-    return f'{color}{value:>.1f}{RESET}'
+    return f'{color}{string}{RESET}'
 
 def rm_format(text):
     '''replace all occurrences of the ANSI escape codes with an empty string'''
@@ -624,6 +708,8 @@ class LSTMModel(nn.Module):
 class Choice(nn.Module):
     ''' N-vectors -> [0, 1] '''
     def __init__(self, vec_size, n_vecs, n_choices, redundancy, has_guard=False, method='mean'):
+        ''' `has_guard` uses separate weights to calculate a gate that
+        multiplies against the values of `self.ff(inp)` '''
         super(Choice, self).__init__()
         self.vec_size = vec_size
         self.n_vecs = n_vecs
@@ -691,7 +777,100 @@ class Choice(nn.Module):
             return torch.sum(outs.softmax(dim=1).view(-1, self.n_choices, self.redundancy), dim=2)
 
 
-def op(n_inp, vec_size, redundancy):
+
+####################
+
+# def generate_combinations(elements, max_length):
+#     """
+#     Generate all possible combinations of the elements up to a specified maximum length.
+
+#     :param elements: A list of elements to combine.
+#     :param max_length: The maximum length of the combinations.
+
+#     Example sizes of combos:
+
+#         len(generate_combinations(range(2), 2))  ==  3
+#         len(generate_combinations(range(3), 2))  ==  6
+#         len(generate_combinations(range(3), 3))  ==  7
+#         len(generate_combinations(range(4), 2))  ==  10
+#         len(generate_combinations(range(4), 3))  ==  14
+#         len(generate_combinations(range(4), 4))  ==  15
+#         len(generate_combinations(range(5), 2))  ==  15
+#         len(generate_combinations(range(5), 3))  ==  25
+#         len(generate_combinations(range(5), 4))  ==  30
+#         len(generate_combinations(range(5), 5))  ==  31
+#     """
+#     # Store all combinations in a list
+#     all_combinations = []
+
+#     # Generate combinations for every length up to max_length
+#     for length in range(1, max_length + 1):
+#         # itertools.combinations generates combinations of the current length
+#         combinations = itertools.combinations(elements, length)
+#         # Add the current combinations to the total list
+#         all_combinations.extend(combinations)
+
+#     return all_combinations
+
+# # Test the function
+# elements = ['a', 'b', 'c', 'd', 'e']  # A list of length 5
+# max_length = 3  # Generate combinations up to length 3
+
+# # Generate and print all combinations
+# combinations = generate_combinations(elements, max_length)
+# for combo in combinations:
+#     print(combo)
+
+
+##############################
+
+
+class Choice2(nn.Module):
+    ''' N-vectors -> [0, 1] '''
+    def __init__(self, vec_size, n_vecs, symbols, n_include_symbols=0, has_guard=False, method='mean'):
+        ''' `has_guard` uses separate weights to calculate a gate that
+        multiplies against the values of `self.ff(inp)` '''
+        super(Choice2, self).__init__()
+        self.vec_size = vec_size
+        self.n_vecs = n_vecs
+        self.symbols = symbols
+        self.n_include_symbols = n_include_symbols
+        self.has_guard = has_guard
+        self.method = method
+        assert method in {'mean', 'max', 'softmax', 'outer_projection'}
+
+        n_sym = symbols.size(0) + n_include_symbols
+
+        HIDDEN_DIM = 64
+        self.choice = nn.Sequential(
+            nn.Linear((n_vecs + n_sym) * vec_size, HIDDEN_DIM),
+            nn.ReLU(),
+            nn.Linear(HIDDEN_DIM, HIDDEN_DIM),
+            nn.Tanh(),
+            nn.Linear(HIDDEN_DIM, n_vecs + n_sym),
+        )
+
+    def forward(self, inp, include=None):
+        assert len(inp) == self.n_vecs, f'shapes no the same: len(inp)={len(inp)} vs self.n_vecs={self.n_vecs}'
+        if self.n_include_symbols > 0:
+            assert len(include) == self.n_include_symbols
+
+        vecs = torch.stack(inp, dim=1)
+        if include is not None:
+            vecs = torch.concat(vecs, include)
+        # # inp     = [batch, n_vecs, _    , vec_size]
+        # # symbols = [_    , _     , n_sym, vec_size]
+        # # out     = [batch, n_vecs, n_sym]
+        # inp_symbols = cosine_similarity(
+        #     inps.unsqueeze(2),
+        #     self.symbols.unsqueeze(0).unsqueeze(0), dim=4)
+        breakpoint()
+        HERE
+        choose = self.choice(vecs)
+        return einsum('nv, b -> bv', self.symbols, choose)
+
+
+def op(n_inp, vec_size):
     ''' (vec, vec, vec) -> scalar
     Useful in stack/queue operations.
     '''
@@ -730,110 +909,92 @@ class Neuralsymbol(nn.Module):
 
         ##########
         # Symbols
-        N_IN = 8
-        N_OUT = 8
-        N_OP = 8
-        n_choices = 4
+        symbols = nn.Parameter(torch.vstack([
+            project(0), project(1), project(2), project(3), project(4),
+            project(5), project(6), project(7), project(8), project(9),
+
+            project(START_DATA_SYMBOL),
+            project(PADDING_SYMBOL),
+            project(START_SEQ_SYMBOL),
+            project(WILD_SYMBOL),
+            project(THINKING_SYMBOL),
+            project(FINISHED_THINKING_SYMBOL),
+            project(LTAG),
+            project(RTAG),
+            project(NULL_OP_SYMBOL),
+            project(PUSH_SYMBOL),
+            project(POP_SYMBOL),
+            project(SEQUENCE_STARTED_SYMBOL),
+            project(SEQUENCE_FINISHED_SYMBOL),
+            project(RETURN_L_SYMBOL),
+            project(RETURN_SUM_SYMBOL),
+            project(RETURN_R_SYMBOL),
+        ]))
+        self.symbols = symbols
 
         ##########
         # Type
 
         sym_type_hidden = 8
-        self.sym_type = nn.Sequential(
-
-            Choice(vec_size, n_vecs=1, n_choices=2, redundancy=REDUNDANCY, has_guard=True, method=CHOICE_METHOD),
-            nn.Linear(2, vec_size, bias=True),
-
-            # ##########
-            # # ORIG WORKS OK
-
-            # NormalizedLinear(vec_size, sym_type_hidden, bias=False),
-            # # nn.ReLU(),
-            # nn.Softmax(dim=1),
-            # # NormalizedLinear(sym_type_hidden, vec_size, bias=False),
-            # nn.Linear(sym_type_hidden, vec_size, bias=False),
-            # nn.Tanh(),
-
-        )
+        self.sym_type = Choice2(vec_size, 1, symbols)
+        # self.sym_type = nn.Sequential(
+        #     # Choice(vec_size, n_vecs=1, n_choices=2, redundancy=REDUNDANCY, has_guard=True, method=CHOICE_METHOD),
+        #     # nn.Linear(2, vec_size, bias=True),
+        #     #
+        #     nn.Linear(vec_size, hidden_dim, bias=True),
+        #     nn.ReLU(),
+        #     nn.Linear(hidden_dim, vec_size, bias=True),
+        #     Fn(lambda x: F.normalize(x, dim=1)),
+        # )
 
         ##########
         # Control Stack
 
         self.stack_init_vec = torch.randn(vec_size)
-
         self.control_stack = S.Stack(n_control_stack, input_dim)
         self.control_sharp = nn.Parameter(torch.tensor([init_sharpen]))
-
-        # Control Ops:
-        #   Inp: control dim + input dim
-        self.cop1 = op(2, vec_size, N_OP)
-        self.cop2 = op(2, vec_size, N_OP)
-        self.cop3 = op(2, vec_size, N_OP)
-
-
-        self.control = nn.Sequential(
-            Choice(vec_size, n_vecs=2, n_choices=n_choices, redundancy=REDUNDANCY, has_guard=True, method=CHOICE_METHOD),
-            nn.Linear(n_choices, vec_size, bias=False),
-
-            ##########
-            # ORIG WORKS OK
-
-            # Fn(lambda a, b: a * b, nargs=2),
-            # NormalizedLinear(vec_size, hidden_dim, bias=False),
-            # # nn.Linear(vec_size, hidden_dim, bias=True),
-            # nn.ReLU(),
-            # # nn.Softmax(),
-            # # NormalizedLinear(hidden_dim, vec_size, bias=False, reverse=True),
-            # nn.Linear(hidden_dim, vec_size, bias=False),
-            # nn.Tanh()
-
-        )
+        self.pre_c_pop,   self.pre_c_nop  = op(3, vec_size), op(3, vec_size)
+        self.post_c_push, self.post_c_nop = op(3, vec_size), op(3, vec_size)
+        self.post_c_val = Choice2(vec_size, 3, symbols)
+        # self.post_c_val = nn.Sequential(
+        #     # Choice(vec_size, n_vecs=3, n_choices=n_choices, redundancy=REDUNDANCY, has_guard=True, method=CHOICE_METHOD),
+        #     # nn.Linear(n_choices, vec_size, bias=False),
+        #     Fn(lambda a, b, c: a * b * c, nargs=3),
+        #     nn.Linear(vec_size, hidden_dim, bias=True),
+        #     nn.ReLU(),
+        #     nn.Linear(hidden_dim, vec_size, bias=True),
+        #     Fn(lambda x: F.normalize(x, dim=1)),
+        # )
 
         ##########
         # Working Stack
 
         self.work_stack = S.Stack(n_work_stack, input_dim)
         self.work_sharp = nn.Parameter(torch.tensor([init_sharpen]))
+        self.pre_w_pop,   self.pre_w_nop   = op(3, vec_size), op(3, vec_size)
+        self.post_w_push, self.post_w_nop  = op(3, vec_size), op(3, vec_size)
 
-        # Control Ops:
-        #   Inp: work dim + input dim
-        self.wop1 = op(2, vec_size, N_OP)
-        self.wop2 = op(2, vec_size, N_OP)
-        self.wop3 = op(2, vec_size, N_OP)
+        self.work_guard = op(1, vec_size)
+        self.post_w_val = Choice2(vec_size, 3, symbols)
+        # self.post_w_val = nn.Sequential(
+        #     # Choice(vec_size, n_vecs=3, n_choices=n_choices, redundancy=3, has_guard=True, method=CHOICE_METHOD),
+        #     # nn.Linear(n_choices, vec_size, bias=False),
+        #     Fn(lambda a, b, c: a * b * c, nargs=3),
+        #     nn.Linear(vec_size, hidden_dim, bias=True),
+        #     nn.ReLU(),
+        #     nn.Linear(hidden_dim, vec_size, bias=True),
+        #     Fn(lambda x: F.normalize(x, dim=1)),
+        # )
 
-        self.work_guard = op(1, vec_size, N_OP)
-
-        self.work = nn.Sequential(
-
-            # Choice(vec_size, n_vecs=3, n_choices=n_choices, redundancy=3, has_guard=True, method=CHOICE_METHOD),
-            # nn.Linear(n_choices, vec_size, bias=False),
-
-            Fn(lambda a, b, c: a * b * c, nargs=3),
-            nn.Linear(vec_size, hidden_dim, bias=True),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, vec_size, bias=True),
-            Fn(lambda x: F.normalize(x, dim=1)),
-
-        )
+        ##########
+        # Select output
 
         self.n_out_sym = 4
         self.out_sym = nn.Parameter(torch.randn(self.n_out_sym, vec_size))
-        self.select_out = nn.Sequential(
-
-            Choice(vec_size, n_vecs=3, n_choices=self.n_out_sym + 1, redundancy=REDUNDANCY, has_guard=True, method=CHOICE_METHOD),
-
-            # ##########
-            # # ORIG WORKS OK
-
-            # # Fn(f=lambda x, y, z: x * y * z, nargs=3),
-            # Fn(lambda a, b, c: a * b * c, nargs=3),
-            # NormalizedLinear(vec_size, hidden_dim, bias=False),
-            # # nn.Linear(vec_size, hidden_dim, bias=True),
-            # nn.ReLU(),
-            # nn.Linear(hidden_dim, self.n_out_sym + 1, bias=False), # n_out + work
-            # nn.Softmax(dim=1)
-
-        )
+        self.select_out = Choice2(vec_size, 3, symbols)
+        # self.select_out = nn.Sequential(
+        #     Choice(vec_size, n_vecs=3, n_choices=self.n_out_sym + 1, redundancy=REDUNDANCY, has_guard=True, method=CHOICE_METHOD),
+        # )
 
     def forward(self, x):
         # Containers Init
@@ -850,12 +1011,16 @@ class Neuralsymbol(nn.Module):
         # Debugging
         pops = []
         debug = {
-            'control_pop': [],
-            'control_push': [],
-            'control_null_op': [],
-            'work_pop': [],
-            'work_push': [],
-            'work_null_op': [],
+            'pre_c_pop': [],
+            'pre_c_nop': [],
+            'pre_w_pop': [],
+            'pre_w_nop': [],
+            'post_c_push': [],
+            'post_c_val': [],
+            'post_c_nop': [],
+            'post_w_push': [],
+            'post_w_val': [],
+            'post_w_nop': [],
         }
 
         # Loop over sequence
@@ -864,67 +1029,93 @@ class Neuralsymbol(nn.Module):
             inp = x[:, i, :]
 
             ##########
-            # Containers
+            # Pre
 
-            # pop stacks no matter what
-            # control = self.control_stack.pop()
-            # work = self.work_stack.pop()
+            # inp_typ = inp
+            inp_typ = self.sym_type([inp])
+            c_peek = self.control_stack.read()
+            w_peek = self.work_stack.read()
+            pre_inp = [c_peek, w_peek, inp_typ]
 
-            control = self.control_stack.pop()
-            work = self.work_stack.pop()
+            # control stack maybe pop
+            pre_c_pop, pre_c_nop = self.pre_c_pop(pre_inp).squeeze(1), self.pre_c_nop(pre_inp).squeeze(1)
+            # pre_c_pop, pre_c_nop = (pre_c_pop - pre_c_nop + 1) / 2, (pre_c_nop - pre_c_pop + 1) / 2
+            self.control_stack.pop_or_null_op(self.control_sharp, pre_c_pop, pre_c_nop)
 
-            typ = self.sym_type(inp)
-            # typ = inp
+            # work stack maybe pop
+            pre_w_pop, pre_w_nop = self.pre_w_pop(pre_inp).squeeze(1), self.pre_w_nop(pre_inp).squeeze(1)
+            # pre_w_pop, pre_w_nop = (pre_c_pop - pre_c_nop + 1) / 2, (pre_c_nop - pre_c_pop + 1) / 2
+            self.work_stack.pop_or_null_op(self.work_sharp, pre_w_pop, pre_w_nop)
 
-            # control ops
-            op_inp = [control, typ]
-            c_push, c_pop, c_null_op = self.cop1(op_inp), self.cop2(op_inp), self.cop3(op_inp)
-            c_push, c_pop, c_null_op = c_push.squeeze(1), c_pop.squeeze(1), c_null_op.squeeze(1)
-            c_push, c_pop = (c_push - c_pop + 1)/2, (c_pop - c_push + 1)/2
+            ##########
+            # Post
+            post_inp = [c_peek, w_peek, inp_typ]
 
-            # work ops
-            w_push, w_pop, w_null_op = self.wop1(op_inp), self.wop2(op_inp), self.wop3(op_inp)
-            w_push, w_pop, w_null_op = w_push.squeeze(1), w_pop.squeeze(1), w_null_op.squeeze(1)
-            w_push, w_pop = (w_push - w_pop + 1)/2, (w_pop - w_push + 1)/2
+            # control stack maybe push
+            post_c_push, post_c_nop = self.post_c_push(post_inp).squeeze(1), self.post_c_nop(post_inp).squeeze(1)
+            # post_c_push, post_c_nop = (post_c_push - post_c_nop + 1) / 2, (post_c_nop - post_c_push + 1) / 2
+            control_val = self.post_c_val(post_inp)
+            self.control_stack.push_or_null_op(self.control_sharp, post_c_push, post_c_nop, control_val)
 
-            new_control = self.control([control, typ])
-            # work_guard = self.work_guard(typ)
-            new_work = self.work([work, inp, typ]) # * work_guard
+            # work stack maybe push
+            post_w_push, post_w_nop = self.post_w_push(post_inp).squeeze(1), self.post_w_nop(post_inp).squeeze(1)
+            # post_w_push, post_w_nop = (post_c_push - post_c_nop + 1) / 2, (post_c_nop - post_c_push + 1) / 2
 
-            select_out = self.select_out([control, work, typ])
-            options = torch.cat([
-                work.unsqueeze(1),        # [batch, 1, vec_size]
-                self.out_sym.unsqueeze(0).repeat(batch_size, 1, 1) # [1, n_out_sym, vec_size]
-            ], dim=1)
-            out = einsum('bn, bnv -> bv', select_out, options)
+            # work_guard = self.work_guard(inp_typ)
+
+            # "sum mod 10" happens here
+            work_val = self.post_w_val(post_inp)
+            self.work_stack.push_or_null_op(self.work_sharp, post_w_push, post_w_nop, work_val)
+
+            ##########
+            # Select out
+
+            # select_out = self.select_out([control_val, work_val, inp_typ])
+            # options = torch.cat([
+            #     work_val.unsqueeze(1),        # [batch, 1, vec_size]
+            #     self.out_sym.unsqueeze(0).repeat(batch_size, 1, 1) # [1, n_out_sym, vec_size]
+            # ], dim=1)
+            # out = einsum('bn, bnv -> bv', select_out, options)
+
+            out = self.select_out([control_val, work_val, inp_typ], include=[work_val])
+
+
             outputs.append(out)
 
             if True:
-                debug['control_pop'].append(c_pop)
-                debug['control_push'].append(c_push)
-                debug['control_null_op'].append(c_null_op)
-                debug['work_pop'].append(w_pop)
-                debug['work_push'].append(w_push)
-                debug['work_null_op'].append(w_null_op)
-
-            ##########
-            # Apply Ops
-            self.control_stack(self.control_sharp, c_push, c_pop, c_null_op, new_control)
-            self.work_stack(self.work_sharp, w_push, w_pop, w_null_op, new_work)
+                debug['pre_c_pop'].append(pre_c_pop)
+                debug['pre_c_nop'].append(pre_c_nop)
+                debug['pre_w_pop'].append(pre_w_pop)
+                debug['pre_w_nop'].append(pre_w_nop)
+                debug['post_c_push'].append(post_c_push)
+                debug['post_c_val'].append(control_val)
+                debug['post_c_nop'].append(post_c_nop)
+                debug['post_w_push'].append(post_w_push)
+                debug['post_w_val'].append(work_val)
+                debug['post_w_nop'].append(post_w_nop)
 
         out = torch.stack(outputs, dim=1)
 
         for k, v in debug.items():
-            debug[k] = {
-                'data': torch.stack(v, dim=1),
-                'fn': colored,
-            }
+            if k in {'pre_c_pop', 'pre_c_nop', 'pre_w_pop', 'pre_w_nop',
+                     'post_c_push', 'post_c_nop', 'post_w_push', 'post_w_nop'}:
+                debug[k] = {
+                    'data': torch.stack(v, dim=1),
+                    'fn': colored if not k.endswith('_') else None
+                }
+            elif k in {'post_c_val', 'post_w_val'}:
+                def fn(x):
+                    return colored(unproject(x))
+
+                debug[k] = {
+                    'data': torch.stack(v, dim=1),
+                    'fn': lambda x: colored(unproject(x, return_sim=True)) if not k.endswith('_') else None
+                }
         return out, debug
 
 
 ##################################################
 # Training
-
 
 ##########
 # Setup
@@ -963,8 +1154,6 @@ def format_number(num):
 n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f'Total Params: {format_number(n_params)}')
 
-
-
 # print('DISABLING GRADIENTS')
 # model.control_sharp.requires_grad = False
 # model.work_sharp.requires_grad = False
@@ -976,7 +1165,6 @@ print(f'Total Params: {format_number(n_params)}')
 # model.wop1.requires_grad = False
 # model.wop2.requires_grad = False
 # model.wop3.requires_grad = False
-
 
 opt_params = list(filter(lambda p: p.requires_grad, model.parameters()))
 
@@ -992,6 +1180,7 @@ def update_lr(optimizer, lr):
         param_group['lr'] = lr
 
 '''
+
 optimizer = optim.Adam(opt_params, weight_decay=WD, lr=1e-1)
 optimizer = optim.Adam(opt_params, weight_decay=WD, lr=1e-2)
 optimizer = optim.Adam(opt_params, weight_decay=WD, lr=1e-3)
@@ -1008,14 +1197,14 @@ for epoch in range(NUM_EPOCHS):
     train_loss = run_epoch(model, train_dl, optimizer, DEVICE, train_mode=True)
 
     # Experiment changing sharpen param
-    if True: # TODO: rm experiment
+    if False: # TODO: rm experiment
         with torch.no_grad():
             model.control_sharp[:] = torch.randint(4, 12, (1,))
             model.work_sharp[:]    = torch.randint(4, 12, (1,))
 
-    if False: # TODO: rm experiment
-        LO = 5
-        HI = 15
+    if True: # TODO: rm experiment
+        LO = 10
+        HI = 20
         with torch.no_grad():
             a = epoch / NUM_EPOCHS
             model.control_sharp[:] = (1-a) * LO + a * HI

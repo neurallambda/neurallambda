@@ -9,3 +9,6 @@ memray*
 venv/
 .pytest_cache/
 __pycache__/
+
+# Haskell
+dist-newstyle/

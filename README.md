@@ -106,7 +106,7 @@ Demonstration:
   * [ ] Neural Graph
   * [ ] Neural Priority Queue
   * [ ] Neural Dequeue
-
+  * [ ] Neural Algebraic Structures (Ring, Group, Field)
 
 * Empirical validation:
   * Test on simple RNNs
