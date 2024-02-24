@@ -170,7 +170,7 @@ Demonstration:
 ## Zip Repo
 
 ```sh
-zip -r "neurallambda_$(date +"%Y-%m-%d_%H-%M-%S").zip" . -x "*__pycache__*" -x ".pytest_cache/*" -x ".env/*" -x ".git/*" -x "neurallambda*.zip" -x "*.html" -x "*.bin"
+zip -r "neurallambda_$(date +"%Y-%m-%d_%H-%M-%S").zip" . -x "*__pycache__*" -x ".pytest_cache/*" -x ".env/*" -x ".git/*" -x "neurallambda*.zip" -x "*.html" -x "*.bin" -x "*dist-newstyle*" -x "*.prof"
 ```
 
 ## Profiling tips
