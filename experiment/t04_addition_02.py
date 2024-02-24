@@ -150,7 +150,8 @@ from neurallambda.torch import NormalizedLinear, Fn, Parallel, Cat, Stack, Diagn
 import re
 import pandas as pd
 import itertools
-
+import math
+import warnings
 
 torch.manual_seed(152 + 1)
 
@@ -171,17 +172,64 @@ NUM_VAL_SAMPLES = 100
 MIN_VAL_SEQUENCE_LENGTH = MAX_TRAIN_SEQUENCE_LENGTH + 1
 MAX_VAL_SEQUENCE_LENGTH = MAX_TRAIN_SEQUENCE_LENGTH * 2  # maximum length of the sequence
 
-# CHOICE_METHOD = 'softmax'
-CHOICE_METHOD = 'outer_projection'
-REDUNDANCY = 4
-
 BATCH_SIZE = 100
-LR = 1e-2
+LR = 5e-3
 WD = 0.0
 
 INIT_SHARPEN = 2.0
 
 NUM_EPOCHS = 60
+
+CHOICE_METHOD = 'softmax'
+CHOICE_REDUNDANCY = 8
+CHOICE_GUARD = False
+
+
+####################
+
+# NOTE: this is an idea for preloading weights with superpositions of symbols
+
+# def generate_combinations(elements, max_length):
+#     """
+#     Generate all possible combinations of the elements up to a specified maximum length.
+
+#     :param elements: A list of elements to combine.
+#     :param max_length: The maximum length of the combinations.
+
+#     Example sizes of combos:
+
+#         len(generate_combinations(range(2), 2))  ==  3
+#         len(generate_combinations(range(3), 2))  ==  6
+#         len(generate_combinations(range(3), 3))  ==  7
+#         len(generate_combinations(range(4), 2))  ==  10
+#         len(generate_combinations(range(4), 3))  ==  14
+#         len(generate_combinations(range(4), 4))  ==  15
+#         len(generate_combinations(range(5), 2))  ==  15
+#         len(generate_combinations(range(5), 3))  ==  25
+#         len(generate_combinations(range(5), 4))  ==  30
+#         len(generate_combinations(range(5), 5))  ==  31
+#     """
+#     # Store all combinations in a list
+#     all_combinations = []
+
+#     # Generate combinations for every length up to max_length
+#     for length in range(1, max_length + 1):
+#         # itertools.combinations generates combinations of the current length
+#         combinations = itertools.combinations(elements, length)
+#         # Add the current combinations to the total list
+#         all_combinations.extend(combinations)
+
+#     return all_combinations
+
+# # Test the function
+# elements = ['a', 'b', 'c', 'd', 'e']  # A list of length 5
+# max_length = 3  # Generate combinations up to length 3
+
+# # Generate and print all combinations
+# combinations = generate_combinations(elements, max_length)
+# for combo in combinations:
+#     print(combo)
+
 
 
 ##################################################
@@ -497,6 +545,17 @@ def run_epoch(model, dl, optimizer, device, train_mode=True):
 
             if train_mode:
                 optimizer.zero_grad()
+
+            ##########
+            # Add Noise
+            #   TODO: rm experiment.
+            if True:
+                NOISE_LVL = 1e-2
+                with torch.no_grad():
+                    src[0] = src[0] + torch.randn_like(src[0]) * NOISE_LVL
+                    src[1] = src[1] + torch.randn_like(src[1]) * NOISE_LVL
+                    trg = trg + torch.randn_like(trg) * NOISE_LVL
+
             output, debug = model(src)
 
             pre_c_pop = debug['pre_c_pop']['data']
@@ -515,34 +574,34 @@ def run_epoch(model, dl, optimizer, device, train_mode=True):
 
             # REGULARIZATION EXPERIMENT
             #   TODO: rm experiment
+            if False:
+                op_loss = 0
+                for bix in range(src.size(0)):
+                    for i in range(src.size(1)):
 
-            op_loss = 0
-            for bix in range(src.size(0)):
-                for i in range(src.size(1)):
+                        # post control
+                        trg = trg_post_c_op[bix][i]
+                        utrg = unproject(trg)
+                        if utrg == 'NOP':
+                            op_loss += 1 - post_c_nop[bix][i]
+                        elif utrg == 'PSH':
+                            op_loss += 1 - post_c_push[bix][i]
 
-                    # post control
-                    trg = trg_post_c_op[bix][i]
-                    utrg = unproject(trg)
-                    if utrg == 'NOP':
-                        op_loss += 1 - post_c_nop[bix][i]
-                    elif utrg == 'PSH':
-                        op_loss += 1 - post_c_push[bix][i]
+                        # post work
+                        trg = trg_post_w_op[bix][i]
+                        utrg = unproject(trg)
+                        if utrg == 'NOP':
+                            op_loss += 1 - post_w_nop[bix][i]
+                        elif utrg == 'PSH':
+                            op_loss += 1 - post_w_push[bix][i]
+                op_loss = op_loss / (src.size(0) * src.size(1))
 
-                    # post work
-                    trg = trg_post_w_op[bix][i]
-                    utrg = unproject(trg)
-                    if utrg == 'NOP':
-                        op_loss += 1 - post_w_nop[bix][i]
-                    elif utrg == 'PSH':
-                        op_loss += 1 - post_w_push[bix][i]
-            op_loss = op_loss / (src.size(0) * src.size(1))
+                val_loss = (
+                    (1 - cosine_similarity(trg_post_c_val, post_c_val, dim=2)) +
+                    (1 - cosine_similarity(trg_post_w_val, post_w_val, dim=2))
+                ).mean()
 
-            val_loss = (
-                (1 - cosine_similarity(trg_post_c_val, post_c_val, dim=2)) +
-                (1 - cosine_similarity(trg_post_w_val, post_w_val, dim=2))
-            ).mean()
-
-            loss = loss + op_loss * 0.1  + val_loss * 0.1
+                loss = loss + op_loss * 0.1  + val_loss * 0.1
 
 
             if train_mode:
@@ -702,180 +761,263 @@ class LSTMModel(nn.Module):
         return out, {}
 
 
+##############################
+
+
+class NuLinear(nn.Module):
+    def __init__(self,
+                 in_features,
+                 out_features,
+                 bias=False,
+                 normalize_input=True,
+                 normalize_weight=True,
+                 init_extra_weight=None,
+                 fwd_extra_dim=0):
+        super(NuLinear, self).__init__()
+
+        self.in_features = in_features
+        self.out_features = out_features
+        self.init_extra_weight = init_extra_weight
+        self.fwd_extra_dim = fwd_extra_dim
+        self.normalize_input = normalize_input
+        self.normalize_weight = normalize_weight
+
+        # Bias
+        if bias:
+            # Bias shape: [out_features]
+            self.bias = nn.Parameter(torch.Tensor(out_features))
+        else:
+            self.register_parameter('bias', None)
+
+        # Weight
+        if in_features > 0 and out_features > 0:
+            self.weight = nn.Parameter(torch.Tensor(out_features, in_features))
+            self.reset_parameters()
+        else:
+            self.weight = None
+
+        if init_extra_weight is not None:
+            assert init_extra_weight.dim() == 2 and init_extra_weight.size(1) == in_features, f"init_extra_weight must have shape [init_extra_dim, in_features={in_features}], but has shape={init_extra_weight.shape}"
+            # Shape: [init_extra_dim, in_features]
+            self.init_extra_weight = init_extra_weight
+            # Adjust total output features to include init_extra_weight
+            self.total_out_features = out_features + init_extra_weight.size(0) + fwd_extra_dim
+        else:
+            self.init_extra_weight = None
+            self.total_out_features = out_features + fwd_extra_dim
+
+    def reset_parameters(self):
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if self.init_extra_weight is not None:
+            nn.init.kaiming_uniform_(self.init_extra_weight, a=math.sqrt(5))
+        if self.bias is not None:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
+            bound = 1 / math.sqrt(fan_in)
+            nn.init.uniform_(self.bias, -bound, bound)
+
+    def forward(self, input, extra_weight=None):
+        # Input shape: [batch_size, in_features]
+        if self.normalize_input:
+            input = F.normalize(input, p=2, dim=1)
+
+        weight = self.weight
+        if self.init_extra_weight is not None:
+            # Concatenated weight shape: [out_features + init_extra_dim, in_features]
+            if weight is not None:
+                weight = torch.cat([self.weight, self.init_extra_weight], dim=0)
+            else:
+                weight = self.init_extra_weight
+
+        if extra_weight is not None:
+            assert extra_weight.shape[1] == self.fwd_extra_dim and extra_weight.shape[2] == self.in_features, f"extra_weight must have shape [batch={input.size(0)}, fwd_extra_dim={self.fwd_extra_dim}, in_features={self.in_features}], but has shape={extra_weight.shape}"
+            # Repeat and concatenate for shape: [batch, out_features + init_extra_dim + fwd_extra_dim, in_features]
+            weight = torch.cat([weight.unsqueeze(0).repeat(extra_weight.size(0), 1, 1), extra_weight], dim=1)
+
+        if self.normalize_weight:
+            # Normalize across the appropriate dimension
+            weight = F.normalize(weight, p=2, dim=-1)
+
+        if extra_weight is not None:
+            # Corrected output calculation for batched inputs
+            output = torch.bmm(weight, input.unsqueeze(2)).squeeze(2)
+        else:
+            output = input.matmul(weight.t())
+
+        if self.bias is not None:
+            # Ensure bias is correctly expanded and added to output
+            # Adjust bias shape based on actual output features
+            bias = self.bias if self.init_extra_weight is None else torch.cat([self.bias, torch.zeros(self.init_extra_weight.size(0), device=self.bias.device)], 0)
+            if extra_weight is not None:
+                bias = torch.cat([bias, torch.zeros(self.fwd_extra_dim, device=bias.device)], 0)  # Extend bias for fwd_extra_dim
+            output += bias.unsqueeze(0)
+
+        return output
+
+    def extra_repr(self):
+        return 'in_features={}, out_features={}, bias={}, normalize_input={}, normalize_weight={}, init_extra_weight={}, fwd_extra_dim={}'.format(
+            self.in_features, self.out_features, self.bias is not None, self.normalize_input, self.normalize_weight, self.init_extra_weight.shape if self.init_extra_weight is not None else None, self.fwd_extra_dim
+        )
+
+
+# @@@@@@@@@@
+
+if False:
+    # Initialize parameters
+    in_features = 10
+    out_features = 5
+    batch_size = 3
+    init_extra_dim = 2
+    fwd_extra_dim = 4
+
+    # Create dummy inputs
+    input = torch.randn(batch_size, in_features)
+    init_extra_weight = torch.randn(init_extra_dim, in_features)
+    fwd_extra_weight = torch.randn(batch_size, fwd_extra_dim, in_features)
+
+    # Create NuLinear instances and perform assertions
+    # Test without any extra weight
+    model = NuLinear(in_features, out_features, bias=True)
+    assert model(input).shape == (batch_size, out_features), "Output shape mismatch without extra weight"
+
+    # Test with initial extra weight
+    model_with_init_extra = NuLinear(in_features, out_features, init_extra_weight=init_extra_weight, bias=True)
+    assert model_with_init_extra(input).shape == (batch_size, out_features + init_extra_dim), "Output shape mismatch with init extra weight"
+
+    # Test with forward extra weight
+    model_with_fwd_extra = NuLinear(in_features, out_features, fwd_extra_dim=fwd_extra_dim, bias=True)
+    output_with_fwd_extra = model_with_fwd_extra(input, extra_weight=fwd_extra_weight)
+    assert output_with_fwd_extra.shape == (batch_size, out_features + fwd_extra_dim), "Output shape mismatch with forward extra weight"
+
+    # Test with both init and forward extra weight
+    model_with_both_extra = NuLinear(in_features, out_features, init_extra_weight=init_extra_weight, fwd_extra_dim=fwd_extra_dim, bias=True)
+    output_with_both_extra = model_with_both_extra(input, extra_weight=fwd_extra_weight)
+    assert output_with_both_extra.shape == (batch_size, out_features + init_extra_dim + fwd_extra_dim), "Output shape mismatch with both types of extra weight"
+
+    print("All assertions passed!")
+
+# @@@@@@@@@@
+
+
 ##################################################
 #
 
 class Choice(nn.Module):
     ''' N-vectors -> [0, 1] '''
-    def __init__(self, vec_size, n_vecs, n_choices, redundancy, has_guard=False, method='mean'):
-        ''' `has_guard` uses separate weights to calculate a gate that
-        multiplies against the values of `self.ff(inp)` '''
+    def __init__(self,
+                 vec_size,
+                 n_vecs,
+                 n_choices,
+                 redundancy,
+                 has_guard=False,
+                 method='softmax',
+                 init_extra_weight=None,
+                 fwd_extra_weight_dim=0,
+                 ):
         super(Choice, self).__init__()
+
         self.vec_size = vec_size
         self.n_vecs = n_vecs
         self.n_choices = n_choices
         self.redundancy = redundancy
         self.has_guard = has_guard
         self.method = method
-        assert method in {'mean', 'max', 'softmax', 'outer_projection'}
+        self.init_extra_weight = init_extra_weight
+        self.fwd_extra_weight_dim = fwd_extra_weight_dim
 
-        # Stack inputs
-        if n_vecs == 1:
-            Vecs = Id()
-        elif n_vecs == 2:
-            Vecs = Fn(lambda a, b: torch.hstack([a, b]), nargs=2)
-        elif n_vecs == 3:
-            Vecs = Fn(lambda a, b, c: torch.hstack([a, b, c]), nargs=3)
-        elif n_vecs == 4:
-            Vecs = Fn(lambda a, b, c, d: torch.hstack([a, b, c, d]), nargs=4)
-        elif n_vecs == 5:
-            Vecs = Fn(lambda a, b, c, d, e: torch.hstack([a, b, c, d, e]), nargs=5)
-        elif n_vecs == 6:
-            Vecs = Fn(lambda a, b, c, d, e, f: torch.hstack([a, b, c, d, e, f]), nargs=6)
+        assert method in {'max', 'softmax', 'sum', 'mean'}
 
-        self.ff = nn.Sequential(Vecs, nn.Linear(vec_size * n_vecs, redundancy * n_choices, bias=False), nn.Sigmoid())
-
-        if has_guard:
-            self.guard = nn.Sequential(Vecs, nn.Linear(vec_size * n_vecs, redundancy * n_choices, bias=False), nn.Sigmoid())
-
-        if method == 'outer_projection':
-            if n_choices == 2:
-                self.outer = lambda xs: torch.einsum('za, zb -> zab', *xs).flatten(start_dim=1, end_dim=-1)
-            elif n_choices == 3:
-                self.outer = lambda xs: torch.einsum('za, zb, zc -> zabc', *xs).flatten(start_dim=1, end_dim=-1)
-            elif n_choices == 4:
-                self.outer = lambda xs: torch.einsum('za, zb, zc, zd -> zabcd', *xs).flatten(start_dim=1, end_dim=-1)
-            elif n_choices == 5:
-                self.outer = lambda xs: torch.einsum('za, zb, zc, zd, ze -> zabcde', *xs).flatten(start_dim=1, end_dim=-1)
-            elif n_choices > 5:
-                raise ValueError(f'The outer_projection method scales as O(redundancy ** n_choices). You probably dont want n_choices>5, but you picked n_choices={n_choices}')
-
-            self.proj = nn.Sequential(
-                nn.Linear(redundancy ** n_choices, redundancy, bias=True),
-                nn.ReLU(),
-                nn.Linear(redundancy, n_choices, bias=True),
-                nn.Sigmoid(),
-                # nn.Softmax(dim=1)
-            )
-
-    def forward(self, inp):
-        if self.has_guard:
-            f = self.ff(inp)
-            g = self.guard(inp)
-            outs = f * g
-        else:
-            outs = self.ff(inp)
-
-        if self.method == 'outer_projection':
-            chunks = torch.chunk(outs, self.n_choices, dim=1)
-            return self.proj(self.outer(chunks))
-        elif self.method == 'mean':
-            return torch.mean(outs.view(-1, self.n_choices, self.redundancy), dim=2)
-        elif self.method == 'max':
-            return torch.max(outs.view(-1, self.n_choices, self.redundancy), dim=2).values
-        elif self.method == 'softmax':
-            return torch.sum(outs.softmax(dim=1).view(-1, self.n_choices, self.redundancy), dim=2)
-
-
-
-####################
-
-# def generate_combinations(elements, max_length):
-#     """
-#     Generate all possible combinations of the elements up to a specified maximum length.
-
-#     :param elements: A list of elements to combine.
-#     :param max_length: The maximum length of the combinations.
-
-#     Example sizes of combos:
-
-#         len(generate_combinations(range(2), 2))  ==  3
-#         len(generate_combinations(range(3), 2))  ==  6
-#         len(generate_combinations(range(3), 3))  ==  7
-#         len(generate_combinations(range(4), 2))  ==  10
-#         len(generate_combinations(range(4), 3))  ==  14
-#         len(generate_combinations(range(4), 4))  ==  15
-#         len(generate_combinations(range(5), 2))  ==  15
-#         len(generate_combinations(range(5), 3))  ==  25
-#         len(generate_combinations(range(5), 4))  ==  30
-#         len(generate_combinations(range(5), 5))  ==  31
-#     """
-#     # Store all combinations in a list
-#     all_combinations = []
-
-#     # Generate combinations for every length up to max_length
-#     for length in range(1, max_length + 1):
-#         # itertools.combinations generates combinations of the current length
-#         combinations = itertools.combinations(elements, length)
-#         # Add the current combinations to the total list
-#         all_combinations.extend(combinations)
-
-#     return all_combinations
-
-# # Test the function
-# elements = ['a', 'b', 'c', 'd', 'e']  # A list of length 5
-# max_length = 3  # Generate combinations up to length 3
-
-# # Generate and print all combinations
-# combinations = generate_combinations(elements, max_length)
-# for combo in combinations:
-#     print(combo)
-
-
-##############################
-
-
-class Choice2(nn.Module):
-    ''' N-vectors -> [0, 1] '''
-    def __init__(self, vec_size, n_vecs, symbols, n_include_symbols=0, has_guard=False, method='mean'):
-        ''' `has_guard` uses separate weights to calculate a gate that
-        multiplies against the values of `self.ff(inp)` '''
-        super(Choice2, self).__init__()
-        self.vec_size = vec_size
-        self.n_vecs = n_vecs
-        self.symbols = symbols
-        self.n_include_symbols = n_include_symbols
-        self.has_guard = has_guard
-        self.method = method
-        assert method in {'mean', 'max', 'softmax', 'outer_projection'}
-
-        n_sym = symbols.size(0) + n_include_symbols
-
-        HIDDEN_DIM = 64
-        self.choice = nn.Sequential(
-            nn.Linear((n_vecs + n_sym) * vec_size, HIDDEN_DIM),
-            nn.ReLU(),
-            nn.Linear(HIDDEN_DIM, HIDDEN_DIM),
-            nn.Tanh(),
-            nn.Linear(HIDDEN_DIM, n_vecs + n_sym),
+        self.ff = NuLinear(
+            vec_size * n_vecs,
+            redundancy * n_choices,
+            bias=False,
+            normalize_input=True,
+            normalize_weight=True,
+            init_extra_weight = init_extra_weight,
+            fwd_extra_dim=fwd_extra_weight_dim,
         )
 
-    def forward(self, inp, include=None):
-        assert len(inp) == self.n_vecs, f'shapes no the same: len(inp)={len(inp)} vs self.n_vecs={self.n_vecs}'
-        if self.n_include_symbols > 0:
-            assert len(include) == self.n_include_symbols
+        if has_guard:
+            # warnings.warn('REUSING `init_extra_weight` as guard\'s init_weight')
 
-        vecs = torch.stack(inp, dim=1)
-        if include is not None:
-            vecs = torch.concat(vecs, include)
-        # # inp     = [batch, n_vecs, _    , vec_size]
-        # # symbols = [_    , _     , n_sym, vec_size]
-        # # out     = [batch, n_vecs, n_sym]
-        # inp_symbols = cosine_similarity(
-        #     inps.unsqueeze(2),
-        #     self.symbols.unsqueeze(0).unsqueeze(0), dim=4)
-        breakpoint()
-        HERE
-        choose = self.choice(vecs)
-        return einsum('nv, b -> bv', self.symbols, choose)
+            # warnings.warn('HACKING `init_extra_weight` of guard\'s init_weight')
+            # guard_weights = nn.Parameter(torch.randn(redundancy * n_choices, vec_size * n_vecs))
 
+            # warnings.warn('Not providing guard init_weight')
+
+            self.guard = NuLinear(
+                vec_size * n_vecs,
+                redundancy * n_choices,
+                bias=False,
+                normalize_input=True,
+                normalize_weight=True,
+                # init_extra_weight = guard_weights,
+                fwd_extra_dim=fwd_extra_weight_dim,
+            )
+            self.guard_scale = nn.Parameter(torch.tensor([redundancy * 1.0]))
+
+        self.scale = nn.Parameter(torch.tensor([redundancy * 0.1]))
+
+
+        self.dropout = nn.Dropout(0.0)
+
+    def forward(self, inp, extra_weights=None, eps = 1e-6):
+        batch_size = inp[0].size(0)
+        sinp = torch.hstack(inp)
+
+        outs = self.ff(sinp, extra_weights)
+        outs = self.dropout(outs)
+
+        hg = self.has_guard
+        if hg:
+            g = self.guard(sinp)
+            g = self.dropout(g)
+
+        if self.method == 'max':
+            outs = torch.max(outs.view(batch_size, self.n_choices, self.redundancy), dim=2).values
+            if hg: g = torch.max(g.view(batch_size, self.n_choices, self.redundancy), dim=2).values
+
+        elif self.method == 'softmax':
+            # softmax over the whole redundant vec, then sum each redundant chunk
+            # clip because of singularities in tan and log(p/(1-p))
+            outs = (outs).clip(eps, 1-eps)
+
+            # Map similarities in [-1, 1] to (-inf, inf)
+            #   TODO: experiment with replacing log with tan (yes tan, not tanh)
+            outs = torch.log((outs) / (1 - outs))
+            outs = torch.sum(outs.softmax(dim=1).view(batch_size, self.n_choices, self.redundancy), dim=2)
+            if hg:
+                g = (g).clip(eps, 1-eps)
+                g = torch.log((g) / (1 - g))
+                g = torch.sum(g.softmax(dim=1).view(batch_size, self.n_choices, self.redundancy), dim=2)
+
+        elif self.method == 'sum':
+            outs = torch.sum(outs.view(batch_size, self.n_choices, self.redundancy), dim=2)
+            if hg: g = torch.sum(g.view(batch_size, self.n_choices, self.redundancy), dim=2)
+
+        elif self.method == 'mean':
+            outs = torch.mean(outs.view(batch_size, self.n_choices, self.redundancy), dim=2)
+            if hg: g = torch.mean(g.view(batch_size, self.n_choices, self.redundancy), dim=2)
+
+        if hg:
+            outs = outs * g
+
+        if self.method in {'sum', 'mean'}:
+            # outs = outs * self.scale
+            outs = torch.sigmoid(outs * self.scale)
+
+        return outs
+
+
+##################################################
 
 def op(n_inp, vec_size):
     ''' (vec, vec, vec) -> scalar
     Useful in stack/queue operations.
     '''
+
     return nn.Sequential(
-        Choice(vec_size, n_inp, n_choices=2, redundancy=REDUNDANCY, has_guard=True, method=CHOICE_METHOD),
+        Choice(vec_size, n_inp, 2, redundancy=CHOICE_REDUNDANCY, has_guard=CHOICE_GUARD, method=CHOICE_METHOD, init_extra_weight=None),
+        # Choice(vec_size, n_inp, n_choices=2, redundancy=REDUNDANCY, has_guard=True, method=CHOICE_METHOD),
         Fn(lambda x: (x[:,0] - x[:,1] + 1) / 2, nargs=1), # convert softmax choice to scalar
         Fn(lambda x: x.unsqueeze(-1)),
     )
@@ -935,39 +1077,39 @@ class Neuralsymbol(nn.Module):
         ##########
         # Type
 
-        sym_type_hidden = 8
-        self.sym_type = Choice2(vec_size, 1, symbols)
-        # self.sym_type = nn.Sequential(
-        #     # Choice(vec_size, n_vecs=1, n_choices=2, redundancy=REDUNDANCY, has_guard=True, method=CHOICE_METHOD),
-        #     # nn.Linear(2, vec_size, bias=True),
-        #     #
-        #     nn.Linear(vec_size, hidden_dim, bias=True),
-        #     nn.ReLU(),
-        #     nn.Linear(hidden_dim, vec_size, bias=True),
-        #     Fn(lambda x: F.normalize(x, dim=1)),
-        # )
+        n_choices = 2
+        self.sym_type_outs = nn.Parameter(torch.randn(vec_size, n_choices))
+        self.sym_type_choose = Choice(
+            vec_size, 1, n_choices=n_choices,
+            redundancy=CHOICE_REDUNDANCY,
+            has_guard=CHOICE_GUARD,
+            method=CHOICE_METHOD,
+        )
 
         ##########
         # Control Stack
+
+        n_choices = 8
 
         self.stack_init_vec = torch.randn(vec_size)
         self.control_stack = S.Stack(n_control_stack, input_dim)
         self.control_sharp = nn.Parameter(torch.tensor([init_sharpen]))
         self.pre_c_pop,   self.pre_c_nop  = op(3, vec_size), op(3, vec_size)
         self.post_c_push, self.post_c_nop = op(3, vec_size), op(3, vec_size)
-        self.post_c_val = Choice2(vec_size, 3, symbols)
-        # self.post_c_val = nn.Sequential(
-        #     # Choice(vec_size, n_vecs=3, n_choices=n_choices, redundancy=REDUNDANCY, has_guard=True, method=CHOICE_METHOD),
-        #     # nn.Linear(n_choices, vec_size, bias=False),
-        #     Fn(lambda a, b, c: a * b * c, nargs=3),
-        #     nn.Linear(vec_size, hidden_dim, bias=True),
-        #     nn.ReLU(),
-        #     nn.Linear(hidden_dim, vec_size, bias=True),
-        #     Fn(lambda x: F.normalize(x, dim=1)),
-        # )
+
+
+        self.post_c_outputs = nn.Parameter(torch.randn(vec_size, n_choices))
+        self.post_c_choice = Choice(
+            vec_size, 3, n_choices=n_choices,
+            redundancy=CHOICE_REDUNDANCY,
+            has_guard=CHOICE_GUARD,
+            method=CHOICE_METHOD)
+
 
         ##########
         # Working Stack
+
+        n_choices = 8
 
         self.work_stack = S.Stack(n_work_stack, input_dim)
         self.work_sharp = nn.Parameter(torch.tensor([init_sharpen]))
@@ -975,26 +1117,27 @@ class Neuralsymbol(nn.Module):
         self.post_w_push, self.post_w_nop  = op(3, vec_size), op(3, vec_size)
 
         self.work_guard = op(1, vec_size)
-        self.post_w_val = Choice2(vec_size, 3, symbols)
-        # self.post_w_val = nn.Sequential(
-        #     # Choice(vec_size, n_vecs=3, n_choices=n_choices, redundancy=3, has_guard=True, method=CHOICE_METHOD),
-        #     # nn.Linear(n_choices, vec_size, bias=False),
-        #     Fn(lambda a, b, c: a * b * c, nargs=3),
-        #     nn.Linear(vec_size, hidden_dim, bias=True),
-        #     nn.ReLU(),
-        #     nn.Linear(hidden_dim, vec_size, bias=True),
-        #     Fn(lambda x: F.normalize(x, dim=1)),
-        # )
+
+        self.post_w_outputs = nn.Parameter(torch.randn(vec_size, n_choices))
+        self.post_w_choice = Choice(
+            vec_size, 3, n_choices,
+            redundancy=CHOICE_REDUNDANCY,
+            has_guard=CHOICE_GUARD,
+            method=CHOICE_METHOD)
+
 
         ##########
         # Select output
 
-        self.n_out_sym = 4
-        self.out_sym = nn.Parameter(torch.randn(self.n_out_sym, vec_size))
-        self.select_out = Choice2(vec_size, 3, symbols)
-        # self.select_out = nn.Sequential(
-        #     Choice(vec_size, n_vecs=3, n_choices=self.n_out_sym + 1, redundancy=REDUNDANCY, has_guard=True, method=CHOICE_METHOD),
-        # )
+        n_choices = 8
+        self.select_out_outputs = nn.Parameter(torch.randn(vec_size, n_choices))
+        self.select_out_choice = Choice(
+            vec_size, 3, n_choices=n_choices + 1,
+            redundancy=CHOICE_REDUNDANCY,
+            has_guard=CHOICE_GUARD,
+            method=CHOICE_METHOD,
+        )
+
 
     def forward(self, x):
         # Containers Init
@@ -1032,7 +1175,9 @@ class Neuralsymbol(nn.Module):
             # Pre
 
             # inp_typ = inp
-            inp_typ = self.sym_type([inp])
+            inp_type_c = self.sym_type_choose([inp])
+            inp_typ = einsum('vc, bc -> bv', self.sym_type_outs, inp_type_c)
+
             c_peek = self.control_stack.read()
             w_peek = self.work_stack.read()
             pre_inp = [c_peek, w_peek, inp_typ]
@@ -1051,20 +1196,22 @@ class Neuralsymbol(nn.Module):
             # Post
             post_inp = [c_peek, w_peek, inp_typ]
 
-            # control stack maybe push
+            # control stack
             post_c_push, post_c_nop = self.post_c_push(post_inp).squeeze(1), self.post_c_nop(post_inp).squeeze(1)
             # post_c_push, post_c_nop = (post_c_push - post_c_nop + 1) / 2, (post_c_nop - post_c_push + 1) / 2
-            control_val = self.post_c_val(post_inp)
+            control_choice = self.post_c_choice(post_inp) # [batch, n_choice]
+            control_val = einsum('bc, vc -> bv', control_choice, self.post_c_outputs)
             self.control_stack.push_or_null_op(self.control_sharp, post_c_push, post_c_nop, control_val)
 
-            # work stack maybe push
+            # work stack
             post_w_push, post_w_nop = self.post_w_push(post_inp).squeeze(1), self.post_w_nop(post_inp).squeeze(1)
             # post_w_push, post_w_nop = (post_c_push - post_c_nop + 1) / 2, (post_c_nop - post_c_push + 1) / 2
 
             # work_guard = self.work_guard(inp_typ)
 
             # "sum mod 10" happens here
-            work_val = self.post_w_val(post_inp)
+            work_choice = self.post_w_choice(post_inp) # [batch, n_choice]
+            work_val = einsum('bc, vc -> bv', work_choice, self.post_w_outputs)
             self.work_stack.push_or_null_op(self.work_sharp, post_w_push, post_w_nop, work_val)
 
             ##########
@@ -1077,8 +1224,9 @@ class Neuralsymbol(nn.Module):
             # ], dim=1)
             # out = einsum('bn, bnv -> bv', select_out, options)
 
-            out = self.select_out([control_val, work_val, inp_typ], include=[work_val])
-
+            select_choice = self.select_out_choice([control_val, work_val, inp_typ],)
+            stck = torch.cat([self.select_out_outputs.expand(batch_size, -1, -1), work_val.unsqueeze(2)], dim=2)
+            out = einsum('bc, bvc -> bv', select_choice, stck)
 
             outputs.append(out)
 
@@ -1203,8 +1351,8 @@ for epoch in range(NUM_EPOCHS):
             model.work_sharp[:]    = torch.randint(4, 12, (1,))
 
     if True: # TODO: rm experiment
-        LO = 10
-        HI = 20
+        LO = 2
+        HI = 8
         with torch.no_grad():
             a = epoch / NUM_EPOCHS
             model.control_sharp[:] = (1-a) * LO + a * HI
