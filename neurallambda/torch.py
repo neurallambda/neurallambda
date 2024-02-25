@@ -10,6 +10,10 @@ import torch.nn.functional as F
 import math
 from neurallambda.util import bold, red, green
 
+import torch
+import torch.nn.functional as F
+import math
+
 ##################################################
 # Better Torch
 
@@ -172,3 +176,202 @@ class Diagnose(nn.Module):
         print(f'Input Shape: {input.shape}')
         if self.should_raise:
             raise RuntimeError('Done diangosing')
+
+
+##################################################
+# NuLinear
+
+class NuLinear(nn.Module):
+    def __init__(self,
+                 in_features,
+                 out_features,
+                 bias=False,
+                 normalize_input=True,
+                 normalize_weight=True,
+                 init_extra_weight=None,
+                 fwd_extra_dim=0):
+        super(NuLinear, self).__init__()
+
+        self.in_features = in_features
+        self.out_features = out_features
+        self.init_extra_weight = init_extra_weight
+        self.fwd_extra_dim = fwd_extra_dim
+        self.normalize_input = normalize_input
+        self.normalize_weight = normalize_weight
+
+        # Bias
+        if bias:
+            # Bias shape: [out_features]
+            self.bias = nn.Parameter(torch.Tensor(out_features))
+        else:
+            self.register_parameter('bias', None)
+
+        # Weight
+        if in_features > 0 and out_features > 0:
+            self.weight = nn.Parameter(torch.Tensor(out_features, in_features))
+            self.reset_parameters()
+        else:
+            self.weight = None
+
+        if init_extra_weight is not None:
+            assert init_extra_weight.dim() == 2 and init_extra_weight.size(1) == in_features, f"init_extra_weight must have shape [init_extra_dim, in_features={in_features}], but has shape={init_extra_weight.shape}"
+            # Shape: [init_extra_dim, in_features]
+            self.init_extra_weight = init_extra_weight
+            # Adjust total output features to include init_extra_weight
+            self.total_out_features = out_features + init_extra_weight.size(0) + fwd_extra_dim
+        else:
+            self.init_extra_weight = None
+            self.total_out_features = out_features + fwd_extra_dim
+
+    def reset_parameters(self):
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+
+        if self.bias is not None:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
+            bound = 1 / math.sqrt(fan_in)
+            nn.init.uniform_(self.bias, -bound, bound)
+
+    def forward(self, input, extra_weight=None):
+        # Input shape: [batch_size, in_features]
+        if self.normalize_input:
+            input = F.normalize(input, p=2, dim=1)
+
+        weight = self.weight
+        if self.init_extra_weight is not None:
+            # Concatenated weight shape: [out_features + init_extra_dim, in_features]
+            if weight is not None:
+                weight = torch.cat([self.weight, self.init_extra_weight], dim=0)
+            else:
+                weight = self.init_extra_weight
+
+        if extra_weight is not None:
+            assert extra_weight.shape[1] == self.fwd_extra_dim and extra_weight.shape[2] == self.in_features, f"extra_weight must have shape [batch={input.size(0)}, fwd_extra_dim={self.fwd_extra_dim}, in_features={self.in_features}], but has shape={extra_weight.shape}"
+            # Repeat and concatenate for shape: [batch, out_features + init_extra_dim + fwd_extra_dim, in_features]
+            weight = torch.cat([weight.unsqueeze(0).repeat(extra_weight.size(0), 1, 1), extra_weight], dim=1)
+
+        if self.normalize_weight:
+            # Normalize across the appropriate dimension
+            weight = F.normalize(weight, p=2, dim=-1)
+
+        if extra_weight is not None:
+            # Corrected output calculation for batched inputs
+            output = torch.bmm(weight, input.unsqueeze(2)).squeeze(2)
+        else:
+            output = input.matmul(weight.t())
+
+        if self.bias is not None:
+            # Ensure bias is correctly expanded and added to output
+            # Adjust bias shape based on actual output features
+            bias = self.bias if self.init_extra_weight is None else torch.cat([self.bias, torch.zeros(self.init_extra_weight.size(0), device=self.bias.device)], 0)
+            if extra_weight is not None:
+                bias = torch.cat([bias, torch.zeros(self.fwd_extra_dim, device=bias.device)], 0)  # Extend bias for fwd_extra_dim
+            output += bias.unsqueeze(0)
+
+        return output
+
+    def extra_repr(self):
+        return 'in_features={}, out_features={}, bias={}, normalize_input={}, normalize_weight={}, init_extra_weight={}, fwd_extra_dim={}'.format(
+            self.in_features, self.out_features, self.bias is not None, self.normalize_input, self.normalize_weight, self.init_extra_weight.shape if self.init_extra_weight is not None else None, self.fwd_extra_dim
+        )
+
+
+##################################################
+# Choice
+
+class Choice(nn.Module):
+    ''' n-vectors -> R^m '''
+    def __init__(self,
+                 vec_size,
+                 n_vecs,
+                 n_choices,
+                 redundancy,
+                 has_guard=False,
+                 method='softmax',
+                 init_extra_weight=None,
+                 fwd_extra_weight_dim=0, # must be a multiple of `redundancy`
+                 ):
+        super(Choice, self).__init__()
+
+        self.vec_size = vec_size
+        self.n_vecs = n_vecs
+        self.n_choices = n_choices
+        self.redundancy = redundancy
+        self.has_guard = has_guard
+        self.method = method
+        self.init_extra_weight = init_extra_weight
+        self.fwd_extra_weight_dim = fwd_extra_weight_dim
+
+        assert method in {'max', 'softmax', 'sum', 'mean'}
+
+        self.ff = NuLinear(
+            vec_size * n_vecs,
+            redundancy * n_choices,
+            bias=False,
+            normalize_input=True,
+            normalize_weight=True,
+            init_extra_weight = init_extra_weight,
+            fwd_extra_dim=fwd_extra_weight_dim,
+        )
+
+        if has_guard:
+            # Note: weights for guard are init'd randomly
+            self.guard = NuLinear(
+                vec_size * n_vecs,
+                redundancy * n_choices,
+                bias=False, # TODO: <<<? seems like bias could turn off entire inputs, and that'd be good
+                normalize_input=True,
+                normalize_weight=True,
+                fwd_extra_dim=fwd_extra_weight_dim,
+            )
+            self.guard_scale = nn.Parameter(torch.tensor([redundancy * 1.0]))
+
+        self.scale = nn.Parameter(torch.tensor([redundancy * 0.1])) # TODO: this is a total guess
+
+    def forward(self, inp, extra_weights=None, eps = 1e-6):
+        for i in inp:
+            assert i.ndim == 2
+        batch_size = inp[0].size(0)
+        sinp = torch.hstack(inp)
+
+        outs = self.ff(sinp, extra_weights)
+
+        hg = self.has_guard
+        if hg:
+            g = self.guard(sinp)
+
+        sz = self.n_choices + self.fwd_extra_weight_dim // self.redundancy
+
+        if self.method == 'max':
+            outs = torch.max(outs.view(batch_size, sz, self.redundancy), dim=2).values
+            if hg: g = torch.max(g.view(batch_size, sz, self.redundancy), dim=2).values
+
+        elif self.method == 'softmax':
+            # softmax over the whole redundant vec, then sum each redundant chunk
+            # clip because of singularities in tan and log(p/(1-p))
+            outs = (outs).clip(eps, 1-eps)  # note: clips neg similarities
+            outs = torch.log((outs) / (1 - outs))  # maps [0,1] -> [-inf, inf]
+            # outs = torch.tan((outs - 0.5) * pi)  # maps [0,1] -> [-inf, inf]
+
+            # outs = (outs).clip(-1+eps, 1-eps)
+            # outs = torch.tan(outs * pi / 2)  # maps [-1,1] -> [-inf, inf]
+            outs = torch.sum(outs.softmax(dim=1).view(batch_size, sz, self.redundancy), dim=2)
+            if hg:
+                g = (g).clip(eps, 1-eps)
+                g = torch.log((g) / (1 - g))
+                g = torch.sum(g.softmax(dim=1).view(batch_size, sz, self.redundancy), dim=2)
+
+        elif self.method == 'sum':
+            outs = torch.sum(outs.view(batch_size, sz, self.redundancy), dim=2)
+            if hg: g = torch.sum(g.view(batch_size, sz, self.redundancy), dim=2)
+
+        elif self.method == 'mean':
+            outs = torch.mean(outs.view(batch_size, sz, self.redundancy), dim=2)
+            if hg: g = torch.mean(g.view(batch_size, sz, self.redundancy), dim=2)
+
+        if hg:
+            outs = outs * g
+
+        if self.method in {'sum', 'mean'}:
+            outs = torch.sigmoid(outs * self.scale)
+
+        return outs

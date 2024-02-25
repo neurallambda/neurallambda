@@ -56,8 +56,8 @@ import math
 import torch.fft
 import time
 from torch import pi
-torch.manual_seed(152)
 
+torch.manual_seed(152)
 
 print('\n'*2)
 
@@ -132,9 +132,10 @@ def train_and_report(n_choices, redundancy, vec_size, has_guard, method):
         for _, (src, trg) in enumerate(train_odd_dl):
 
             # TEST NOISE
-            src[0] = src[0] + torch.randn_like(src[0]) * 1e-1
-            src[1] = src[1] + torch.randn_like(src[1]) * 1e-1
-            trg = trg + torch.randn_like(trg) * 1e-1
+            NOISE_LVL = 1e-2
+            src[0] = src[0] + torch.randn_like(src[0]) * NOISE_LVL
+            src[1] = src[1] + torch.randn_like(src[1]) * NOISE_LVL
+            trg = trg + torch.randn_like(trg) * NOISE_LVL
 
             optimizer.zero_grad()
             output = model(src)
@@ -375,8 +376,14 @@ class Choice(nn.Module):
             if DEBUG:
                 breakpoint()
             eps = 1e-6
-            outs = (outs).clip(eps, 1-eps)
-            outs = torch.log((outs) / (1 - outs))
+
+            outs = (outs).clip(eps, 1-eps)  # note: clips neg similarities
+            outs = torch.log((outs) / (1 - outs))  # maps [0,1] -> [-inf, inf]
+            # outs = torch.tan((outs - 0.5) * pi)  # maps [0,1] -> [-inf, inf]
+
+            # outs = (outs).clip(-1+eps, 1-eps)
+            # outs = torch.tan(outs * pi / 2)  # maps [-1,1] -> [-inf, inf]
+
             outs = torch.sum(outs.softmax(dim=1).view(batch_size, self.n_choices, self.redundancy), dim=2)
             if hg:
                 g = (g).clip(eps, 1-eps)
@@ -478,17 +485,17 @@ R = 4
 
 experiments = [
 
-    {'has_guard': True,  'method': 'max', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
-    {'has_guard': False, 'method': 'max', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
+    # {'has_guard': True,  'method': 'max', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
+    # {'has_guard': False, 'method': 'max', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
 
     {'has_guard': True,  'method': 'softmax', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
     {'has_guard': False, 'method': 'softmax', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
 
-    {'has_guard': True,  'method': 'sum', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
-    {'has_guard': False, 'method': 'sum', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
+    # {'has_guard': True,  'method': 'sum', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
+    # {'has_guard': False, 'method': 'sum', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
 
-    {'has_guard': True,  'method': 'mean', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
-    {'has_guard': False, 'method': 'mean', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
+    # {'has_guard': True,  'method': 'mean', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
+    # {'has_guard': False, 'method': 'mean', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
 
     # {'has_guard': False,  'method': 'softmax', 'redundancy': 1, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
     # {'has_guard': False,  'method': 'softmax', 'redundancy': 2, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
