@@ -4,7 +4,8 @@ Utility functions
 
 '''
 
-
+from typing import Any, Iterable, List, Optional
+import re
 
 def transform_runs(input_list, is_equivalent, transform_func):
     """
@@ -117,3 +118,170 @@ def bg_cyan(text):
 
 def bg_white(text):
     return f"\033[47m{str(text)}\033[0m"
+
+def colored(x):
+    # Define the ANSI escape codes for the desired colors
+    BLACK = '\033[30m'
+    YELLOW = '\033[33m'
+    RED = '\033[31m'
+    RESET = '\033[0m'  # Resets the color to default terminal color
+
+    # Retrieve the single torch value
+    if isinstance(x, tuple):
+        string, value = x
+    else:
+        value = x.item()
+        string = f'{value:>.1f}'
+
+    # Determine the color based on the value
+    if 0.0 <= value < 0.4:
+        color = BLACK
+    elif 0.4 <= value < 0.6:
+        color = YELLOW
+    else:
+        color = RED
+    return f'{color}{string}{RESET}'
+
+def strip_ansi_codes(input_str):
+    """
+    Strips all ANSI codes from the given string.
+
+    Parameters:
+    - input_str: The string from which to strip ANSI codes.
+
+    Returns:
+    - A string with all ANSI codes removed.
+    """
+    # ANSI escape code pattern
+    ansi_escape_pattern = re.compile(r'''
+        \x1b  # ESC
+        \[    # [
+        [0-?]*  # 0-9: Parameters for ANSI code
+        [ -/]*  # Intermediate bytes
+        [@-~]  # Final byte
+    ''', re.VERBOSE)
+    return ansi_escape_pattern.sub('', input_str)
+
+
+# @@@@@@@@@@
+
+test_cases = [
+    ("\x1b[31m1.2\x1b[0m", "1.2"),
+    ("\x1b[1;32mHello\x1b[0m \x1b[34mWorld!\x1b[0m", "Hello World!"),
+    ("Normal string", "Normal string"),
+    ("\x1b[0;31;51mRed Background Text\x1b[0m", "Red Background Text"),
+    ("", ""),
+]
+
+all_passed = True
+for i, (test_input, expected_output) in enumerate(test_cases):
+    result = strip_ansi_codes(test_input)
+    assert result == expected_output, f"Test {i + 1}: Failed - Expected '{expected_output}', got '{result}'"
+
+# @@@@@@@@@@
+
+
+##################################################
+# Print Grids
+
+def calculate_column_widths(row: Iterable[Iterable[Any]]) -> List[int]:
+    """Calculate and return the maximum width needed for each column across all rows and sublists."""
+    column_widths = []
+    for column in row:
+        for i, item in enumerate(column):
+            item_length = len(strip_ansi_codes(str(item)))  # Use strip_ansi_codes to get the true length
+            if len(column_widths) <= i:
+                column_widths.append(item_length)
+            else:
+                column_widths[i] = max(column_widths[i], item_length)
+    return column_widths
+
+def print_row(row: Iterable[Iterable[Any]], column_widths: List[int], label: str, max_label_len: int) -> None:
+    """Print a single row of data."""
+    print(f"{label.rjust(max_label_len)}", end=" ")
+    for i, item in enumerate(row):
+        # Use strip_ansi_codes to ensure proper length calculation for justification
+        item_str = str(item)
+        stripped_item = strip_ansi_codes(item_str)
+        formatted_item = f'{item:.2f}' if isinstance(item, float) else item_str
+        padding = column_widths[i] - len(stripped_item) + len(item_str)
+        print(f"{formatted_item.rjust(padding)}", end=" ")
+    print()
+
+def print_grid(data: Iterable[Iterable[Iterable[Any]]], labels: Optional[List[str]] = None) -> None:
+    """Prints a grid of data with optional labels."""
+    if labels:
+        max_label_len = max(len(label) for label in labels)
+    else:
+        max_label_len = 0
+
+    for row in data:
+        column_widths = calculate_column_widths(row)
+        for label, sub_row in zip(labels, row):
+            print_row(sub_row, column_widths, label, max_label_len)
+        print("-" * (sum(column_widths) + max_label_len + len(row) * 3))
+
+# @@@@@@@@@@
+if False:
+    # Assuming ANSI coded strings or any data to demonstrate
+    data = [
+        [
+            ["\033[94mItem1\033[0m", 200, 3.14],
+            ["\033[92mItem2\033[0m", 150, 2.718]
+        ],
+        [
+            ["\033[91mItem3\033[0m", 300, 1.618],
+            ["\033[93mItem4\033[0m", 250, 0.577]
+        ]
+    ]
+    labels = ["Label 1", "Label 2"]
+    print_grid(data, labels)
+# @@@@@@@@@@
+
+
+
+##################################################
+#
+
+# NOTE: this is an idea for preloading weights with superpositions of symbols
+
+# def generate_combinations(elements, max_length):
+#     """
+#     Generate all possible combinations of the elements up to a specified maximum length.
+
+#     :param elements: A list of elements to combine.
+#     :param max_length: The maximum length of the combinations.
+
+#     Example sizes of combos:
+
+#         len(generate_combinations(range(2), 2))  ==  3
+#         len(generate_combinations(range(3), 2))  ==  6
+#         len(generate_combinations(range(3), 3))  ==  7
+#         len(generate_combinations(range(4), 2))  ==  10
+#         len(generate_combinations(range(4), 3))  ==  14
+#         len(generate_combinations(range(4), 4))  ==  15
+#         len(generate_combinations(range(5), 2))  ==  15
+#         len(generate_combinations(range(5), 3))  ==  25
+#         len(generate_combinations(range(5), 4))  ==  30
+#         len(generate_combinations(range(5), 5))  ==  31
+#     """
+#     # Store all combinations in a list
+#     all_combinations = []
+
+#     # Generate combinations for every length up to max_length
+#     for length in range(1, max_length + 1):
+#         # itertools.combinations generates combinations of the current length
+#         combinations = itertools.combinations(elements, length)
+#         # Add the current combinations to the total list
+#         all_combinations.extend(combinations)
+
+#     return all_combinations
+
+# # Test the function
+# elements = ['a', 'b', 'c', 'd', 'e']  # A list of length 5
+# max_length = 3  # Generate combinations up to length 3
+
+# # Generate and print all combinations
+# combinations = generate_combinations(elements, max_length)
+# for combo in combinations:
+#     print(combo)
