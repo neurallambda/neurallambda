@@ -181,6 +181,28 @@ for i, (test_input, expected_output) in enumerate(test_cases):
 # @@@@@@@@@@
 
 
+def format_number(num):
+    """
+    Formats a number with suffixes 'k', 'M', or 'B' for thousands, millions, and billions respectively.
+
+    Parameters:
+    - num (int): The number to format.
+
+    Returns:
+    - str: The formatted number as a string.
+    """
+    if abs(num) >= 1_000_000_000:  # Billion
+        formatted_num = f"{num / 1_000_000_000:.1f}B"
+    elif abs(num) >= 1_000_000:  # Million
+        formatted_num = f"{num / 1_000_000:.1f}M"
+    elif abs(num) >= 1_000:  # Thousand
+        formatted_num = f"{num / 1_000:.1f}k"
+    else:
+        formatted_num = str(num)
+
+    return formatted_num
+
+
 ##################################################
 # Print Grids
 

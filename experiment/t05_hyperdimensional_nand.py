@@ -1,6 +1,11 @@
 '''.
 
-* So you can concat 2 vectors,
+Learnable NANDing of input vecs
+
+----------
+DESCRIPTION:
+
+* So you can concat 2(+) vectors with hstack.
 
 * But what if you want A AND NOT B?
 
@@ -17,6 +22,23 @@
 *  cs1 * cs2 == And
 *  cs1 + cs2 == Or
 *  1 - cs == Not
+
+
+----------
+RESULTS:
+
+Works amazing. Trains fast. Dropout friendly. Noise in inputs is friendly.
+
+With too-few output vecs, it can still learn to perfect accuracy, demonstrating
+superposition.
+
+vec_size of 16 is great.
+
+You can MiTM softmax over the choices to, I suspect, disincentivize
+superposition. It takes more params to learn to full accuracy, but works fine,
+and I think gives cleaner separation in latent space.
+
+
 
 '''
 
@@ -183,11 +205,11 @@ class NAND_Exhaustive(nn.Module):
 
 
 class NAND(nn.Module):
-    '''Given n_vecs in, return a bunch of softmax'd similarities to internal weights.
+    '''Given n_vecs in, return a bunch of similarities to internal weights.
 
     But it's not just the sim of input vecs to weight vecs. We will collect the
-    similarities of input vecs to respective weight vecs, and then create
-    possibly NOT them before ANDing them all together.
+    similarities of input vecs to respective weight vecs, and then possibly NOT
+    them before ANDing them all together.
 
     2 flavors of this are possible:
 
@@ -241,7 +263,7 @@ class NAND(nn.Module):
         return output
 
 
-class Model(nn.Module):
+class SymModel(nn.Module):
     def __init__(self, vec_size, n_vecs, n_choices, redundancy, method='softmax'):
         super(Model, self).__init__()
 
@@ -260,19 +282,64 @@ class Model(nn.Module):
         with torch.no_grad():
             self.vecs[:] = F.normalize(self.vecs, dim=0)
 
+        self.dropout = nn.Dropout(0.2)
+
     def forward(self, query: torch.Tensor):
         choices = self.choice(query)
+
+        # choices = self.dropout(choices)
+
+        # # Experiment with softmax
+        # eps = 1e-6
+        # choices = (choices).clip(eps, 1-eps)  # note: clips neg similarities
+        # choices = torch.log((choices) / (1 - choices))  # maps [0,1] -> [-inf, inf]
+        # choices = choices.softmax(dim=1)
+
+        out = torch.einsum('vc, bc -> bv', self.vecs, choices)
+
+        # out = self.dropout(out)
+
+        return out
+
+
+class NNModel(nn.Module):
+    ''' Control model, using standard FFNN '''
+    def __init__(self, vec_size, n_vecs, n_choices, *args, **kwargs):
+        super(Model, self).__init__()
+
+        self.vec_size = vec_size
+        self.n_vecs = n_vecs
+        self.n_choices = n_choices
+
+        H = 8
+
+        self.ffnn = nn.Sequential(
+            nn.Linear(n_vecs * vec_size, H),
+            nn.ReLU(),
+            nn.Linear(H, n_choices),
+            nn.Sigmoid()
+        )
+
+        # use choice to select an output vec
+        self.vecs = nn.Parameter(torch.randn(vec_size, n_choices))
+
+
+    def forward(self, query: torch.Tensor):
+        choices = self.ffnn(torch.hstack(query))
         return torch.einsum('vc, bc -> bv', self.vecs, choices)
 
 
-VEC_SIZE = 128
-sym_map = Sym.SymbolMapper(VEC_SIZE, Sym.chars + Sym.nums, device=DEVICE)
-project = sym_map.project
-unproject = sym_map.unproject
+
 
 # @@@@@@@@@@
 
 if False:
+
+    VEC_SIZE = 128
+    sym_map = Sym.SymbolMapper(VEC_SIZE, Sym.chars + Sym.nums, device=DEVICE)
+    project = sym_map.project
+    unproject = sym_map.unproject
+
     a = project('A')
     b = project('B')
     c = project('C')
@@ -339,7 +406,7 @@ def train_and_report(n_choices, redundancy, vec_size, method):
             trg = batch['out']
 
             # TEST NOISE
-            NOISE_LVL = 1e-4
+            NOISE_LVL = 1e-3
             src[0] = src[0] + torch.randn_like(src[0]) * NOISE_LVL
             src[1] = src[1] + torch.randn_like(src[1]) * NOISE_LVL
             src[2] = src[2] + torch.randn_like(src[1]) * NOISE_LVL
@@ -406,17 +473,19 @@ binary_functions = {
 ####################
 
 
+# PICK WHICH MODEL TO USE
+# Model = NNModel
+Model = SymModel
+
 DEVICE = 'cuda'
-VEC_SIZE = 128
+VEC_SIZE = 64
 BATCH_SIZE = 16
-NUM_EPOCHS = 30
+NUM_EPOCHS = 50
 LR = 1e-2
 all_symbols = [True, False] + list(binary_functions.keys())
 sym_map = Sym.SymbolMapper(VEC_SIZE, all_symbols, device=DEVICE)
 project = sym_map.project
 unproject = sym_map.unproject
-
-N_CHOICES = 8
 
 dataset = []
 
@@ -443,8 +512,12 @@ experiments = [
     # {'method': 'max', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
     # {'method': 'max', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
 
-    {'method': 'softmax', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
-    {'method': 'softmax', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
+
+    {'method': 'softmax', 'redundancy': R, 'n_choices': 4, 'vec_size':VEC_SIZE},
+    {'method': 'softmax', 'redundancy': R, 'n_choices': 8, 'vec_size':VEC_SIZE},
+    {'method': 'softmax', 'redundancy': R, 'n_choices': 16, 'vec_size':VEC_SIZE},
+    # {'method': 'softmax', 'redundancy': R, 'n_choices': 56, 'vec_size':VEC_SIZE},
+
 
 
     # {'method': 'gumbel_softmax', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
@@ -470,6 +543,15 @@ experiments = [
 for e in experiments:
     model = train_and_report(**e)
 
+
+
+##########
+# Hand Testing
+
+for i in range(model.n_choices):
+    print(f'{i} {unproject(model.vecs[:, i], return_sim=True)}')
+
+
 def f(nm, x, y):
     trg = binary_functions[nm](x, y)
     out = model([
@@ -481,8 +563,14 @@ def f(nm, x, y):
     uout = unproject(out.squeeze(0))
     print(f'{nm.upper()} {x} {y} == {uout}.  trg={trg}')
 
+'''
+
 for fn_name in binary_functions.keys():
     print()
     for x in [True, False]:
         for y in [True, False]:
             f(fn_name, x, y)
+
+'''
+
+print('done')
