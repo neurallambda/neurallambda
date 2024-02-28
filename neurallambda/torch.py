@@ -180,6 +180,9 @@ class Diagnose(nn.Module):
 
 ##################################################
 # NuLinear
+#
+#   PROVENANCE: experiment/t04_addition_sandbox_04_maps_02.py
+#
 
 class NuLinear(nn.Module):
     def __init__(self,
@@ -277,6 +280,9 @@ class NuLinear(nn.Module):
 
 ##################################################
 # Choice
+#
+#   PROVENANCE: experiment/t04_addition_sandbox_04_maps_02.py
+#
 
 class Choice(nn.Module):
     ''' n-vectors -> R^m '''
@@ -301,7 +307,7 @@ class Choice(nn.Module):
         self.init_extra_weight = init_extra_weight
         self.fwd_extra_weight_dim = fwd_extra_weight_dim
 
-        assert method in {'max', 'softmax', 'sum', 'mean'}
+        assert method in {'max', 'softmax', 'gumbel_softmax', 'sum', 'mean'}
 
         self.ff = NuLinear(
             vec_size * n_vecs,
@@ -345,7 +351,7 @@ class Choice(nn.Module):
             outs = torch.max(outs.view(batch_size, sz, self.redundancy), dim=2).values
             if hg: g = torch.max(g.view(batch_size, sz, self.redundancy), dim=2).values
 
-        elif self.method == 'softmax':
+        elif self.method in {'softmax', 'gumbel_softmax'}:
             # softmax over the whole redundant vec, then sum each redundant chunk
             # clip because of singularities in tan and log(p/(1-p))
             outs = (outs).clip(eps, 1-eps)  # note: clips neg similarities
@@ -354,7 +360,12 @@ class Choice(nn.Module):
 
             # outs = (outs).clip(-1+eps, 1-eps)
             # outs = torch.tan(outs * pi / 2)  # maps [-1,1] -> [-inf, inf]
-            outs = torch.sum(outs.softmax(dim=1).view(batch_size, sz, self.redundancy), dim=2)
+
+            if self.method == 'softmax':
+                outs = torch.sum(outs.softmax(dim=1).view(batch_size, sz, self.redundancy), dim=2)
+            elif self.method == 'gumbel_softmax':
+                outs = torch.sum(F.gumbel_softmax(outs, dim=1).view(batch_size, sz, self.redundancy), dim=2)
+
             if hg:
                 g = (g).clip(eps, 1-eps)
                 g = torch.log((g) / (1 - g))
