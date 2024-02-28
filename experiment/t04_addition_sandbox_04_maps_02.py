@@ -318,7 +318,8 @@ class Choice(nn.Module):
                  redundancy,
                  has_guard=False,
                  method='softmax',
-                 init_extra_weight=None
+                 init_extra_weight=None,
+                 fwd_extra_weight_dim=0,
                  ):
         super(Choice, self).__init__()
         self.vec_size = vec_size
@@ -327,7 +328,8 @@ class Choice(nn.Module):
         self.redundancy = redundancy
         self.has_guard = has_guard
         self.method = method
-        assert method in {'max', 'softmax', 'sum', 'mean'}
+        self.fwd_extra_weight_dim=fwd_extra_weight_dim
+        assert method in {'max', 'softmax', 'gumbel_softmax', 'sum', 'mean'}
 
         self.ff = NuLinear(
             vec_size * n_vecs,
@@ -355,9 +357,14 @@ class Choice(nn.Module):
 
         self.dropout = nn.Dropout(0.0)
 
-    def forward(self, inp, extra_weights=None):
+    def forward(self, inp, extra_weights=None, eps=1e-6):
+        # inp arity=2
         batch_size = inp[0].size(0)
         sinp = torch.hstack(inp)
+
+        # inp arity=1
+        # batch_size = inp.size(0)
+        # sinp = inp
 
         outs = self.ff(sinp, extra_weights)
         outs = self.dropout(outs)
@@ -367,16 +374,16 @@ class Choice(nn.Module):
             g = self.guard(sinp)
             g = self.dropout(g)
 
+
+        sz = self.n_choices + self.fwd_extra_weight_dim // self.redundancy
         if self.method == 'max':
-            outs = torch.max(outs.view(batch_size, self.n_choices, self.redundancy), dim=2).values
-            if hg: g = torch.max(g.view(batch_size, self.n_choices, self.redundancy), dim=2).values
+            outs = torch.max(outs.view(batch_size, sz, self.redundancy), dim=2).values
+            if hg: g = torch.max(g.view(batch_size, sz, self.redundancy), dim=2).values
 
-        elif self.method == 'softmax':
+
+        elif self.method in {'softmax', 'gumbel_softmax'}:
             # softmax over the whole redundant vec, then sum each redundant chunk
-            if DEBUG:
-                breakpoint()
-            eps = 1e-6
-
+            # clip because of singularities in tan and log(p/(1-p))
             outs = (outs).clip(eps, 1-eps)  # note: clips neg similarities
             outs = torch.log((outs) / (1 - outs))  # maps [0,1] -> [-inf, inf]
             # outs = torch.tan((outs - 0.5) * pi)  # maps [0,1] -> [-inf, inf]
@@ -384,19 +391,43 @@ class Choice(nn.Module):
             # outs = (outs).clip(-1+eps, 1-eps)
             # outs = torch.tan(outs * pi / 2)  # maps [-1,1] -> [-inf, inf]
 
-            outs = torch.sum(outs.softmax(dim=1).view(batch_size, self.n_choices, self.redundancy), dim=2)
+            if self.method == 'softmax':
+                outs = torch.sum(outs.softmax(dim=1).view(batch_size, sz, self.redundancy), dim=2)
+            elif self.method == 'gumbel_softmax':
+                outs = torch.sum(F.gumbel_softmax(outs, dim=1).view(batch_size, sz, self.redundancy), dim=2)
+
             if hg:
                 g = (g).clip(eps, 1-eps)
                 g = torch.log((g) / (1 - g))
-                g = torch.sum(g.softmax(dim=1).view(batch_size, self.n_choices, self.redundancy), dim=2)
+                g = torch.sum(g.softmax(dim=1).view(batch_size, sz, self.redundancy), dim=2)
+
+
+        # elif self.method == 'softmax':
+        #     # softmax over the whole redundant vec, then sum each redundant chunk
+        #     if DEBUG:
+        #         breakpoint()
+        #     eps = 1e-6
+
+        #     outs = (outs).clip(eps, 1-eps)  # note: clips neg similarities
+        #     outs = torch.log((outs) / (1 - outs))  # maps [0,1] -> [-inf, inf]
+        #     # outs = torch.tan((outs - 0.5) * pi)  # maps [0,1] -> [-inf, inf]
+
+        #     # outs = (outs).clip(-1+eps, 1-eps)
+        #     # outs = torch.tan(outs * pi / 2)  # maps [-1,1] -> [-inf, inf]
+
+        #     outs = torch.sum(outs.softmax(dim=1).view(batch_size, sz, self.redundancy), dim=2)
+        #     if hg:
+        #         g = (g).clip(eps, 1-eps)
+        #         g = torch.log((g) / (1 - g))
+        #         g = torch.sum(g.softmax(dim=1).view(batch_size, sz, self.redundancy), dim=2)
 
         elif self.method == 'sum':
-            outs = torch.sum(outs.view(batch_size, self.n_choices, self.redundancy), dim=2)
-            if hg: g = torch.sum(g.view(batch_size, self.n_choices, self.redundancy), dim=2)
+            outs = torch.sum(outs.view(batch_size, sz, self.redundancy), dim=2)
+            if hg: g = torch.sum(g.view(batch_size, sz, self.redundancy), dim=2)
 
         elif self.method == 'mean':
-            outs = torch.mean(outs.view(batch_size, self.n_choices, self.redundancy), dim=2)
-            if hg: g = torch.mean(g.view(batch_size, self.n_choices, self.redundancy), dim=2)
+            outs = torch.mean(outs.view(batch_size, sz, self.redundancy), dim=2)
+            if hg: g = torch.mean(g.view(batch_size, sz, self.redundancy), dim=2)
 
         if hg:
             outs = outs * g
@@ -430,7 +461,13 @@ class ChooseVec(nn.Module):
         self.out_symbols = nn.Parameter(torch.randn((n_choices, vec_size)))
 
     def forward(self, input):
+
+        # inp arity = 2
         x1 = self.choice(input)
+
+        # # inp arity = 1
+        # x1 = self.choice(input[0] * input[1])
+
         x2 = einsum('cv, bc -> bv', self.out_symbols, x1)
         return x2
 
@@ -490,6 +527,11 @@ experiments = [
 
     {'has_guard': True,  'method': 'softmax', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
     {'has_guard': False, 'method': 'softmax', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
+
+
+    # {'has_guard': True,  'method': 'gumbel_softmax', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
+    # {'has_guard': False, 'method': 'gumbel_softmax', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
+
 
     # {'has_guard': True,  'method': 'sum', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
     # {'has_guard': False, 'method': 'sum', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},

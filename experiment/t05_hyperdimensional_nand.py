@@ -79,51 +79,9 @@ DEVICE = 'cuda'
 torch.set_printoptions(precision=3, sci_mode=False)
 torch.manual_seed(152)
 
-N = 256
-sym_map = Sym.SymbolMapper(N, Sym.chars + Sym.nums, device=DEVICE)
-project = sym_map.project
-unproject = sym_map.unproject
 
-A = project('A')
-B = project('B')
-Q = project('Q')
-R = project('R')
-A_CAT_B = torch.concat([A, B])
-A_CAT_Q = torch.concat([A, Q])
-Q_CAT_B = torch.concat([Q, B])
-R_CAT_Q = torch.concat([R, Q])
-
-def sim_A_AND_NOT_B(query):
-    Q1_, Q2_ = torch.split(F.normalize(query, dim=0), N)
-    A_,  B_  = torch.split(F.normalize(A_CAT_B, dim=0), N)
-    return ((A_ @ Q1_) * 2) *  ((0.5 - B_ @ Q2_) * 2)
-
-print('Should have low sim: ', sim_A_AND_NOT_B(A_CAT_B))
-print('Should have high sim:', sim_A_AND_NOT_B(A_CAT_Q))
-
-print('Should have low sim: ',  sim_A_AND_NOT_B(A_CAT_B + torch.randn(N*2, device=DEVICE) * 1e-1))
-print('Should have high sim:', sim_A_AND_NOT_B(A_CAT_Q + torch.randn(N*2, device=DEVICE) * 1e-1))
-
-print('\n'*3)
-
-def sim_A_OR_NOT_B(query):
-    # convert A OR NOT B
-    #   to
-    # NOT (NOT A AND B)
-    Q1_, Q2_ = torch.split(F.normalize(query, dim=0), N)
-    A_,  B_  = torch.split(F.normalize(A_CAT_B, dim=0), N)
-    AQ = (0.5 - A_ @ Q1_) * 2 # NOT A
-    BQ = (B_ @ Q2_) * 2 # B
-    return 1 - AQ * BQ # NOT (NOT A AND B) ~aka~ A OR NOT B
-
-print('Should have high sim:', sim_A_OR_NOT_B(R_CAT_Q)) # high bc "not B"
-print('Should have high sim:', sim_A_OR_NOT_B(A_CAT_Q)) # high bc both
-print('Should have high sim:', sim_A_OR_NOT_B(A_CAT_B)) # high bc A, even though B should be not'd
-print('Should have low sim :', sim_A_OR_NOT_B(Q_CAT_B))
-
-
-##########
-
+##################################################
+#
 
 '''
 
@@ -265,7 +223,7 @@ class NAND(nn.Module):
 
 class SymModel(nn.Module):
     def __init__(self, vec_size, n_vecs, n_choices, redundancy, method='softmax'):
-        super(Model, self).__init__()
+        super(SymModel, self).__init__()
 
         self.vec_size = vec_size
         self.n_vecs = n_vecs
@@ -305,7 +263,7 @@ class SymModel(nn.Module):
 class NNModel(nn.Module):
     ''' Control model, using standard FFNN '''
     def __init__(self, vec_size, n_vecs, n_choices, *args, **kwargs):
-        super(Model, self).__init__()
+        super(NNModel, self).__init__()
 
         self.vec_size = vec_size
         self.n_vecs = n_vecs
@@ -327,8 +285,6 @@ class NNModel(nn.Module):
     def forward(self, query: torch.Tensor):
         choices = self.ffnn(torch.hstack(query))
         return torch.einsum('vc, bc -> bv', self.vecs, choices)
-
-
 
 
 # @@@@@@@@@@
@@ -509,36 +465,11 @@ R = 1
 
 experiments = [
 
-    # {'method': 'max', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
-    # {'method': 'max', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
-
-
     {'method': 'softmax', 'redundancy': R, 'n_choices': 4, 'vec_size':VEC_SIZE},
     {'method': 'softmax', 'redundancy': R, 'n_choices': 8, 'vec_size':VEC_SIZE},
     {'method': 'softmax', 'redundancy': R, 'n_choices': 16, 'vec_size':VEC_SIZE},
-    # {'method': 'softmax', 'redundancy': R, 'n_choices': 56, 'vec_size':VEC_SIZE},
 
-
-
-    # {'method': 'gumbel_softmax', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
-    # {'method': 'gumbel_softmax', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
-
-
-    # {'method': 'sum', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
-    # {'method': 'sum', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
-
-    # {'method': 'mean', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
-    # {'method': 'mean', 'redundancy': R, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
-
-    # {'method': 'softmax', 'redundancy': 1, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
-    # {'method': 'softmax', 'redundancy': 2, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
-    # {'method': 'softmax', 'redundancy': 4, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
-    # {'method': 'softmax', 'redundancy': 8, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
-    # {'method': 'softmax', 'redundancy': 16, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
-    # {'method': 'softmax', 'redundancy': 32, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
-    # {'method': 'softmax', 'redundancy': 64, 'n_choices': N_CHOICES, 'vec_size':VEC_SIZE},
-
-    ]
+]
 
 for e in experiments:
     model = train_and_report(**e)
@@ -574,3 +505,49 @@ for fn_name in binary_functions.keys():
 '''
 
 print('done')
+
+
+##################################################
+# Sandbox
+
+N = 256
+sym_map = Sym.SymbolMapper(N, Sym.chars + Sym.nums, device=DEVICE)
+project = sym_map.project
+unproject = sym_map.unproject
+
+A = project('A')
+B = project('B')
+Q = project('Q')
+R = project('R')
+A_CAT_B = torch.concat([A, B])
+A_CAT_Q = torch.concat([A, Q])
+Q_CAT_B = torch.concat([Q, B])
+R_CAT_Q = torch.concat([R, Q])
+
+def sim_A_AND_NOT_B(query):
+    Q1_, Q2_ = torch.split(F.normalize(query, dim=0), N)
+    A_,  B_  = torch.split(F.normalize(A_CAT_B, dim=0), N)
+    return ((A_ @ Q1_) * 2) *  ((0.5 - B_ @ Q2_) * 2)
+
+print('Should have low sim: ', sim_A_AND_NOT_B(A_CAT_B))
+print('Should have high sim:', sim_A_AND_NOT_B(A_CAT_Q))
+
+print('Should have low sim: ',  sim_A_AND_NOT_B(A_CAT_B + torch.randn(N*2, device=DEVICE) * 1e-1))
+print('Should have high sim:', sim_A_AND_NOT_B(A_CAT_Q + torch.randn(N*2, device=DEVICE) * 1e-1))
+
+print('\n'*3)
+
+def sim_A_OR_NOT_B(query):
+    # convert A OR NOT B
+    #   to
+    # NOT (NOT A AND B)
+    Q1_, Q2_ = torch.split(F.normalize(query, dim=0), N)
+    A_,  B_  = torch.split(F.normalize(A_CAT_B, dim=0), N)
+    AQ = (0.5 - A_ @ Q1_) * 2 # NOT A
+    BQ = (B_ @ Q2_) * 2 # B
+    return 1 - AQ * BQ # NOT (NOT A AND B) ~aka~ A OR NOT B
+
+print('Should have high sim:', sim_A_OR_NOT_B(R_CAT_Q)) # high bc "not B"
+print('Should have high sim:', sim_A_OR_NOT_B(A_CAT_Q)) # high bc both
+print('Should have high sim:', sim_A_OR_NOT_B(A_CAT_B)) # high bc A, even though B should be not'd
+print('Should have low sim :', sim_A_OR_NOT_B(Q_CAT_B))
