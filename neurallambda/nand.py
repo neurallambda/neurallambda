@@ -21,7 +21,7 @@ PROVENANCE:
 
 from neurallambda.torch import cosine_similarity
 from neurallambda.util import format_number
-from typing import List
+from typing import List, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -37,7 +37,7 @@ class NAND(nn.Module):
     between the the not/not not'd version of the input before AND-aggregation.
 
     '''
-    def __init__(self, vec_size, n_vecs, n_choices, redundancy):
+    def __init__(self, vec_size, n_vecs, n_choices, redundancy, method):
         super(NAND, self).__init__()
 
         self.vec_size = vec_size
@@ -57,7 +57,10 @@ class NAND(nn.Module):
         with torch.no_grad():
             self.weight[:] = F.normalize(self.weight, dim=1)
 
-    def forward(self, query: torch.Tensor):
+
+        self.scale = nn.Parameter(torch.tensor([redundancy * 0.1])) # TODO: this is a total guess
+
+    def forward(self, query: Union[List[torch.Tensor], torch.Tensor], eps=1e-6):
         # handle either lists or pre-hstacked inputs
         if isinstance(query, list):
             query = torch.hstack(query)
@@ -76,8 +79,41 @@ class NAND(nn.Module):
         interpolated = nw * cos_sim + (1 - nw) * (1 - cos_sim)  # [batch, n_choices * redundancy, n_vecs]
 
         # product along n_vecs dimension to aggregate the NAND logic
-        output = interpolated.prod(dim=2)  # [batch, n_choices * redundancy]
-        return output
+        outs = interpolated.prod(dim=2)  # [batch, n_choices * redundancy]
+
+        # Aggregate redundancy
+        sz = self.n_choices
+        batch_size = query.size(0)
+
+        if self.method == 'max':
+            outs = torch.max(outs.view(batch_size, sz, self.redundancy), dim=2).values
+
+        elif self.method in {'softmax', 'gumbel_softmax'}:
+            # softmax over the whole redundant vec, then sum each redundant chunk
+            # clip because of singularities in tan and log(p/(1-p))
+            outs = (outs).clip(eps, 1-eps)  # note: clips neg similarities
+            outs = torch.log((outs) / (1 - outs))  # maps [0,1] -> [-inf, inf]
+            # outs = torch.tan((outs - 0.5) * pi)  # maps [0,1] -> [-inf, inf]
+
+            # outs = (outs).clip(-1+eps, 1-eps)
+            # outs = torch.tan(outs * pi / 2)  # maps [-1,1] -> [-inf, inf]
+
+            if self.method == 'softmax':
+                outs = torch.sum(outs.softmax(dim=1).view(batch_size, sz, self.redundancy), dim=2)
+            elif self.method == 'gumbel_softmax':
+                outs = torch.sum(F.gumbel_softmax(outs, dim=1).view(batch_size, sz, self.redundancy), dim=2)
+
+        elif self.method == 'sum':
+            outs = torch.sum(outs.view(batch_size, sz, self.redundancy), dim=2)
+
+        elif self.method == 'mean':
+            outs = torch.mean(outs.view(batch_size, sz, self.redundancy), dim=2)
+
+        if self.method in {'sum', 'mean'}:
+            outs = torch.sigmoid(outs * self.scale)
+
+
+        return outs
 
 
 class FwdNAND(nn.Module):
