@@ -57,6 +57,9 @@ class NAND(nn.Module):
         with torch.no_grad():
             self.weight[:] = F.normalize(self.weight, dim=1)
 
+            # init nand_weight to not contain NOTs
+            NAND_BIAS = 3.0
+            self.nand_weight[:] = torch.ones_like(self.nand_weight) + NAND_BIAS
 
         self.scale = nn.Parameter(torch.tensor([redundancy * 0.1])) # TODO: this is a total guess
 
@@ -76,10 +79,21 @@ class NAND(nn.Module):
 
         # interpolate between cos_sim and 1-cos_sim
         nw = self.nand_weight.unsqueeze(0).sigmoid()  # Expand nand_weight for broadcasting
+
+        # interpolate between x and 1-x. This sends 1.0 (parallel) to 0.0
+        # (orthogonal) and vice versa.
         interpolated = nw * cos_sim + (1 - nw) * (1 - cos_sim)  # [batch, n_choices * redundancy, n_vecs]
+
+        # Dont do this, it sends 1.0 to -1.0 and vice versa, and orthogonal
+        # stays orthogonal. This isn't the sense of "NOT" that I want.
+        #
+        # interpolated = nw * cos_sim + (1 - nw) * (-cos_sim)  # [batch, n_choices * redundancy, n_vecs]
 
         # product along n_vecs dimension to aggregate the NAND logic
         outs = interpolated.prod(dim=2)  # [batch, n_choices * redundancy]
+
+        ##########
+        # Redundancy stuff
 
         # Aggregate redundancy
         sz = self.n_choices
@@ -111,7 +125,6 @@ class NAND(nn.Module):
 
         if self.method in {'sum', 'mean'}:
             outs = torch.sigmoid(outs * self.scale)
-
 
         return outs
 
