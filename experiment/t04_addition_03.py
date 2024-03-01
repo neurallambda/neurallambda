@@ -118,10 +118,11 @@ import pandas as pd
 import itertools
 import math
 import warnings
-from typing import Any, Iterable, List, Optional
+from typing import Any, Iterable, List, Optional, Tuple
 from neurallambda.nand import NAND, FwdNAND
 
 torch.manual_seed(152)
+torch.set_printoptions(precision=3, sci_mode=False)
 
 DEBUG = False
 
@@ -138,13 +139,13 @@ WD = 0.0
 
 INIT_SHARPEN = 2.0
 
-NUM_EPOCHS = 100
+NUM_EPOCHS = 60
 
-# CHOICE_METHOD = 'softmax'
+CHOICE_METHOD = 'softmax'
 # CHOICE_METHOD = 'max'
 # CHOICE_METHOD = 'sum'
 # CHOICE_METHOD = 'mean'
-CHOICE_METHOD = 'gumbel_softmax'
+# CHOICE_METHOD = 'gumbel_softmax'
 CHOICE_REDUNDANCY = 4
 
 
@@ -154,8 +155,8 @@ CHOICE_REDUNDANCY = 4
 USE_LOSS    = True
 REG_OP      = False # regularization cheats
 REG_VAL     = False # regularization cheats
-INTERPOLATE = True # interpolate between push/pop/nops
 NOISE_LVL   = 1e-3
+CHEAT = False
 
 # SHARP_SCHED = 'random'
 SHARP_SCHED = 'anneal'
@@ -409,7 +410,7 @@ def run_epoch(model, dl, optimizer, device, train_mode=True):
             if NOISE_LVL is not None:
                 with torch.no_grad():
                     src = src + torch.randn_like(src) * NOISE_LVL
-                    trg = trg + torch.randn_like(trg) * NOISE_LVL
+                    # trg = trg + torch.randn_like(trg) * NOISE_LVL
 
             output, debug = model(src)
 
@@ -610,14 +611,16 @@ def op(n_inp, vec_size):
     ''' (vec, vec, vec) -> scalar
     Useful in stack/queue operations.
     '''
-
     return nn.Sequential(
         NAND(vec_size, n_inp, 2,
              redundancy=CHOICE_REDUNDANCY,
              method=CHOICE_METHOD,),
-        # Choice(vec_size, n_inp, n_choices=2, redundancy=REDUNDANCY, has_guard=True, method=CHOICE_METHOD),
-        Fn(lambda x: (x[:,0] - x[:,1] + 1) / 2, nargs=1), # convert softmax choice to scalar
-        Fn(lambda x: x.unsqueeze(-1)),
+        Fn(lambda x: (x[:,0],
+                      x[:,1]))
+        # Fn(lambda x: (x[:,0].abs(),
+        #               x[:,1].abs()))
+        # Fn(lambda x: (F.gelu(x[:,0]),
+        #               F.gelu(x[:,1])))
     )
 
 
@@ -645,41 +648,45 @@ class Neuralsymbol(nn.Module):
         ##########
         # Type
 
-        n_choices = 3
-        self.sym_type_outs = nn.Parameter(torch.randn(vec_size, n_choices))
+        # n_choices = 3
+        # self.sym_type_outs = nn.Parameter(torch.randn(vec_size, n_choices))
 
-        self.sym_type_choose = NAND(
-            vec_size, 1, n_choices=n_choices,
-            redundancy=CHOICE_REDUNDANCY,
-            method='max'
-        )
+        # self.sym_type_choose = NAND(
+        #     vec_size, 1, n_choices=n_choices,
+        #     redundancy=CHOICE_REDUNDANCY,
+        #     method='max'
+        # )
+
 
         ##########
         # Control Stack
 
-        self.stack_init_vec = torch.randn(vec_size) * 1e-2
+        # self.stack_init_vec = nn.Parameter(torch.randn(vec_size) * 1e-2)
+        self.stack_init_vec = F.normalize(torch.randn(vec_size), dim=0)
 
         self.control_stack = S.Stack(n_control_stack, input_dim)
         self.control_sharp = nn.Parameter(torch.tensor([init_sharpen]))
-        self.pre_c_pop,   self.pre_c_nop  = op(3, vec_size), op(3, vec_size)
-        self.post_c_push, self.post_c_nop = op(4, vec_size), op(4, vec_size)
+        self.pre_c_op = op(3, vec_size)
+        self.post_c_op = op(3, vec_size)
 
+        n_vecs = 3
         n_choices = 6
         self.post_c_outputs = nn.Parameter(torch.randn(vec_size, n_choices))
         with torch.no_grad(): self.post_c_outputs[:] = F.normalize(self.post_c_outputs, dim=0)
         self.post_c_choice = NAND(
-            vec_size, 4, n_choices=n_choices,
+            vec_size, n_vecs, n_choices=n_choices,
             redundancy=CHOICE_REDUNDANCY,
             method=CHOICE_METHOD,
         )
+
 
         ##########
         # Working Stack
 
         self.work_stack = S.Stack(n_work_stack, input_dim)
         self.work_sharp = nn.Parameter(torch.tensor([init_sharpen]))
-        self.pre_w_pop,   self.pre_w_nop   = op(3, vec_size), op(3, vec_size)
-        self.post_w_push, self.post_w_nop  = op(4, vec_size), op(4, vec_size)
+        self.pre_w_op = op(3, vec_size)
+        self.post_w_op = op(3, vec_size)
 
         # Choose calculation
         n_choices = 10
@@ -689,39 +696,31 @@ class Neuralsymbol(nn.Module):
 
         self.post_w_val_choice = NAND(
             vec_size, 2, n_choices,
-            redundancy=CHOICE_REDUNDANCY,
+            redundancy=12,
             method=CHOICE_METHOD,
         )
 
-        # self.post_w_val_choice = FwdNAND(
-        #     vec_size, 2, n_choices,
-        #     # redundancy=CHOICE_REDUNDANCY,
-        #     # method=CHOICE_METHOD,
-        # )
-
-
         # Choose between calculation and defaults
+        n_vecs = 3
         n_choices = 4
-
         self.post_w_outputs = nn.Parameter(torch.randn(vec_size, n_choices))
         with torch.no_grad(): self.post_w_outputs[:] = F.normalize(self.post_w_outputs, dim=0)
 
         self.post_w_choice = NAND(
-            vec_size, 4, n_choices + 1,
+            vec_size, n_vecs, n_choices + 2,
             redundancy=CHOICE_REDUNDANCY,
             method=CHOICE_METHOD,)
-
-
 
 
         ##########
         # Select output
 
+        n_vecs = 4
         n_choices = 5
         self.select_out_outputs = nn.Parameter(torch.randn(vec_size, n_choices))
         with torch.no_grad(): self.select_out_outputs[:] = F.normalize(self.select_out_outputs, dim=0)
         self.select_out_choice = NAND(
-            vec_size, 5, n_choices=n_choices + 2,
+            vec_size, n_vecs, n_choices=n_choices + 2,
             redundancy=CHOICE_REDUNDANCY,
             method=CHOICE_METHOD,
         )
@@ -765,39 +764,36 @@ class Neuralsymbol(nn.Module):
             ##########
             # Pre
 
-            # inp_typ = inp
-            inp_type_c = self.sym_type_choose([inp])
-            inp_typ = einsum('vc, bc -> bv', self.sym_type_outs, inp_type_c)
+            # # inp_typ = inp
+            # inp_type_c = self.sym_type_choose([inp])
+            # inp_typ = einsum('vc, bc -> bv', self.sym_type_outs, inp_type_c)
 
             c_peek = self.control_stack.read()
             w_peek = self.work_stack.read()
-            pre_inp = [c_peek, w_peek, inp_typ]
+            pre_inp = [c_peek, w_peek, inp]
 
             # control stack maybe pop
-            pre_c_pop, pre_c_nop = self.pre_c_pop(pre_inp).squeeze(1), self.pre_c_nop(pre_inp).squeeze(1)
-            if INTERPOLATE: pre_c_pop, pre_c_nop = (pre_c_pop - pre_c_nop + 1) / 2, (pre_c_nop - pre_c_pop + 1) / 2
+            pre_c_pop, pre_c_nop = self.pre_c_op(pre_inp)
             self.control_stack.pop_or_null_op(self.control_sharp, pre_c_pop, pre_c_nop)
 
             # work stack maybe pop
-            pre_w_pop, pre_w_nop = self.pre_w_pop(pre_inp).squeeze(1), self.pre_w_nop(pre_inp).squeeze(1)
-            if INTERPOLATE: pre_w_pop, pre_w_nop = (pre_c_pop - pre_c_nop + 1) / 2, (pre_c_nop - pre_c_pop + 1) / 2
+            pre_w_pop, pre_w_nop = self.pre_w_op(pre_inp)
             self.work_stack.pop_or_null_op(self.work_sharp, pre_w_pop, pre_w_nop)
+
 
             ##########
             # Post
 
             # control stack
-            post_c_inp = [c_peek, w_peek, inp_typ, inp]
-            post_c_push, post_c_nop = self.post_c_push(post_c_inp).squeeze(1), self.post_c_nop(post_c_inp).squeeze(1)
-            if INTERPOLATE: post_c_push, post_c_nop = (post_c_push - post_c_nop + 1) / 2, (post_c_nop - post_c_push + 1) / 2
+            post_c_inp = [c_peek, w_peek, inp]
+            post_c_push, post_c_nop = self.post_c_op(post_c_inp)
             control_choice = self.post_c_choice(post_c_inp) # [batch, n_choice]
             control_val = einsum('bc, vc -> bv', control_choice, self.post_c_outputs)
             self.control_stack.push_or_null_op(self.control_sharp, post_c_push, post_c_nop, control_val)
 
             # work stack
-            post_w_inp = [c_peek, w_peek, inp_typ, inp]
-            post_w_push, post_w_nop = self.post_w_push(post_w_inp).squeeze(1), self.post_w_nop(post_w_inp).squeeze(1)
-            if INTERPOLATE: post_w_push, post_w_nop = (post_c_push - post_c_nop + 1) / 2, (post_c_nop - post_c_push + 1) / 2
+            post_w_inp = [c_peek, w_peek, inp]
+            post_w_push, post_w_nop = self.post_w_op(post_w_inp)
 
             # "sum mod 10" happens here
             post_w_val_choice_inp = [w_peek, inp]
@@ -806,28 +802,21 @@ class Neuralsymbol(nn.Module):
             work_val_choice =self.post_w_val_choice(post_w_val_choice_inp) # [batch, n_choice]
             work_val_option = einsum('bc, vc -> bv', work_val_choice, self.post_w_val_outputs)
 
-
-            post_w_choice_inp = [c_peek, w_peek, inp_typ, inp]
+            post_w_choice_inp = [c_peek, w_peek, inp]
             work_choice = self.post_w_choice(post_w_choice_inp) # [batch, n_choice]
             opts = torch.cat([
                 self.post_w_outputs.expand(batch_size, -1, -1),
                 work_val_option.unsqueeze(2),
+                work_val_option.unsqueeze(2), # for redundancy
             ], dim=2)
             work_val = einsum('bc, bvc -> bv', work_choice, opts)
             self.work_stack.push_or_null_op(self.work_sharp, post_w_push, post_w_nop, work_val)
 
+
             ##########
             # Select out
 
-            # select_out = self.select_out([control_val, work_val, inp_typ])
-            # options = torch.cat([
-            #     work_val.unsqueeze(1),        # [batch, 1, vec_size]
-            #     self.out_sym.unsqueeze(0).repeat(batch_size, 1, 1) # [1, n_out_sym, vec_size]
-            # ], dim=1)
-            # out = einsum('bn, bnv -> bv', select_out, options)
-
-            # select_choice = self.select_out_choice([control_val, work_val, inp_typ],) # [batch, n_choice]
-            select_choice = self.select_out_choice([control_val, work_val, c_peek, w_peek, inp_typ],) # [batch, n_choice]
+            select_choice = self.select_out_choice([c_peek, w_peek, control_val, work_val],) # [batch, n_choice]
             stck = torch.cat([
                 # [vec_size, n_choice-1] -> [batch, vec_size, n_choice-1]
                 self.select_out_outputs.expand(batch_size, -1, -1),
@@ -892,52 +881,115 @@ n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f'Total Params: {format_number(n_params)}')
 
 
-
 ##########
 # Hand code solution
 
-# if False:
-#     # CONTROL STACK CALC
 
-#     model.pre_c_nop
-#     model.pre_c_pop
-#     model.post_c_nop
-#     model.post_c_push
-#     model.post_c_choice
-#     model.post_c_outputs
+def set_weights(nand: nn.Module,
+                out_vecs: torch.Tensor,
+                mappings: List[Tuple[Tuple[str, str], Tuple[int, int], str]],
+                confidence=3):
+    '''set weights in nand and out_vecs according to mappings. confidence scales
+    the initial nand_weight, which gets sigmoided. When confidence=3,
+    sigmoid(3)=0.953, which is confident but with reasonable gradients.
 
-#     # WORK STACK CALC
-#     with torch.no_grad():
-#         model.post_w_outputs # [vec_size, n_choice]
-#         model.post_w_choice.ff.weight # [n_choice * redundancy, vec_size * n_vec]
+    '''
+    redundancy = nand.redundancy
+    with torch.no_grad():
+        nand.nand_weight[:, :] = torch.tensor([confidence])
 
-#         # outputs: set to symbols 0-9
-#         for i in range(10):
-#             model.post_w_outputs[:, i] = project(i)
+        for idx, (vals, out) in enumerate(mappings):
+            out_vecs[:, idx] = project(out) # no redundancy
 
-#         # inputs: set to pairs of symbols 0-9
-#         for i in range(10):
-#             for j in range(10):
-#                 mod = (i + j) % 10
-#                 # account for redundancy
-#                 for r in range(mod * CHOICE_REDUNDANCY, (mod + 1) * CHOICE_REDUNDANCY):
-#                     model.post_w_choice.ff.weight[r, :VEC_SIZE] += project(i)
-#                     model.post_w_choice.ff.weight[r, VEC_SIZE:] += project(j)
+            # add all the vecs into the matcher vec
+            for r_, (ins, nand_weight) in enumerate(vals):
+                r = idx*redundancy + (r_ % redundancy)
 
-#         model.post_w_choice.ff.weight[:] = F.normalize(model.post_w_choice.ff.weight, dim=1)
+                nand.weight[r, :] += torch.concat([project(x) for x in ins])
 
-#     model.pre_w_nop
-#     model.pre_w_pop
-#     model.post_w_nop
-#     model.post_w_push
+                # TODO: buggy to reset nand_weight above, then add this in
+                nand.nand_weight[r, :] += torch.tensor([confidence if x==1 else -confidence for x in nand_weight]).to(DEVICE)
+
+        nand.weight[:]      = F.normalize(nand.weight, dim=1)
+        # nand.nand_weight[:] = F.normalize(nand.nand_weight, dim=1)
+
+
+def reset_cheat(model):
+    # CONTROL
+    # model.pre_c_op
+    # model.post_c_op
+    # model.post_c_choice
+
+    # WORK
+    # model.pre_w_op
+    # model.post_w_op
+
+    # model.post_w_val_choice
+    set_weights(
+        model.post_w_val_choice,
+        model.post_w_val_outputs,
+        [
+            ([((str(i), str(j)), (1, 1)) for i in range(10) for j in range(10) if (i+j)%10==0], '0'),
+            ([((str(i), str(j)), (1, 1)) for i in range(10) for j in range(10) if (i+j)%10==1], '1'),
+            ([((str(i), str(j)), (1, 1)) for i in range(10) for j in range(10) if (i+j)%10==2], '2'),
+            ([((str(i), str(j)), (1, 1)) for i in range(10) for j in range(10) if (i+j)%10==3], '3'),
+            ([((str(i), str(j)), (1, 1)) for i in range(10) for j in range(10) if (i+j)%10==4], '4'),
+            ([((str(i), str(j)), (1, 1)) for i in range(10) for j in range(10) if (i+j)%10==5], '5'),
+            ([((str(i), str(j)), (1, 1)) for i in range(10) for j in range(10) if (i+j)%10==6], '6'),
+            ([((str(i), str(j)), (1, 1)) for i in range(10) for j in range(10) if (i+j)%10==7], '7'),
+            ([((str(i), str(j)), (1, 1)) for i in range(10) for j in range(10) if (i+j)%10==8], '8'),
+            ([((str(i), str(j)), (1, 1)) for i in range(10) for j in range(10) if (i+j)%10==9], '9'),
+        ])
+
+    # model.post_w_choice
+    # model.post_w_outputs
+
+    # set_weights(
+    #     model.post_w_choice,
+    #     model.post_w_outputs,
+    #     [
+    #         ([((), (1, 1), )]),
+    #     ])
+
+
+    # SELECT
+    # model.select_out_choice
+
+    pass
+
+# @@@@@@@@@@
+
+print("TESTING CHEAT")
+reset_cheat(model)
+
+for i in [8,9]:
+    for j in [8,9]:
+        inp = torch.cat([project(str(i)), project(str(j))])
+        choice = model.post_w_val_choice(inp.unsqueeze(0))
+        out = einsum('bc, vc -> bv', choice, model.post_w_val_outputs)
+        v, sim = unproject(out.squeeze(0), return_sim=True)
+        print(f'{i}+{j}={v}, {sim.item():>.3f}, {choice.cpu().detach()}')
+
+
+for i in range(100):
+    for vi in [0, VEC_SIZE]:
+        v, sim = unproject(model.post_w_val_choice.weight[i, vi:vi+VEC_SIZE], return_sim=True)
+        print(f'{v}, {sim.item():>.3f}', end='  |  ')
+    print(model.post_w_val_choice.nand_weight[i].cpu().tolist())
+    # v, sim = unproject(model.post_w_val_outputs[:, i], return_sim=True)
+    # print(f'{v}, {sim.item():>.3f}')
+
+unproject(model.post_w_val_outputs[:, 0], return_sim=True)
+
+BRK
+
+# @@@@@@@@@@
+
 
 
 
 ##########
 # Go
-
-# print('DISABLING GRADIENTS')
-# model.control_sharp.requires_grad = False
 
 opt_params = list(filter(lambda p: p.requires_grad, model.parameters()))
 
@@ -971,7 +1023,6 @@ with torch.no_grad():
 USE_LOSS = True
 REG_OP = False
 REG_VAL = False
-INTERPOLATE = True
 NOISE_LVL = 1e-0
 
 SHARP_SCHED = 'random'
@@ -985,6 +1036,9 @@ optimizer = optim.Adam(opt_params, weight_decay=WD, lr=1e-3)
 '''
 
 for epoch in range(NUM_EPOCHS):
+    if CHEAT:
+        reset_cheat(model)
+
     train_loss = run_epoch(model, train_dl, optimizer, DEVICE, train_mode=True)
 
     # Experiment changing sharpen param
@@ -994,8 +1048,8 @@ for epoch in range(NUM_EPOCHS):
             model.work_sharp[:]    = torch.randint(5, 30, (1,))
 
     if SHARP_SCHED == 'anneal':
-        LO = 8
-        HI = 12
+        LO = 10
+        HI = 20
         with torch.no_grad():
             a = epoch / NUM_EPOCHS
             model.control_sharp[:] = (1-a) * LO + a * HI
