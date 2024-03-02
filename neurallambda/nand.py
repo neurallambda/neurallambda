@@ -36,95 +36,92 @@ class NAND(nn.Module):
     Have a set number of n_choices, and each sub-comparison can interpolate
     between the the not/not not'd version of the input before AND-aggregation.
 
+
+    NOTE: Using redundant NAND computations which result in the same output
+    vector seems to help. This module used to handle redundancy, but, the
+    implementation was incorrect, and I think the correct way of accomplishing
+    this is by multiplying `n_choice` by your desired redundancy, and then
+    handling the aggregation outside of this module. Ex:
+
+    VEC_SIZE = 256
+    BATCH_SIZE = 5
+    N_CHOICES = 13
+    REDUNDANCY = 3
+
+    vecs = torch.randn(VEC_SIZE, N_CHOICES)
+    scale = torch.randn(BATCH_SIZE, N_CHOICES * REDUNDANCY)
+
+    out1 = torch.einsum('vc, bcr -> bvr', vecs, scale.view(BATCH_SIZE, N_CHOICES, REDUNDANCY)).sum(dim=-1)
+    out2 = torch.einsum('vc, bcr -> bv', vecs, scale.view(BATCH_SIZE, N_CHOICES, REDUNDANCY))
+    out3 = torch.einsum('vr, br -> bv', vecs.repeat_interleave(REDUNDANCY, dim=1), scale)  # r_i copies data
+
+    print(out1.shape)
+    print(out2.shape)
+    print(torch.allclose(out1, out2, rtol=1e-4))
+    print(torch.allclose(out1, out3, rtol=1e-4))
+
+
     '''
-    def __init__(self, vec_size, n_vecs, n_choices, redundancy, method):
+    def __init__(self, vec_size, n_vecs, n_choices, clip='leaky_relu'):
         super(NAND, self).__init__()
 
         self.vec_size = vec_size
         self.n_vecs = n_vecs
         self.n_choices = n_choices
-        self.redundancy = redundancy
-        self.method = method
+        self.clip = clip
 
-        self.weight = nn.Parameter(torch.randn(n_choices * redundancy,
-                                               vec_size * n_vecs))
+        assert clip in {'leaky_relu', 'abs', 'none'}
 
-        # interpolation factors. 1 -> cossim. 0 -> 1-cossim
-        self.nand_weight = nn.Parameter(torch.rand(n_choices * redundancy,
-                                                   n_vecs))
+        self.weight = nn.Parameter(torch.randn(n_choices, vec_size * n_vecs))
 
-        # Normalize the main weights
-        with torch.no_grad():
-            self.weight[:] = F.normalize(self.weight, dim=1)
+        # Interpolation factor (gets sigmoided).
+        #   If nw=1, interpolate toward cossim
+        #   If nw=0, interpolate toward 1 - cossim
+        self.nand_weight = nn.Parameter(torch.randn(n_choices, n_vecs))
 
-            # init nand_weight to not contain NOTs
-            NAND_BIAS = 3.0
-            self.nand_weight[:] = torch.ones_like(self.nand_weight) + NAND_BIAS
+        # # Normalize the main weights
+        # with torch.no_grad():
+        #     self.weight[:] = F.normalize(self.weight, dim=1)
 
-        self.scale = nn.Parameter(torch.tensor([redundancy * 0.1])) # TODO: this is a total guess
+        #     # init nand_weight to not contain NOTs
+        #     NAND_BIAS = 3.0
+        #     self.nand_weight[:] = torch.ones_like(self.nand_weight) + NAND_BIAS
+
 
     def forward(self, query: Union[List[torch.Tensor], torch.Tensor], eps=1e-6):
         # handle either lists or pre-hstacked inputs
         if isinstance(query, list):
             query = torch.hstack(query)
 
-        # [1, n_choices * redundancy, n_vecs, vec_size]
+        # [1, n_choices, n_vecs, vec_size]
         weight_ = self.weight.view(-1, self.n_vecs, self.vec_size).unsqueeze(0)
 
         # [batch, 1, n_vecs, vec_size]
         query_ = query.view(-1, self.n_vecs, self.vec_size).unsqueeze(1)
 
-        # [batch, n_choices * redundancy, n_vecs]
+        # [batch, n_choices, n_vecs]
         cos_sim = torch.cosine_similarity(query_, weight_, dim=3)
 
-        # interpolate between cos_sim and 1-cos_sim
-        nw = self.nand_weight.unsqueeze(0).sigmoid()  # Expand nand_weight for broadcasting
+        # During interpolation, if nw=0 and cos_sim=-1, output goes to
+        # +2.0. This is a weird behavior, and I think the proper remedy is to
+        # clip negative similarities.
+        if self.clip == 'leaky_relu':
+            cos_sim = F.leaky_relu(cos_sim)
+        elif self.clip == 'abs':
+            cos_sim = cos_sim.abs()
 
-        # interpolate between x and 1-x. This sends 1.0 (parallel) to 0.0
+        # interpolate between cos_sim and 1-cos_sim. This sends 1.0 (parallel) to 0.0
         # (orthogonal) and vice versa.
-        interpolated = nw * cos_sim + (1 - nw) * (1 - cos_sim)  # [batch, n_choices * redundancy, n_vecs]
+        nw = self.nand_weight.unsqueeze(0).sigmoid()
+        interpolated = nw * cos_sim + (1 - nw) * (1 - cos_sim)  # [batch, n_choices, n_vecs]
 
         # Dont do this, it sends 1.0 to -1.0 and vice versa, and orthogonal
         # stays orthogonal. This isn't the sense of "NOT" that I want.
         #
-        # interpolated = nw * cos_sim + (1 - nw) * (-cos_sim)  # [batch, n_choices * redundancy, n_vecs]
+        # interpolated = nw * cos_sim + (1 - nw) * (-cos_sim)  # [batch, n_choices, n_vecs]
 
         # product along n_vecs dimension to aggregate the NAND logic
-        outs = interpolated.prod(dim=2)  # [batch, n_choices * redundancy]
-
-        ##########
-        # Redundancy stuff
-
-        # Aggregate redundancy
-        sz = self.n_choices
-        batch_size = query.size(0)
-
-        if self.method == 'max':
-            outs = torch.max(outs.view(batch_size, sz, self.redundancy), dim=2).values
-
-        elif self.method in {'softmax', 'gumbel_softmax'}:
-            # softmax over the whole redundant vec, then sum each redundant chunk
-            # clip because of singularities in tan and log(p/(1-p))
-            outs = (outs).clip(eps, 1-eps)  # note: clips neg similarities
-            outs = torch.log((outs) / (1 - outs))  # maps [0,1] -> [-inf, inf]
-            # outs = torch.tan((outs - 0.5) * pi)  # maps [0,1] -> [-inf, inf]
-
-            # outs = (outs).clip(-1+eps, 1-eps)
-            # outs = torch.tan(outs * pi / 2)  # maps [-1,1] -> [-inf, inf]
-
-            if self.method == 'softmax':
-                outs = torch.sum(outs.softmax(dim=1).view(batch_size, sz, self.redundancy), dim=2)
-            elif self.method == 'gumbel_softmax':
-                outs = torch.sum(F.gumbel_softmax(outs, dim=1).view(batch_size, sz, self.redundancy), dim=2)
-
-        elif self.method == 'sum':
-            outs = torch.sum(outs.view(batch_size, sz, self.redundancy), dim=2)
-
-        elif self.method == 'mean':
-            outs = torch.mean(outs.view(batch_size, sz, self.redundancy), dim=2)
-
-        if self.method in {'sum', 'mean'}:
-            outs = torch.sigmoid(outs * self.scale)
+        outs = interpolated.prod(dim=2)  # [batch, n_choices]
 
         return outs
 

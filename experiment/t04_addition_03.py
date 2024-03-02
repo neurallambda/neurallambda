@@ -141,12 +141,10 @@ INIT_SHARPEN = 2.0
 
 NUM_EPOCHS = 60
 
-CHOICE_METHOD = 'softmax'
-# CHOICE_METHOD = 'max'
-# CHOICE_METHOD = 'sum'
-# CHOICE_METHOD = 'mean'
-# CHOICE_METHOD = 'gumbel_softmax'
-CHOICE_REDUNDANCY = 4
+NAND_CLIP = 'leaky_relu'
+# NAND_CLIP = 'abs'
+# NAND_CLIP = 'none'
+REDUNDANCY = 2
 
 
 ##########
@@ -612,15 +610,20 @@ def op(n_inp, vec_size):
     Useful in stack/queue operations.
     '''
     return nn.Sequential(
-        NAND(vec_size, n_inp, 2,
-             redundancy=CHOICE_REDUNDANCY,
-             method=CHOICE_METHOD,),
-        Fn(lambda x: (x[:,0],
-                      x[:,1]))
-        # Fn(lambda x: (x[:,0].abs(),
-        #               x[:,1].abs()))
-        # Fn(lambda x: (F.gelu(x[:,0]),
-        #               F.gelu(x[:,1])))
+        NAND(vec_size, n_inp, 2 * REDUNDANCY, clip=NAND_CLIP),
+        Fn(lambda x: (x[:,:REDUNDANCY].max(dim=-1).values,
+                      x[:,REDUNDANCY:].max(dim=-1).values
+                      ))
+
+        # NAND(vec_size, n_inp, (2 + 1) * REDUNDANCY, clip=NAND_CLIP),
+        # Fn(lambda x: (x[:,:REDUNDANCY].max(dim=-1).values,
+        #               x[:,REDUNDANCY:2*REDUNDANCY].max(dim=-1).values
+        #               ))
+
+
+        # Fn(lambda x: (x[:,:REDUNDANCY].max(dim=-1).values,
+        #               x[:,REDUNDANCY:].max(dim=-1).values
+        #               ))
     )
 
 
@@ -653,7 +656,7 @@ class Neuralsymbol(nn.Module):
 
         # self.sym_type_choose = NAND(
         #     vec_size, 1, n_choices=n_choices,
-        #     redundancy=CHOICE_REDUNDANCY,
+        #     redundancy=REDUNDANCY,
         #     method='max'
         # )
 
@@ -673,11 +676,7 @@ class Neuralsymbol(nn.Module):
         n_choices = 6
         self.post_c_outputs = nn.Parameter(torch.randn(vec_size, n_choices))
         with torch.no_grad(): self.post_c_outputs[:] = F.normalize(self.post_c_outputs, dim=0)
-        self.post_c_choice = NAND(
-            vec_size, n_vecs, n_choices=n_choices,
-            redundancy=CHOICE_REDUNDANCY,
-            method=CHOICE_METHOD,
-        )
+        self.post_c_choice = NAND(vec_size, n_vecs, n_choices=n_choices, clip=NAND_CLIP)
 
 
         ##########
@@ -689,16 +688,11 @@ class Neuralsymbol(nn.Module):
         self.post_w_op = op(3, vec_size)
 
         # Choose calculation
-        n_choices = 10
+        n_choices = 11
 
         self.post_w_val_outputs = nn.Parameter(torch.randn(vec_size, n_choices))
         with torch.no_grad(): self.post_w_val_outputs[:] = F.normalize(self.post_w_val_outputs, dim=0)
-
-        self.post_w_val_choice = NAND(
-            vec_size, 2, n_choices,
-            redundancy=12,
-            method=CHOICE_METHOD,
-        )
+        self.post_w_val_choice = NAND(vec_size, 2, n_choices * 10, clip=NAND_CLIP)
 
         # Choose between calculation and defaults
         n_vecs = 3
@@ -706,10 +700,7 @@ class Neuralsymbol(nn.Module):
         self.post_w_outputs = nn.Parameter(torch.randn(vec_size, n_choices))
         with torch.no_grad(): self.post_w_outputs[:] = F.normalize(self.post_w_outputs, dim=0)
 
-        self.post_w_choice = NAND(
-            vec_size, n_vecs, n_choices + 2,
-            redundancy=CHOICE_REDUNDANCY,
-            method=CHOICE_METHOD,)
+        self.post_w_choice = NAND(vec_size, n_vecs, (n_choices + 2) * REDUNDANCY, clip=NAND_CLIP)
 
 
         ##########
@@ -719,11 +710,7 @@ class Neuralsymbol(nn.Module):
         n_choices = 5
         self.select_out_outputs = nn.Parameter(torch.randn(vec_size, n_choices))
         with torch.no_grad(): self.select_out_outputs[:] = F.normalize(self.select_out_outputs, dim=0)
-        self.select_out_choice = NAND(
-            vec_size, n_vecs, n_choices=n_choices + 2,
-            redundancy=CHOICE_REDUNDANCY,
-            method=CHOICE_METHOD,
-        )
+        self.select_out_choice = NAND(vec_size, n_vecs, n_choices=n_choices + 2, clip=NAND_CLIP)
 
     def forward(self, x):
         # Containers Init
@@ -800,7 +787,9 @@ class Neuralsymbol(nn.Module):
             # post_w_val_choice_inp = [w_peek * inp]  # led to overfitting?
 
             work_val_choice =self.post_w_val_choice(post_w_val_choice_inp) # [batch, n_choice]
-            work_val_option = einsum('bc, vc -> bv', work_val_choice, self.post_w_val_outputs)
+            work_val_option = einsum('bcr, vc -> bv',
+                                     work_val_choice.view(batch_size, self.post_w_val_choice.n_choices // 10, 10),
+                                     self.post_w_val_outputs)
 
             post_w_choice_inp = [c_peek, w_peek, inp]
             work_choice = self.post_w_choice(post_w_choice_inp) # [batch, n_choice]
@@ -809,7 +798,9 @@ class Neuralsymbol(nn.Module):
                 work_val_option.unsqueeze(2),
                 work_val_option.unsqueeze(2), # for redundancy
             ], dim=2)
-            work_val = einsum('bc, bvc -> bv', work_choice, opts)
+            work_val = einsum('bcr, bvc -> bv',
+                              work_choice.view(batch_size, self.post_w_choice.n_choices // REDUNDANCY, REDUNDANCY),
+                              opts)
             self.work_stack.push_or_null_op(self.work_sharp, post_w_push, post_w_nop, work_val)
 
 
@@ -883,36 +874,43 @@ print(f'Total Params: {format_number(n_params)}')
 
 ##########
 # Hand code solution
-
-
 def set_weights(nand: nn.Module,
                 out_vecs: torch.Tensor,
                 mappings: List[Tuple[Tuple[str, str], Tuple[int, int], str]],
+                redundancy,
                 confidence=3):
     '''set weights in nand and out_vecs according to mappings. confidence scales
     the initial nand_weight, which gets sigmoided. When confidence=3,
     sigmoid(3)=0.953, which is confident but with reasonable gradients.
 
+    Redundancy is handled by view-wrapping tensors, ie, redundant elems are not
+    in adjacent indices.
+
     '''
-    redundancy = nand.redundancy
+
+    n_choices = nand.weight.size(0) // redundancy
+
     with torch.no_grad():
+
         nand.nand_weight[:, :] = torch.tensor([confidence])
 
-        for idx, (vals, out) in enumerate(mappings):
-            out_vecs[:, idx] = project(out) # no redundancy
+        temp_weight = torch.zeros(n_choices, redundancy, nand.weight.size(1), device=nand.weight.device)
+        temp_nand_weight = torch.zeros(n_choices, redundancy, nand.nand_weight.size(1), device=nand.nand_weight.device)
+
+        for choice_i, (vals, out) in enumerate(mappings):
+            out_vecs[:, choice_i] = project(out) # no redundancy
 
             # add all the vecs into the matcher vec
-            for r_, (ins, nand_weight) in enumerate(vals):
-                r = idx*redundancy + (r_ % redundancy)
+            for r_i_, (ins, nand_weight) in enumerate(vals):
+                # TODO: modulo redundancy is buggy in nand_weight if it wraps around
+                r_i = r_i_ % redundancy
+                temp_weight[choice_i, r_i, :] += torch.concat([project(x) for x in ins])
+                temp_nand_weight[choice_i, r_i, :] = torch.tensor([confidence if x==1 else -confidence for x in nand_weight]).to(DEVICE)
 
-                nand.weight[r, :] += torch.concat([project(x) for x in ins])
 
-                # TODO: buggy to reset nand_weight above, then add this in
-                nand.nand_weight[r, :] += torch.tensor([confidence if x==1 else -confidence for x in nand_weight]).to(DEVICE)
-
-        nand.weight[:]      = F.normalize(nand.weight, dim=1)
-        # nand.nand_weight[:] = F.normalize(nand.nand_weight, dim=1)
-
+        upto = len(mappings) * redundancy  # don't overwrite rows for which no mappings were set
+        nand.weight[:upto] = temp_weight.flatten(start_dim=0, end_dim=1)[:upto]
+        nand.nand_weight[:upto] = temp_nand_weight.flatten(start_dim=0, end_dim=1)[:upto]
 
 def reset_cheat(model):
     # CONTROL
@@ -939,7 +937,7 @@ def reset_cheat(model):
             ([((str(i), str(j)), (1, 1)) for i in range(10) for j in range(10) if (i+j)%10==7], '7'),
             ([((str(i), str(j)), (1, 1)) for i in range(10) for j in range(10) if (i+j)%10==8], '8'),
             ([((str(i), str(j)), (1, 1)) for i in range(10) for j in range(10) if (i+j)%10==9], '9'),
-        ])
+        ], 10, confidence=5)
 
     # model.post_w_choice
     # model.post_w_outputs
@@ -959,29 +957,33 @@ def reset_cheat(model):
 
 # @@@@@@@@@@
 
-print("TESTING CHEAT")
-reset_cheat(model)
+# print("TESTING CHEAT")
+# reset_cheat(model)
 
-for i in [8,9]:
-    for j in [8,9]:
-        inp = torch.cat([project(str(i)), project(str(j))])
-        choice = model.post_w_val_choice(inp.unsqueeze(0))
-        out = einsum('bc, vc -> bv', choice, model.post_w_val_outputs)
-        v, sim = unproject(out.squeeze(0), return_sim=True)
-        print(f'{i}+{j}={v}, {sim.item():>.3f}, {choice.cpu().detach()}')
+# for i in [1, 2, 3]:
+#     for j in [1, 2, 3]:
+#         inp = torch.cat([project(str(i)), project(str(j))])
+#         choice = model.post_w_val_choice(inp.unsqueeze(0))
+#         out = einsum('bcr, vc -> bv',
+#                      choice.view(1, model.post_w_val_outputs.size(1), 10),
+#                      model.post_w_val_outputs)
+#         v, sim = unproject(out.squeeze(0), return_sim=True)
+#         print(f'{i}+{j}={v}, {sim.item():>.3f}') # , {choice.cpu().detach()}')
 
+# # WEIGHT VALS
+# for i in range(10):
+#     for vi in [0, VEC_SIZE]:
+#         v, sim = unproject(model.post_w_val_choice.weight[i, vi:vi+VEC_SIZE], return_sim=True)
+#         print(f'{v}, {sim.item():>.3f}', end='  |  ')
+#     print(model.post_w_val_choice.nand_weight[i].cpu().tolist())
+#     # v, sim = unproject(model.post_w_val_outputs[:, i], return_sim=True)
+#     # print(f'{v}, {sim.item():>.3f}')
 
-for i in range(100):
-    for vi in [0, VEC_SIZE]:
-        v, sim = unproject(model.post_w_val_choice.weight[i, vi:vi+VEC_SIZE], return_sim=True)
-        print(f'{v}, {sim.item():>.3f}', end='  |  ')
-    print(model.post_w_val_choice.nand_weight[i].cpu().tolist())
-    # v, sim = unproject(model.post_w_val_outputs[:, i], return_sim=True)
-    # print(f'{v}, {sim.item():>.3f}')
+# # OUTPUT VALS
+# for i in range(12):
+#     print(unproject(model.post_w_val_outputs[:, i], return_sim=True))
 
-unproject(model.post_w_val_outputs[:, 0], return_sim=True)
-
-BRK
+# BRK
 
 # @@@@@@@@@@
 
