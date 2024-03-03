@@ -3,6 +3,7 @@
 neurallambda_*.zip
 memray*
 *.prof
+log/
 
 # Python
 .env/

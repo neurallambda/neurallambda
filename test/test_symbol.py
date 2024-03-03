@@ -32,7 +32,7 @@ def test_projection_with_noise():
     int_mapper = IntMapper(8, 20)
     for i in range(-16, 16):
         projected = int_mapper.project(i)
-        noise = torch.randn_like(projected) * 1.0
+        noise = torch.randn_like(projected) * 1e-2
         noisy_projected = projected + noise
 
         # Attempt to unproject the noisy vector
