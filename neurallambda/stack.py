@@ -45,7 +45,8 @@ class Stack(nn.Module):
 
           should_push, should_pop, should_null_op: ndarray([BATCH_SIZE]), values
             in (0, 1). 0 means "dont do this operation", 1 means "do this
-            operation".
+            operation". Note: these are NOT constrained to sum to 1.0, the
+            caller can choose to do this.
 
           value: value to push, if pushing. ndarray([BATCH_SIZE, VEC_SIZE])
 

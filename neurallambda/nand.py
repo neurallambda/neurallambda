@@ -62,7 +62,7 @@ class NAND(nn.Module):
 
 
     '''
-    def __init__(self, vec_size, n_vecs, n_choices, clip='leaky_relu'):
+    def __init__(self, vec_size, n_vecs, n_choices, clip='leaky_relu', nand_bias=3.0):
         super(NAND, self).__init__()
 
         self.vec_size = vec_size
@@ -79,19 +79,18 @@ class NAND(nn.Module):
         #   If nw=0, interpolate toward 1 - cossim
         self.nand_weight = nn.Parameter(torch.randn(n_choices, n_vecs))
 
-        # # Normalize the main weights
-        # with torch.no_grad():
-        #     self.weight[:] = F.normalize(self.weight, dim=1)
-
-        #     # init nand_weight to not contain NOTs
-        #     NAND_BIAS = 3.0
-        #     self.nand_weight[:] = torch.ones_like(self.nand_weight) + NAND_BIAS
+        # Normalize the main weights
+        with torch.no_grad():
+            # init nand_weight to not contain NOTs
+            if nand_bias is not None:
+                self.nand_weight[:] = torch.ones_like(self.nand_weight) + nand_bias
 
 
     def forward(self, query: Union[List[torch.Tensor], torch.Tensor], eps=1e-6):
         # handle either lists or pre-hstacked inputs
         if isinstance(query, list):
-            query = torch.hstack(query)
+            # query = torch.hstack(query)
+            query = torch.cat(query, dim=-1)
 
         # [1, n_choices, n_vecs, vec_size]
         weight_ = self.weight.view(-1, self.n_vecs, self.vec_size).unsqueeze(0)
