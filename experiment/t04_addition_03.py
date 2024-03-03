@@ -18,6 +18,13 @@ GOOD RECIPES:
 ----------
 RESULTS:
 
+* Memorization learning *finally* improved, a little, (in symbolic-only
+  model) once I calculated output based on stack pop results, or stack peeks
+  from END of for loop, instead of beginning.
+
+  It also paid to increase # symbols being chosen after NAND. Too many yielded
+  training memorization.
+
 * [X] Preloading known symbols into the CosineSimilarity weights helps training
       immensely, but I'm not sure I want to keep using the CosSim layers.
 * [X] How does stack sharpening behave? Barely moves from init, but then after
@@ -121,6 +128,10 @@ import warnings
 from typing import Any, Iterable, List, Optional, Tuple
 from neurallambda.nand import NAND, FwdNAND
 
+from torch.utils.tensorboard import SummaryWriter
+writer = SummaryWriter('log/t04_addition_03')
+LOG = True
+
 torch.manual_seed(152)
 torch.set_printoptions(precision=3, sci_mode=False)
 
@@ -137,12 +148,12 @@ BATCH_SIZE = 100
 LR = 1e-2
 WD = 0.0
 
-INIT_SHARPEN = 2.0
+INIT_SHARPEN = 10.0
 
 NUM_EPOCHS = 60
 
-NAND_CLIP = 'leaky_relu'
-# NAND_CLIP = 'abs'
+# NAND_CLIP = 'leaky_relu'
+NAND_CLIP = 'abs'
 # NAND_CLIP = 'none'
 REDUNDANCY = 2
 
@@ -156,9 +167,9 @@ REG_VAL     = False # regularization cheats
 NOISE_LVL   = 1e-3
 CHEAT = False
 
-# SHARP_SCHED = 'random'
+SHARP_SCHED = 'random'
 SHARP_SCHED = 'anneal'
-# SHARP_SCHED = None
+SHARP_SCHED = None
 
 ##################################################
 # Problem Data
@@ -191,7 +202,7 @@ tokens = [
     SEQUENCE_STARTED_SYMBOL, SEQUENCE_FINISHED_SYMBOL, RETURN_L_SYMBOL, RETURN_SUM_SYMBOL, RETURN_R_SYMBOL
 ]
 
-all_symbols = Sym.nums + Sym.chars + tokens
+all_symbols = [0,1,2,3,4,5,6,7,8,9] + Sym.chars + tokens
 sym_map = Sym.SymbolMapper(VEC_SIZE, all_symbols, device=DEVICE)
 project = sym_map.project
 unproject = sym_map.unproject
@@ -343,7 +354,6 @@ def collate_fn(batch):
     # out['PostWorkOp_'] = out['PostWorkOp_']
     # out['PostWorkOpVal_'] = out['PostWorkOpVal_']
 
-
     # assert shapes
     ignore_names = {
         'PreGlobalOp_',
@@ -363,6 +373,14 @@ def collate_fn(batch):
             assert out['Input'].shape == v.shape, f'Shapes must be the same, input={out["Input"].shape}, {name}={v.shape}'
 
     # Return the tensors with the batch of padded inputs and outputs
+
+    # REMOVE START TOKENS
+    if False:
+        print('EXPERIMENT: REMOVING START TOKENS')
+        out['Input'] = out['Input'][:, 1:]
+        out['Output'] = out['Output'][:, 1:]
+        out['LossMask'] = out['LossMask'][:, 1:]
+
     return out
 
 # Create DataLoaders with the new collate_fn
@@ -373,7 +391,7 @@ val_dl = DataLoader(val_data, batch_size=BATCH_SIZE, collate_fn=collate_fn)
 ##################################################
 # Training Functions
 
-def run_epoch(model, dl, optimizer, device, train_mode=True):
+def run_epoch(epoch, model, dl, optimizer, device, train_mode=True):
     if train_mode:
         model.train()
     else:
@@ -387,17 +405,18 @@ def run_epoch(model, dl, optimizer, device, train_mode=True):
                 if k.endswith('_'): # ignore the non-projected symbols
                     continue
                 data[k] = v.to(device)
-            src = data['Input']
-            trg = data['Output']
+
+            src  = data['Input']
+            trg  = data['Output']
             mask = data['LossMask']
 
-            with torch.no_grad():
-                trg_pre_c_op = data['PreGlobalOp']
-                trg_pre_w_op = data['PreWorkOp']
-                trg_post_c_op = data['PostGlobalOp']
-                trg_post_c_val = data['PostGlobalVal']
-                trg_post_w_op = data['PostWorkOp']
-                trg_post_w_val = data['PostWorkVal']
+            # with torch.no_grad():
+            #     trg_pre_c_op = data['PreGlobalOp']
+            #     trg_pre_w_op = data['PreWorkOp']
+            #     trg_post_c_op = data['PostGlobalOp']
+            #     trg_post_c_val = data['PostGlobalVal']
+            #     trg_post_w_op = data['PostWorkOp']
+            #     trg_post_w_val = data['PostWorkVal']
 
             if train_mode:
                 optimizer.zero_grad()
@@ -412,21 +431,22 @@ def run_epoch(model, dl, optimizer, device, train_mode=True):
 
             output, debug = model(src)
 
-            pre_c_pop = debug['pre_c_pop']['data']
-            pre_c_nop = debug['pre_c_nop']['data']
-            pre_w_pop = debug['pre_w_pop']['data']
-            pre_w_nop = debug['pre_w_nop']['data']
-            post_c_push = debug['post_c_push']['data']
-            post_c_val = debug['post_c_val']['data']
-            post_c_nop = debug['post_c_nop']['data']
-            post_w_push = debug['post_w_push']['data']
-            post_w_val = debug['post_w_val']['data']
-            post_w_nop = debug['post_w_nop']['data']
+            # pre_c_pop = debug['pre_c_pop']['data']
+            # pre_c_nop = debug['pre_c_nop']['data']
+            # pre_w_pop = debug['pre_w_pop']['data']
+            # pre_w_nop = debug['pre_w_nop']['data']
+            # post_c_push = debug['post_c_push']['data']
+            # post_c_val = debug['post_c_val']['data']
+            # post_c_nop = debug['post_c_nop']['data']
+            # post_w_push = debug['post_w_push']['data']
+            # post_w_val = debug['post_w_val']['data']
+            # post_w_nop = debug['post_w_nop']['data']
 
             loss = 0
 
             if USE_LOSS:
                 loss = loss + ((1 - cosine_similarity(output, trg, dim=2)) * mask).mean()
+                # loss = loss + ((1 - cosine_similarity(output[:,-3:], trg[:,-3:], dim=2))).mean()
 
             # REGULARIZATION EXPERIMENT
             #   TODO: rm experiment
@@ -471,6 +491,16 @@ def run_epoch(model, dl, optimizer, device, train_mode=True):
                 loss.backward()
                 optimizer.step()
             epoch_loss += loss.item()
+
+
+    # Log weight histogram
+    if LOG and train_mode:
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                writer.add_histogram(f'weights/{name}', param.data.cpu().numpy(), epoch)
+                if param.grad is not None:
+                    writer.add_histogram(f'grads/{name}', param.grad.data.cpu().numpy(), epoch)
+
     return epoch_loss / max(steps, 1)
 
 
@@ -561,19 +591,17 @@ def accuracy(model, val_dl, device, debug=False):
 # LSTM
 
 class LSTMModel(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
+    def __init__(self, vec_size):
         super(LSTMModel, self).__init__()
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
-        self.lc1 = nn.LSTMCell(input_dim, hidden_dim)
-        self.lc2 = nn.LSTMCell(hidden_dim, hidden_dim)
-        self.fc = NormalizedLinear(hidden_dim, output_dim)
+        self.vec_size = vec_size
+        self.lc1 = nn.LSTMCell(vec_size, vec_size)
+        self.lc2 = nn.LSTMCell(vec_size, vec_size)
+        self.fc = NormalizedLinear(vec_size, vec_size)
 
     def forward(self, x):
         # Initialize the hidden and cell states to zeros
-        h1 = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
-        c1 = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
+        h1 = torch.zeros(x.size(0), self.vec_size).to(x.device)
+        c1 = torch.zeros(x.size(0), self.vec_size).to(x.device)
         h1s = []
 
         for i in range(x.size(1)):
@@ -583,8 +611,8 @@ class LSTMModel(nn.Module):
         # Run LSTM2
         h1s = torch.stack(h1s, dim=1) # input to lstm2
 
-        h2 = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
-        c2 = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
+        h2 = torch.zeros(x.size(0), self.vec_size).to(x.device)
+        c2 = torch.zeros(x.size(0), self.vec_size).to(x.device)
         h2s = []
 
         for i in range(x.size(1)):
@@ -595,31 +623,45 @@ class LSTMModel(nn.Module):
         outputs = torch.stack(h2s, dim=1)
 
         # Apply the linear layer to each time step's output
-        # We reshape the outputs tensor to (-1, self.hidden_dim) before applying the linear layer
-        # Then reshape it back to (batch_size, seq_len, output_dim)
-        out = self.fc(outputs.view(-1, self.hidden_dim))
-        out = out.view(-1, x.size(1), self.output_dim)
+        # We reshape the outputs tensor to (-1, self.vec_size) before applying the linear layer
+        # Then reshape it back to (batch_size, seq_len, vec_size)
+        out = self.fc(outputs.view(-1, self.vec_size))
+        out = out.view(-1, x.size(1), self.vec_size)
 
         return out, {}
 
 
 ##################################################
+#
+# NeuralSymbol
+#
+
 
 def op(n_inp, vec_size):
     ''' (vec, vec, vec) -> scalar
     Useful in stack/queue operations.
     '''
+
+    H = 64
+
     return nn.Sequential(
-        NAND(vec_size, n_inp, 2 * REDUNDANCY, clip=NAND_CLIP),
-        Fn(lambda x: (x[:,:REDUNDANCY].max(dim=-1).values,
-                      x[:,REDUNDANCY:].max(dim=-1).values
-                      ))
+
+        # Fn(lambda x: torch.cat(x, dim=-1)),
+        nn.Linear(n_inp * vec_size, H),
+        nn.ReLU(),
+        nn.Linear(H, 2),
+        nn.Sigmoid(),
+        Fn(lambda x: (x[:,0], x[:,1]))
+
+        # NAND(vec_size, n_inp, 2 * REDUNDANCY, clip=NAND_CLIP),
+        # Fn(lambda x: (x[:,:REDUNDANCY].max(dim=-1).values,
+        #               x[:,REDUNDANCY:].max(dim=-1).values
+        #               ))
 
         # NAND(vec_size, n_inp, (2 + 1) * REDUNDANCY, clip=NAND_CLIP),
         # Fn(lambda x: (x[:,:REDUNDANCY].max(dim=-1).values,
         #               x[:,REDUNDANCY:2*REDUNDANCY].max(dim=-1).values
         #               ))
-
 
         # Fn(lambda x: (x[:,:REDUNDANCY].max(dim=-1).values,
         #               x[:,REDUNDANCY:].max(dim=-1).values
@@ -628,20 +670,18 @@ def op(n_inp, vec_size):
 
 
 class Neuralsymbol(nn.Module):
-    def __init__(self,
-                 input_dim, hidden_dim, output_dim,
-                 ):
+    def __init__(self, vec_size ):
         super(Neuralsymbol, self).__init__()
 
         init_sharpen = INIT_SHARPEN
         n_control_stack = 4
         n_work_stack = 4
 
-        vec_size = input_dim
+        vec_size = vec_size
         self.vec_size = vec_size
 
-        self.input_dim       = input_dim
-        self.output_dim      = output_dim
+        self.vec_size       = vec_size
+        self.vec_size      = vec_size
         self.n_control_stack = n_control_stack
         self.n_work_stack    = n_work_stack
 
@@ -667,50 +707,78 @@ class Neuralsymbol(nn.Module):
         # self.stack_init_vec = nn.Parameter(torch.randn(vec_size) * 1e-2)
         self.stack_init_vec = F.normalize(torch.randn(vec_size), dim=0)
 
-        self.control_stack = S.Stack(n_control_stack, input_dim)
+        self.control_stack = S.Stack(n_control_stack, vec_size)
         self.control_sharp = nn.Parameter(torch.tensor([init_sharpen]))
         self.pre_c_op = op(3, vec_size)
         self.post_c_op = op(3, vec_size)
 
         n_vecs = 3
-        n_choices = 6
-        self.post_c_outputs = nn.Parameter(torch.randn(vec_size, n_choices))
-        with torch.no_grad(): self.post_c_outputs[:] = F.normalize(self.post_c_outputs, dim=0)
-        self.post_c_choice = NAND(vec_size, n_vecs, n_choices=n_choices, clip=NAND_CLIP)
+
+        # n_choices = 6
+        # self.post_c_outputs = nn.Parameter(torch.randn(vec_size, n_choices))
+        # with torch.no_grad(): self.post_c_outputs[:] = F.normalize(self.post_c_outputs, dim=0)
+        # self.post_c_choice = NAND(vec_size, n_vecs, n_choices=n_choices, clip=NAND_CLIP)
+
+        HHH = 64
+        self.post_c_outputs = nn.Sequential(
+            Fn(lambda x: torch.cat(x, dim=-1)),
+            nn.Linear(vec_size * n_vecs, HHH),
+            nn.ReLU(),
+            nn.Linear(HHH, vec_size),
+            nn.Tanh()
+        )
 
 
         ##########
         # Working Stack
 
-        self.work_stack = S.Stack(n_work_stack, input_dim)
+        self.work_stack = S.Stack(n_work_stack, vec_size)
         self.work_sharp = nn.Parameter(torch.tensor([init_sharpen]))
         self.pre_w_op = op(3, vec_size)
         self.post_w_op = op(3, vec_size)
 
-        # Choose calculation
-        n_choices = 11
+        # # Choose calculation
+        # n_choices = 11
 
-        self.post_w_val_outputs = nn.Parameter(torch.randn(vec_size, n_choices))
-        with torch.no_grad(): self.post_w_val_outputs[:] = F.normalize(self.post_w_val_outputs, dim=0)
-        self.post_w_val_choice = NAND(vec_size, 2, n_choices * 10, clip=NAND_CLIP)
+        # self.post_w_val_outputs = nn.Parameter(torch.randn(vec_size, n_choices))
+        # with torch.no_grad(): self.post_w_val_outputs[:] = F.normalize(self.post_w_val_outputs, dim=0)
+        # self.post_w_val_choice = NAND(vec_size, 2, n_choices * 10, clip=NAND_CLIP)
 
-        # Choose between calculation and defaults
-        n_vecs = 3
-        n_choices = 4
-        self.post_w_outputs = nn.Parameter(torch.randn(vec_size, n_choices))
-        with torch.no_grad(): self.post_w_outputs[:] = F.normalize(self.post_w_outputs, dim=0)
+        # # Choose between calculation and defaults
+        # n_vecs = 3
+        # n_choices = 4
+        # self.post_w_outputs = nn.Parameter(torch.randn(vec_size, n_choices))
+        # with torch.no_grad(): self.post_w_outputs[:] = F.normalize(self.post_w_outputs, dim=0)
 
-        self.post_w_choice = NAND(vec_size, n_vecs, (n_choices + 2) * REDUNDANCY, clip=NAND_CLIP)
+        # self.post_w_choice = NAND(vec_size, n_vecs, (n_choices + 2) * REDUNDANCY, clip=NAND_CLIP)
 
+
+        HHH = 64
+        self.work_hack = nn.Sequential(
+            Fn(lambda x: torch.cat(x, dim=-1)),
+            nn.Linear(vec_size * 3, HHH),
+            nn.ReLU(),
+            nn.Linear(HHH, vec_size),
+            nn.Tanh()
+        )
 
         ##########
         # Select output
 
         n_vecs = 4
-        n_choices = 5
-        self.select_out_outputs = nn.Parameter(torch.randn(vec_size, n_choices))
-        with torch.no_grad(): self.select_out_outputs[:] = F.normalize(self.select_out_outputs, dim=0)
-        self.select_out_choice = NAND(vec_size, n_vecs, n_choices=n_choices + 2, clip=NAND_CLIP)
+
+        # n_choices = 5
+        # self.select_out_outputs = nn.Parameter(torch.randn(vec_size, n_choices))
+        # with torch.no_grad(): self.select_out_outputs[:] = F.normalize(self.select_out_outputs, dim=0)
+
+        # self.select_out_choice = NAND(vec_size, n_vecs, n_choices=n_choices + 2, clip=NAND_CLIP)
+        self.out = nn.Sequential(
+            Fn(lambda x: torch.cat(x, dim=-1)),
+            nn.Linear(vec_size * n_vecs, HHH),
+            nn.ReLU(),
+            nn.Linear(HHH, vec_size),
+            nn.Tanh(),
+        )
 
     def forward(self, x):
         # Containers Init
@@ -721,8 +789,8 @@ class Neuralsymbol(nn.Module):
 
         # Push first instruction
         self.stack_init_vec = self.stack_init_vec.to(device=device)
-        self.control_stack.push(self.stack_init_vec.unsqueeze(0))
-        self.work_stack.   push(self.stack_init_vec.unsqueeze(0))
+        self.control_stack.push(self.stack_init_vec.expand(batch_size, -1))
+        self.work_stack.   push(self.stack_init_vec.expand(batch_size, -1))
 
         # Debugging
         pops = []
@@ -774,49 +842,62 @@ class Neuralsymbol(nn.Module):
             # control stack
             post_c_inp = [c_peek, w_peek, inp]
             post_c_push, post_c_nop = self.post_c_op(post_c_inp)
-            control_choice = self.post_c_choice(post_c_inp) # [batch, n_choice]
-            control_val = einsum('bc, vc -> bv', control_choice, self.post_c_outputs)
+
+            # control_choice = self.post_c_choice(post_c_inp) # [batch, n_choice]
+            # control_val = einsum('bc, vc -> bv', control_choice, self.post_c_outputs)
+
+            control_val = self.post_c_outputs(post_c_inp)
+
             self.control_stack.push_or_null_op(self.control_sharp, post_c_push, post_c_nop, control_val)
 
             # work stack
             post_w_inp = [c_peek, w_peek, inp]
             post_w_push, post_w_nop = self.post_w_op(post_w_inp)
 
-            # "sum mod 10" happens here
-            post_w_val_choice_inp = [w_peek, inp]
-            # post_w_val_choice_inp = [w_peek * inp]  # led to overfitting?
+            work_val = self.work_hack(post_w_inp)
 
-            work_val_choice =self.post_w_val_choice(post_w_val_choice_inp) # [batch, n_choice]
-            work_val_option = einsum('bcr, vc -> bv',
-                                     work_val_choice.view(batch_size, self.post_w_val_choice.n_choices // 10, 10),
-                                     self.post_w_val_outputs)
 
-            post_w_choice_inp = [c_peek, w_peek, inp]
-            work_choice = self.post_w_choice(post_w_choice_inp) # [batch, n_choice]
-            opts = torch.cat([
-                self.post_w_outputs.expand(batch_size, -1, -1),
-                work_val_option.unsqueeze(2),
-                work_val_option.unsqueeze(2), # for redundancy
-            ], dim=2)
-            work_val = einsum('bcr, bvc -> bv',
-                              work_choice.view(batch_size, self.post_w_choice.n_choices // REDUNDANCY, REDUNDANCY),
-                              opts)
+            # # "sum mod 10" happens here
+            # post_w_val_choice_inp = [w_peek, inp]
+            # # post_w_val_choice_inp = [w_peek * inp]  # led to overfitting?
+
+            # work_val_choice =self.post_w_val_choice(post_w_val_choice_inp) # [batch, n_choice]
+            # work_val_option = einsum('bcr, vc -> bv',
+            #                          work_val_choice.view(batch_size, self.post_w_val_choice.n_choices // 10, 10),
+            #                          self.post_w_val_outputs)
+
+            # post_w_choice_inp = [c_peek, w_peek, inp]
+            # work_choice = self.post_w_choice(post_w_choice_inp) # [batch, n_choice]
+            # opts = torch.cat([
+            #     self.post_w_outputs.expand(batch_size, -1, -1),
+            #     work_val_option.unsqueeze(2),
+            #     work_val_option.unsqueeze(2), # for redundancy
+            # ], dim=2)
+            # work_val = einsum('bcr, bvc -> bv',
+            #                   work_choice.view(batch_size, self.post_w_choice.n_choices // REDUNDANCY, REDUNDANCY),
+            #                   opts)
+
+
             self.work_stack.push_or_null_op(self.work_sharp, post_w_push, post_w_nop, work_val)
 
 
             ##########
             # Select out
 
-            select_choice = self.select_out_choice([c_peek, w_peek, control_val, work_val],) # [batch, n_choice]
-            stck = torch.cat([
-                # [vec_size, n_choice-1] -> [batch, vec_size, n_choice-1]
-                self.select_out_outputs.expand(batch_size, -1, -1),
-                # [batch, vec_size] -> [batch, vec_size, 1]
-                work_val.unsqueeze(2),
-                work_val.unsqueeze(2) # for redundancy
-            ],
-            dim=2)
-            out = einsum('bc, bvc -> bv', select_choice, stck)
+            out_inp = [c_peek, w_peek, control_val, work_val]
+
+            # select_choice = self.select_out_choice(out_inp) # [batch, n_choice]
+            # stck = torch.cat([
+            #     # [vec_size, n_choice-1] -> [batch, vec_size, n_choice-1]
+            #     self.select_out_outputs.expand(batch_size, -1, -1),
+            #     # [batch, vec_size] -> [batch, vec_size, 1]
+            #     work_val.unsqueeze(2),
+            #     work_val.unsqueeze(2) # for redundancy
+            # ],
+            # dim=2)
+            # out = einsum('bc, bvc -> bv', select_choice, stck)
+
+            out = self.out(out_inp)
 
             outputs.append(out)
 
@@ -832,7 +913,7 @@ class Neuralsymbol(nn.Module):
                 debug['post_w_val'].append(work_val)
                 debug['post_w_nop'].append(post_w_nop)
 
-        out = torch.stack(outputs, dim=1)
+        outputs = torch.stack(outputs, dim=1)
 
         for k, v in debug.items():
             if k in {'pre_c_pop', 'pre_c_nop', 'pre_w_pop', 'pre_w_nop',
@@ -849,7 +930,139 @@ class Neuralsymbol(nn.Module):
                     'data': torch.stack(v, dim=1),
                     'fn': lambda x: colored(up(x, return_sim=True)) if not k.endswith('_') else None
                 }
-        return out, debug
+        return outputs, debug
+
+
+
+##################################################
+#
+# Cyborg: Start with LSTM, morph toward using stacks
+#
+
+# def cyop(n_inp, vec_size):
+#     ''' (vec, vec, vec) -> scalar
+#     Useful in stack/queue operations.
+#     '''
+
+#     H = 64
+
+#     return nn.Sequential(
+
+#         # Fn(lambda x: torch.cat(x, dim=-1)),
+#         nn.Linear(n_inp * vec_size, H),
+#         nn.ReLU(),
+#         nn.Linear(H, 2),
+#         nn.Sigmoid(),
+#         Fn(lambda x: (x[:,0], x[:,1]))
+
+#         # NAND(vec_size, n_inp, 2 * REDUNDANCY, clip=NAND_CLIP),
+#         # Fn(lambda x: (x[:,:REDUNDANCY].max(dim=-1).values,
+#         #               x[:,REDUNDANCY:].max(dim=-1).values
+#         #               ))
+
+#         # NAND(vec_size, n_inp, (2 + 1) * REDUNDANCY, clip=NAND_CLIP),
+#         # Fn(lambda x: (x[:,:REDUNDANCY].max(dim=-1).values,
+#         #               x[:,REDUNDANCY:2*REDUNDANCY].max(dim=-1).values
+#         #               ))
+
+#         # Fn(lambda x: (x[:,:REDUNDANCY].max(dim=-1).values,
+#         #               x[:,REDUNDANCY:].max(dim=-1).values
+#         #               ))
+#     )
+
+class Cyborg(nn.Module):
+    def __init__(self, vec_size, ):
+        super(Cyborg, self).__init__()
+        self.vec_size = vec_size
+
+        N_STACKS = 2
+        self.N_STACKS = N_STACKS
+
+        self.REDUNDANCY = 3
+        H = 20  # number of symbols
+        self.H = H
+        self.syms = nn.Parameter(torch.randn((H, vec_size)))
+        self.calc_out = NAND(vec_size, 1 + N_STACKS * 1, (H + N_STACKS) * self.REDUNDANCY, clip=NAND_CLIP)
+
+        # STACKS
+        stack_depth = 4
+        init_sharpen = INIT_SHARPEN
+        self.zero_offset = 1e-6
+        self.stack_init_vec = F.normalize(torch.randn(vec_size), dim=0)
+
+        self.stacks = nn.ParameterList([])
+        for _ in range(N_STACKS):
+            stack = S.Stack(stack_depth, vec_size)
+            sharp = nn.Parameter(torch.tensor([init_sharpen]))
+            pop_op  = NAND(vec_size, 1 + N_STACKS, 2 * self.REDUNDANCY, clip=NAND_CLIP)
+            push_op = NAND(vec_size, 1 + N_STACKS, 2 * self.REDUNDANCY, clip=NAND_CLIP)
+            push   = NAND(vec_size, 1 + N_STACKS, (H + N_STACKS) * self.REDUNDANCY, clip=NAND_CLIP)
+            params = nn.ParameterList([stack, sharp, pop_op, push_op, push])
+            self.stacks.append(params)
+
+    def forward(self, x):
+        device = x.device
+        batch_size = x.shape[0]
+        self.stack_init_vec = self.stack_init_vec.to(device=device)
+
+        # Stacks prep
+        for (stack, _, _, _, _) in self.stacks:
+            stack.init(batch_size, self.zero_offset, device)
+            stack.push(self.stack_init_vec.expand(batch_size, -1))
+
+        # RNN prep
+        h1 = torch.zeros(x.size(0), self.vec_size).to(x.device)
+
+        outputs = []
+
+        for i in range(x.size(1)):
+            inp = x[:, i, :]
+
+            # Peek Stacks
+            peeks = []
+            for (stack, _, _, _, _) in self.stacks:
+                peeks.append(stack.read())
+
+            inps = torch.cat([inp] + peeks, dim=-1)
+
+            out_opts = torch.cat([self.syms.expand(batch_size, -1, -1)] +
+                                 [p.unsqueeze(1) for p in peeks]
+                                 , dim=1)
+
+            # Handle Stacks
+            all_pops = []
+            for (stack, sharp, pop_op, push_op, push_fn) in self.stacks:
+                pops = pop_op(inps)
+                pushes = push_op(inps)
+                push = einsum('bcv, bcr -> bv',
+                              out_opts,
+                              push_fn(inps).view(batch_size, (self.H + self.N_STACKS), self.REDUNDANCY))
+                p = stack.pop_or_null_op(sharp,
+                                         pops[:,:self.REDUNDANCY].max(dim=1).values,
+                                         pops[:,self.REDUNDANCY:].max(dim=1).values)
+                all_pops.append(p)
+                stack.push_or_null_op(sharp,
+                                      pushes[:,:self.REDUNDANCY].max(dim=1).values,
+                                      pushes[:,self.REDUNDANCY:].max(dim=1).values,
+                                      push)
+
+            # Peek Again
+            peek_agains = []
+            for (stack, _, _, _, _) in self.stacks:
+                peek_agains.append(stack.read())
+
+            # Output
+            inps = torch.cat([inp] + peek_agains, dim=-1)
+
+            out    = einsum('bcv, bcr -> bv',
+                            out_opts,
+                            self.calc_out(inps).view(batch_size, (self.H + self.N_STACKS), self.REDUNDANCY))
+
+            outputs.append(out)
+
+
+        outputs = torch.stack(outputs, dim=1)
+        return outputs, {}
 
 
 ##################################################
@@ -859,12 +1072,11 @@ class Neuralsymbol(nn.Module):
 # Setup
 
 # MyModel = LSTMModel
-MyModel = Neuralsymbol
+MyModel = Cyborg
+# MyModel = Neuralsymbol
 
 model = MyModel(
-    input_dim=VEC_SIZE,
-    hidden_dim=128,
-    output_dim=VEC_SIZE,
+    vec_size=VEC_SIZE,
 )
 model.to(DEVICE)
 
@@ -937,6 +1149,9 @@ def reset_cheat(model):
             ([((str(i), str(j)), (1, 1)) for i in range(10) for j in range(10) if (i+j)%10==7], '7'),
             ([((str(i), str(j)), (1, 1)) for i in range(10) for j in range(10) if (i+j)%10==8], '8'),
             ([((str(i), str(j)), (1, 1)) for i in range(10) for j in range(10) if (i+j)%10==9], '9'),
+
+            # default
+            # ([(('X', 'X'), (0, 0))]*10, 'X'),
         ], 10, confidence=5)
 
     # model.post_w_choice
@@ -1034,14 +1249,16 @@ SHARP_SCHED = None
 optimizer = optim.Adam(opt_params, weight_decay=WD, lr=1e-1)
 optimizer = optim.Adam(opt_params, weight_decay=WD, lr=1e-2)
 optimizer = optim.Adam(opt_params, weight_decay=WD, lr=1e-3)
+optimizer = optim.Adam(opt_params, weight_decay=WD, lr=1e-4)
 
 '''
 
 for epoch in range(NUM_EPOCHS):
     if CHEAT:
+        print('cheat ', end='')
         reset_cheat(model)
 
-    train_loss = run_epoch(model, train_dl, optimizer, DEVICE, train_mode=True)
+    train_loss = run_epoch(epoch, model, train_dl, optimizer, DEVICE, train_mode=True)
 
     # Experiment changing sharpen param
     if SHARP_SCHED == 'random':
@@ -1050,7 +1267,7 @@ for epoch in range(NUM_EPOCHS):
             model.work_sharp[:]    = torch.randint(5, 30, (1,))
 
     if SHARP_SCHED == 'anneal':
-        LO = 10
+        LO = 5
         HI = 20
         with torch.no_grad():
             a = epoch / NUM_EPOCHS
@@ -1058,7 +1275,7 @@ for epoch in range(NUM_EPOCHS):
             model.work_sharp[:]    = (1-a) * LO + a * HI
 
     if epoch % 10 == 0:
-        val_loss = run_epoch(model, val_dl, None, DEVICE, train_mode=False)
+        val_loss = run_epoch(epoch, model, val_dl, None, DEVICE, train_mode=False)
         tacc = accuracy(model, train_dl, DEVICE)
         vacc = accuracy(model, val_dl, DEVICE)
 

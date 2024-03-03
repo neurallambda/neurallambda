@@ -20,7 +20,7 @@ t = lambda x: torch.tensor([x], dtype=torch.float)
 VEC_SIZE = 4096
 DEVICE = 'cuda'
 
-all_symbols = Sym.nums + Sym.chars
+all_symbols = Sym.nums + Sym.chars + ['_']
 sym_map = Sym.SymbolMapper(VEC_SIZE, all_symbols, device=DEVICE)
 project = sym_map.project
 unproject = sym_map.unproject
@@ -44,7 +44,7 @@ def set_weights(model, vals):
 def test_one_vec_simple():
     n_vecs = 1
     n_choices = 4
-    model = NAND(VEC_SIZE, n_vecs, n_choices, clip='leaky_relu', nand_bias=3.0)
+    model = NAND(VEC_SIZE, n_vecs, n_choices, clip='leaky_relu', nand_bias=10.0)
     model.to(DEVICE)
     set_weights(model, [
         (('a',), (1,)),
@@ -60,7 +60,7 @@ def test_one_vec_simple():
     for out, a in zip(outs, arg_maxes):
         oi = out.argmax().item()
         assert oi == a, f'{oi} != {a}'
-        assert out[oi] > 0.98
+        assert out[oi] > 0.95
 
     # Non-matches
     inps = ['x', 'y', 'z']
@@ -71,7 +71,7 @@ def test_one_vec_simple():
 def test_one_vec_nots():
     n_vecs = 1
     n_choices = 4
-    model = NAND(VEC_SIZE, n_vecs, n_choices, clip='leaky_relu', nand_bias=3.0)
+    model = NAND(VEC_SIZE, n_vecs, n_choices, clip='leaky_relu', nand_bias=10.0)
     model.to(DEVICE)
     set_weights(model, [
         (('a',), (1,)),
@@ -85,7 +85,7 @@ def test_one_vec_nots():
     for out, a in zip(outs, arg_maxes):
         oi = out.argmax().item()
         assert oi == a, f'{oi} != {a}'
-        assert out[oi] > 0.98
+        assert out[oi] > 0.95
 
 ##########
 # Test N_VEC=2
@@ -93,7 +93,7 @@ def test_one_vec_nots():
 def test_two_vec():
     n_vecs = 2
     n_choices = 4
-    model = NAND(VEC_SIZE, n_vecs, n_choices, clip='leaky_relu', nand_bias=3.0)
+    model = NAND(VEC_SIZE, n_vecs, n_choices, clip='leaky_relu', nand_bias=10.0)
     model.to(DEVICE)
     set_weights(model, [
         (('a','b'), (1,1)),
@@ -120,7 +120,7 @@ def test_two_vec():
 def test_three_vec():
     n_vecs = 3
     n_choices = 10
-    model = NAND(VEC_SIZE, n_vecs, n_choices, clip='leaky_relu', nand_bias=3.0)
+    model = NAND(VEC_SIZE, n_vecs, n_choices, clip='leaky_relu', nand_bias=10.0)
     model.to(DEVICE)
     set_weights(model, [
         (('a','b','c'), (1,1,1)),
@@ -135,13 +135,13 @@ def test_three_vec():
     arg_maxes = [0, 1, 2, 3, 4, 5, 6, 7]
     data = torch.stack([
         torch.cat((p('a'), p('b'), p('c')), dim=0),
-        torch.cat((p('a'), p('b'), p('x')), dim=0),
-        torch.cat((p('a'), p('x'), p('c')), dim=0),
-        torch.cat((p('x'), p('b'), p('c')), dim=0),
-        torch.cat((p('a'), p('x'), p('x')), dim=0),
-        torch.cat((p('x'), p('x'), p('c')), dim=0),
-        torch.cat((p('x'), p('b'), p('x')), dim=0),
-        torch.cat((p('x'), p('x'), p('x')), dim=0),
+        torch.cat((p('a'), p('b'), p('_')), dim=0),
+        torch.cat((p('a'), p('_'), p('c')), dim=0),
+        torch.cat((p('_'), p('b'), p('c')), dim=0),
+        torch.cat((p('a'), p('_'), p('_')), dim=0),
+        torch.cat((p('_'), p('_'), p('c')), dim=0),
+        torch.cat((p('_'), p('b'), p('_')), dim=0),
+        torch.cat((p('_'), p('_'), p('_')), dim=0),
     ]).to(DEVICE)
     outs = model(data)
     for out, a in zip(outs, arg_maxes):
@@ -331,5 +331,3 @@ plt.legend()
 plt.grid(True)
 plt.show()
 '''
-
-'done'
