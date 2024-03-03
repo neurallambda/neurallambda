@@ -1,3 +1,9 @@
+'''
+
+Test NAND stuff
+
+'''
+
 from neurallambda.torch import cosine_similarity
 from neurallambda.util import format_number
 from neurallambda.nand import NAND
@@ -21,11 +27,137 @@ unproject = sym_map.unproject
 p = project
 u = unproject
 
-def set_weights(nand: nn.Module,
-                out_vecs: torch.Tensor,
-                mappings: List[Tuple[Tuple[str, str], Tuple[int, int], str]],
-                redundancy,
-                confidence=3):
+
+##################################################
+# Tests
+
+def set_weights(model, vals):
+    confidence = 5
+    with torch.no_grad():
+        for i, (vs, nvs) in enumerate(vals):
+            model.weight[i, :] = torch.concat([project(x) for x in vs])
+            model.nand_weight[i, :] = torch.tensor([confidence if x==1 else -confidence for x in nvs]).to(DEVICE)
+
+##########
+# Test N_VEC=1
+
+def test_one_vec_simple():
+    n_vecs = 1
+    n_choices = 4
+    model = NAND(VEC_SIZE, n_vecs, n_choices, clip='leaky_relu', nand_bias=3.0)
+    model.to(DEVICE)
+    set_weights(model, [
+        (('a',), (1,)),
+        (('b',), (1,)),
+        (('c',), (1,)),
+    ])
+
+    # Positive matches
+    inps = ['a', 'b', 'c']
+    arg_maxes = [0, 1, 2]
+    data = torch.stack([p(inp) for inp in inps]).to(DEVICE)
+    outs = model(data)
+    for out, a in zip(outs, arg_maxes):
+        oi = out.argmax().item()
+        assert oi == a, f'{oi} != {a}'
+        assert out[oi] > 0.98
+
+    # Non-matches
+    inps = ['x', 'y', 'z']
+    data = torch.stack([p(inp) for inp in inps]).to(DEVICE)
+    outs = model(data)
+    assert outs.max() < 0.1
+
+def test_one_vec_nots():
+    n_vecs = 1
+    n_choices = 4
+    model = NAND(VEC_SIZE, n_vecs, n_choices, clip='leaky_relu', nand_bias=3.0)
+    model.to(DEVICE)
+    set_weights(model, [
+        (('a',), (1,)),
+        (('a',), (0,)),
+    ])
+
+    inps = ['a', 'b']
+    arg_maxes = [0, 1]
+    data = torch.stack([p(inp) for inp in inps]).to(DEVICE)
+    outs = model(data)
+    for out, a in zip(outs, arg_maxes):
+        oi = out.argmax().item()
+        assert oi == a, f'{oi} != {a}'
+        assert out[oi] > 0.98
+
+##########
+# Test N_VEC=2
+
+def test_two_vec():
+    n_vecs = 2
+    n_choices = 4
+    model = NAND(VEC_SIZE, n_vecs, n_choices, clip='leaky_relu', nand_bias=3.0)
+    model.to(DEVICE)
+    set_weights(model, [
+        (('a','b'), (1,1)),
+        (('a','b'), (1,0)),
+        (('a','b'), (0,1)),
+        (('a','b'), (0,0)),
+    ])
+    arg_maxes = [0, 1, 2, 3]
+    data = torch.stack([
+        torch.cat((p('a'), p('b')), dim=0),
+        torch.cat((p('a'), p('x')), dim=0),
+        torch.cat((p('x'), p('b')), dim=0),
+        torch.cat((p('x'), p('y')), dim=0),
+    ]).to(DEVICE)
+    outs = model(data)
+    for out, a in zip(outs, arg_maxes):
+        oi = out.argmax().item()
+        assert oi == a, f'{oi} != {a}'
+        assert out[oi] > 0.95
+
+##########
+# Test N_VEC=3
+
+def test_three_vec():
+    n_vecs = 3
+    n_choices = 10
+    model = NAND(VEC_SIZE, n_vecs, n_choices, clip='leaky_relu', nand_bias=3.0)
+    model.to(DEVICE)
+    set_weights(model, [
+        (('a','b','c'), (1,1,1)),
+        (('a','b','c'), (1,1,0)),
+        (('a','b','c'), (1,0,1)),
+        (('a','b','c'), (0,1,1)),
+        (('a','b','c'), (1,0,0)),
+        (('a','b','c'), (0,0,1)),
+        (('a','b','c'), (0,1,0)),
+        (('a','b','c'), (0,0,0)),
+    ])
+    arg_maxes = [0, 1, 2, 3, 4, 5, 6, 7]
+    data = torch.stack([
+        torch.cat((p('a'), p('b'), p('c')), dim=0),
+        torch.cat((p('a'), p('b'), p('x')), dim=0),
+        torch.cat((p('a'), p('x'), p('c')), dim=0),
+        torch.cat((p('x'), p('b'), p('c')), dim=0),
+        torch.cat((p('a'), p('x'), p('x')), dim=0),
+        torch.cat((p('x'), p('x'), p('c')), dim=0),
+        torch.cat((p('x'), p('b'), p('x')), dim=0),
+        torch.cat((p('x'), p('x'), p('x')), dim=0),
+    ]).to(DEVICE)
+    outs = model(data)
+    for out, a in zip(outs, arg_maxes):
+        oi = out.argmax().item()
+        assert oi == a, f'{oi} != {a}'
+        assert out[oi] > 0.90
+
+
+##################################################
+# Sandbox
+
+def set_weights_2(nand: nn.Module,
+                  out_vecs: torch.Tensor,
+                  mappings: List[Tuple[Tuple[str, str], Tuple[int, int], str]],
+                  redundancy,
+                  confidence=3):
     '''set weights in nand and out_vecs according to mappings. confidence scales
     the initial nand_weight, which gets sigmoided. When confidence=3,
     sigmoid(3)=0.953, which is confident but with reasonable gradients.
@@ -36,14 +168,10 @@ def set_weights(nand: nn.Module,
     '''
 
     n_choices = nand.weight.size(0) // redundancy
-
     with torch.no_grad():
-
         nand.nand_weight[:, :] = torch.tensor([confidence])
-
         temp_weight = torch.zeros(n_choices, redundancy, nand.weight.size(1), device=nand.weight.device)
         temp_nand_weight = torch.zeros(n_choices, redundancy, nand.nand_weight.size(1), device=nand.nand_weight.device)
-
         for choice_i, (vals, out) in enumerate(mappings):
             out_vecs[:, choice_i] = project(out) # no redundancy
 
@@ -53,7 +181,6 @@ def set_weights(nand: nn.Module,
                 r_i = r_i_ % redundancy
                 temp_weight[choice_i, r_i, :] += torch.concat([project(x) for x in ins])
                 temp_nand_weight[choice_i, r_i, :] = torch.tensor([confidence if x==1 else -confidence for x in nand_weight]).to(DEVICE)
-
 
         upto = len(mappings) * redundancy  # don't overwrite rows for which no mappings were set
         nand.weight[:upto] = temp_weight.flatten(start_dim=0, end_dim=1)[:upto]
@@ -101,9 +228,9 @@ BRK
 ##########
 # N_VEC = 2
 
-# '''
+'''
 n_choices = 10
-redundancy = 2
+redundancy = 4
 
 out_vecs = torch.randn(VEC_SIZE, n_choices).to(DEVICE)
 nand = NAND(VEC_SIZE, 2, n_choices * redundancy, clip='leaky_relu').to(DEVICE)
@@ -113,7 +240,7 @@ set_weights(
         ([(('1', '2'), (1, 1))] * redundancy, 'A'),
         ([(('1', '2'), (0, 1))] * redundancy, 'B'),
         ([(('1', '2'), (1, 0))] * redundancy, 'C'),
-        # ([(('N', 'N'), (0, 0))], 'N'),
+        ([(('N', 'N'), (0, 0))], 'N'),
     ], redundancy)
 
 data = torch.stack([
@@ -204,3 +331,5 @@ plt.legend()
 plt.grid(True)
 plt.show()
 '''
+
+'done'
