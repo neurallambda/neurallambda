@@ -155,6 +155,10 @@ NUM_EPOCHS = 60
 # NAND_CLIP = 'leaky_relu'
 NAND_CLIP = 'abs'
 # NAND_CLIP = 'none'
+
+NAND_BIAS = 3.0
+# NAND_BIAS = None
+
 REDUNDANCY = 2
 
 
@@ -164,7 +168,7 @@ REDUNDANCY = 2
 USE_LOSS    = True
 REG_OP      = False # regularization cheats
 REG_VAL     = False # regularization cheats
-NOISE_LVL   = 1e-3
+NOISE_LVL   = 1e-2
 CHEAT = False
 
 SHARP_SCHED = 'random'
@@ -202,7 +206,7 @@ tokens = [
     SEQUENCE_STARTED_SYMBOL, SEQUENCE_FINISHED_SYMBOL, RETURN_L_SYMBOL, RETURN_SUM_SYMBOL, RETURN_R_SYMBOL
 ]
 
-all_symbols = [0,1,2,3,4,5,6,7,8,9] + Sym.chars + tokens
+all_symbols = tokens + [str(x) for x in range(10)]
 sym_map = Sym.SymbolMapper(VEC_SIZE, all_symbols, device=DEVICE)
 project = sym_map.project
 unproject = sym_map.unproject
@@ -272,15 +276,6 @@ start_data_vec = project(START_DATA_SYMBOL)
 nop_vec = project(NULL_OP_SYMBOL)
 wild_vec = project(WILD_SYMBOL)
 
-def project_(x):
-    ''' Try to cast strings to ints '''
-    try:
-        # TODO: this is kinda a hack, and should prob be handled in dataset parsing
-        x = int(x)
-    except:
-        pass
-    return project(x)
-
 def collate_fn(batch):
     """Collate function to handle variable-length sequences, and project symbols to
     vectors.
@@ -303,14 +298,14 @@ def collate_fn(batch):
 
         # Input
         inputs = item['Input']
-        inputs_vec = [project_(i) for i in inputs]
+        inputs_vec = [project(i) for i in inputs]
         num_padding = max_seq_len - len(inputs_vec)
         inputs_vec = torch.stack([start_data_vec] + [padding_vec] * num_padding + inputs_vec)
         out['Input'].append(inputs_vec)
 
         # Output
         outputs = item['Output']
-        outputs_vec = torch.stack([padding_vec] * (num_padding + 1) + [project_(x) for x in outputs])
+        outputs_vec = torch.stack([padding_vec] * (num_padding + 1) + [project(x) for x in outputs])
         out['Output'].append(outputs_vec)
 
         # loss_mask
@@ -319,12 +314,12 @@ def collate_fn(batch):
         out['LossMask'].append(loss_mask_vec)
 
         # stack projected vecs
-        out['PreGlobalOp'].append   (torch.stack([nop_vec] * (num_padding + 1) + [project_(x) for x in item['PreGlobalOp']]))
-        out['PreWorkOp'].append     (torch.stack([nop_vec] * (num_padding + 1) + [project_(x) for x in item['PreWorkOp']]))
-        out['PostGlobalOp'].append  (torch.stack([nop_vec] * (num_padding + 1) + [project_(x) for x in item['PostGlobalOp']]))
-        out['PostGlobalVal'].append (torch.stack([wild_vec] * (num_padding + 1) + [project_(x) for x in item['PostGlobalVal']]))
-        out['PostWorkOp'].append    (torch.stack([nop_vec] * (num_padding + 1) + [project_(x) for x in item['PostWorkOp']]))
-        out['PostWorkVal'].append   (torch.stack([wild_vec] * (num_padding + 1) + [project_(x) for x in item['PostWorkVal']]))
+        out['PreGlobalOp'].append   (torch.stack([nop_vec] * (num_padding + 1) + [project(x) for x in item['PreGlobalOp']]))
+        out['PreWorkOp'].append     (torch.stack([nop_vec] * (num_padding + 1) + [project(x) for x in item['PreWorkOp']]))
+        out['PostGlobalOp'].append  (torch.stack([nop_vec] * (num_padding + 1) + [project(x) for x in item['PostGlobalOp']]))
+        out['PostGlobalVal'].append (torch.stack([wild_vec] * (num_padding + 1) + [project(x) for x in item['PostGlobalVal']]))
+        out['PostWorkOp'].append    (torch.stack([nop_vec] * (num_padding + 1) + [project(x) for x in item['PostWorkOp']]))
+        out['PostWorkVal'].append   (torch.stack([wild_vec] * (num_padding + 1) + [project(x) for x in item['PostWorkVal']]))
 
         # non projected vecs
         out['PreGlobalOp_'].append(item['PreGlobalOp'])
@@ -516,7 +511,7 @@ def extract_integers_from_seq(sequence, mask):
             in_answer = True
         elif symbol == RTAG:
             in_answer = False
-        elif in_answer and isinstance(symbol, int):
+        elif in_answer and symbol in {str(i) for i in range(10)}: # explicitly check str of ints
             integers.append(symbol)
     return integers
 
@@ -576,7 +571,7 @@ def accuracy(model, val_dl, device, debug=False):
                 # Only compare if both lists are of the same length
                 if len(predicted_integers) == len(target_integers):
                     total_predictions += len(predicted_integers)
-                    correct_predictions += (torch.tensor(predicted_integers) == torch.tensor(target_integers)).sum().item()
+                    correct_predictions += sum([p==t for p,t in zip(predicted_integers, target_integers)])
                 else:
                     total_predictions += max(len(predicted_integers), len(target_integers))
                 if debug and batch_idx < 1:
@@ -933,42 +928,10 @@ class Neuralsymbol(nn.Module):
         return outputs, debug
 
 
-
 ##################################################
 #
-# Cyborg: Start with LSTM, morph toward using stacks
+# Cyborg
 #
-
-# def cyop(n_inp, vec_size):
-#     ''' (vec, vec, vec) -> scalar
-#     Useful in stack/queue operations.
-#     '''
-
-#     H = 64
-
-#     return nn.Sequential(
-
-#         # Fn(lambda x: torch.cat(x, dim=-1)),
-#         nn.Linear(n_inp * vec_size, H),
-#         nn.ReLU(),
-#         nn.Linear(H, 2),
-#         nn.Sigmoid(),
-#         Fn(lambda x: (x[:,0], x[:,1]))
-
-#         # NAND(vec_size, n_inp, 2 * REDUNDANCY, clip=NAND_CLIP),
-#         # Fn(lambda x: (x[:,:REDUNDANCY].max(dim=-1).values,
-#         #               x[:,REDUNDANCY:].max(dim=-1).values
-#         #               ))
-
-#         # NAND(vec_size, n_inp, (2 + 1) * REDUNDANCY, clip=NAND_CLIP),
-#         # Fn(lambda x: (x[:,:REDUNDANCY].max(dim=-1).values,
-#         #               x[:,REDUNDANCY:2*REDUNDANCY].max(dim=-1).values
-#         #               ))
-
-#         # Fn(lambda x: (x[:,:REDUNDANCY].max(dim=-1).values,
-#         #               x[:,REDUNDANCY:].max(dim=-1).values
-#         #               ))
-#     )
 
 class Cyborg(nn.Module):
     def __init__(self, vec_size, ):
@@ -978,11 +941,17 @@ class Cyborg(nn.Module):
         N_STACKS = 2
         self.N_STACKS = N_STACKS
 
-        self.REDUNDANCY = 3
-        H = 20  # number of symbols
+        self.REDUNDANCY = 2
+        H = 30  # number of symbols
         self.H = H
-        self.syms = nn.Parameter(torch.randn((H, vec_size)))
-        self.calc_out = NAND(vec_size, 1 + N_STACKS * 1, (H + N_STACKS) * self.REDUNDANCY, clip=NAND_CLIP)
+
+        # Shared Symbol Table
+        self.syms = torch.randn((H, vec_size))  # frozen, must be set externally
+
+        self.calc_out = NAND(vec_size,
+                             1 + N_STACKS,
+                             (H + N_STACKS) * self.REDUNDANCY,
+                             clip=NAND_CLIP, nand_bias=NAND_BIAS)
 
         # STACKS
         stack_depth = 4
@@ -994,16 +963,19 @@ class Cyborg(nn.Module):
         for _ in range(N_STACKS):
             stack = S.Stack(stack_depth, vec_size)
             sharp = nn.Parameter(torch.tensor([init_sharpen]))
-            pop_op  = NAND(vec_size, 1 + N_STACKS, 2 * self.REDUNDANCY, clip=NAND_CLIP)
-            push_op = NAND(vec_size, 1 + N_STACKS, 2 * self.REDUNDANCY, clip=NAND_CLIP)
-            push   = NAND(vec_size, 1 + N_STACKS, (H + N_STACKS) * self.REDUNDANCY, clip=NAND_CLIP)
+            pop_op  = NAND(vec_size, 1 + N_STACKS, 2 * self.REDUNDANCY, clip=NAND_CLIP, nand_bias=NAND_BIAS)
+            push_op = NAND(vec_size, 1 + N_STACKS, 2 * self.REDUNDANCY, clip=NAND_CLIP, nand_bias=NAND_BIAS)
+            push    = NAND(vec_size, 1 + N_STACKS, (H + N_STACKS) * self.REDUNDANCY, clip=NAND_CLIP, nand_bias=NAND_BIAS)
             params = nn.ParameterList([stack, sharp, pop_op, push_op, push])
             self.stacks.append(params)
+
+        # self.dropout = nn.Dropout(0.1)
 
     def forward(self, x):
         device = x.device
         batch_size = x.shape[0]
         self.stack_init_vec = self.stack_init_vec.to(device=device)
+        self.syms = self.syms.to(device=device)
 
         # Stacks prep
         for (stack, _, _, _, _) in self.stacks:
@@ -1036,7 +1008,9 @@ class Cyborg(nn.Module):
                 pushes = push_op(inps)
                 push = einsum('bcv, bcr -> bv',
                               out_opts,
-                              push_fn(inps).view(batch_size, (self.H + self.N_STACKS), self.REDUNDANCY))
+                              (push_fn(inps)).view(batch_size, (self.H + self.N_STACKS), self.REDUNDANCY)
+                              )
+                # push = self.dropout(push)
                 p = stack.pop_or_null_op(sharp,
                                          pops[:,:self.REDUNDANCY].max(dim=1).values,
                                          pops[:,self.REDUNDANCY:].max(dim=1).values)
@@ -1054,10 +1028,18 @@ class Cyborg(nn.Module):
             # Output
             inps = torch.cat([inp] + peek_agains, dim=-1)
 
-            out    = einsum('bcv, bcr -> bv',
-                            out_opts,
-                            self.calc_out(inps).view(batch_size, (self.H + self.N_STACKS), self.REDUNDANCY))
+            out_opts_again = torch.cat([self.syms.expand(batch_size, -1, -1)] +
+                                 [p.unsqueeze(1) for p in peek_agains]
+                                 , dim=1)
 
+            out    = einsum('bcv, bcr -> bv',
+                            out_opts_again,
+                            (self.calc_out(inps)).view(batch_size,
+                                                     self.H + self.N_STACKS,
+                                                     self.REDUNDANCY)
+                            )
+
+            # out = self.dropout(out)
             outputs.append(out)
 
 
@@ -1086,6 +1068,7 @@ print(f'Total Params: {format_number(n_params)}')
 
 ##########
 # Hand code solution
+
 def set_weights(nand: nn.Module,
                 out_vecs: torch.Tensor,
                 mappings: List[Tuple[Tuple[str, str], Tuple[int, int], str]],
@@ -1169,6 +1152,20 @@ def reset_cheat(model):
     # model.select_out_choice
 
     pass
+
+
+# @@@@@@@@@@
+# SET CYBORG SYMBOLS (bc they're frozen)
+
+# for (stack, sharp, pop_op, push_op, push_fn) in model.stacks:
+# model.calc_out
+
+with torch.no_grad():
+    n_sym = model.syms.size(0)
+    for i, c in enumerate(all_symbols):
+        ii = i % n_sym
+        model.syms[ii] = project(c)
+
 
 # @@@@@@@@@@
 
