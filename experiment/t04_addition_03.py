@@ -1036,8 +1036,7 @@ class Cyborg(nn.Module):
                             out_opts_again,
                             (self.calc_out(inps)).view(batch_size,
                                                      self.H + self.N_STACKS,
-                                                     self.REDUNDANCY)
-                            )
+                                                     self.REDUNDANCY))
 
             # out = self.dropout(out)
             outputs.append(out)

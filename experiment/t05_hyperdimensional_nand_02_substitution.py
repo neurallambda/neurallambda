@@ -233,10 +233,12 @@ class NNModel(nn.Module):
         H = 32
 
         self.choice = nn.Sequential(
-            nn.Linear(n_vecs * vec_size, H),
-            nn.ReLU(),
+            nn.Linear(5 * vec_size, H),
+            nn.Tanh(),
+            nn.Linear(H, H),
+            nn.Tanh(),
             # nn.Linear(H, H),
-            # nn.ReLU(),
+            # nn.Tanh(),
             nn.Linear(H, n_choices),
             nn.Sigmoid()
         )
@@ -247,7 +249,7 @@ class NNModel(nn.Module):
     def forward(self, inp: torch.Tensor):
         query, x_name, x_val, y_name, y_val = inp
         batch_size = query.size(0)
-        choices = self.choice(torch.hstack([query, x_name, y_name]))
+        choices = self.choice(torch.hstack([query, x_name, x_val, y_name, y_val]))
         vecs = torch.concat([x_val.unsqueeze(1),
                              y_val.unsqueeze(1),
                              self.vecs.expand(batch_size, -1, -1)
