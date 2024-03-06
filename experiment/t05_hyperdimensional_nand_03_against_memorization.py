@@ -153,9 +153,9 @@ class NNModel(nn.Module):
 
         self.choice = nn.Sequential(
             nn.Linear(6 * vec_size, H), # running_sum + all inputs
+            nn.Sigmoid(),
+            nn.Linear(H, H),
             nn.ReLU(),
-            # nn.Linear(H, H),
-            # nn.ReLU(),
             nn.Linear(H, n_choices * redundancy),
             nn.Sigmoid()
         )
@@ -380,7 +380,7 @@ class SymModel(nn.Module):
 DEVICE = 'cuda'
 VEC_SIZE = 64
 BATCH_SIZE = 100
-NUM_EPOCHS = 300
+NUM_EPOCHS = 200
 LR = 1e-2
 all_symbols =  list(range(10)) + ['a', 'b', 'c', 'd', 'e', 'f']
 sym_map = Sym.SymbolMapper(VEC_SIZE, all_symbols, device=DEVICE)
