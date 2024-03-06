@@ -212,3 +212,15 @@ snakeviz t01_sandbox.prof
   - [X] Time profile results: `cosine_similarity` is the big obvious slowpoke
   - [X] Memory profile results: worst offenders so far are outside the main ML
         loop, and don't really matter: `string_to_neurallambda`, and `neurallambda_to_mem`
+
+
+## TODO:
+
+- Avoiding "Reasoning Shortcuts"
+  - Train multiple tasks. Then a shortcut that would have worked for one task,
+    must also work for the second task if it is to persist, which less likely.
+  - Supervise-train latent space
+  - Self-supervise, IE auto encode. It's hard for a reasoning shortcut to also
+    excel at reconstructing inputs.
+  - Disentanglement. Is this just making sure latent concepts are orthogonal to each other?
+  - energy-based methods.

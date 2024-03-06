@@ -21,6 +21,10 @@ Advance from previous file, do 3 things:
 
 RESULTS:
 
+- Variable indirection seems really interesting, IE, an input value refers to a
+  variable name, referencing a value somewhere else. The NSymbolic stuff eats
+  this for breakfast.
+
 - Distractors Punish: running_sum is ideally calculated from prev sum + new
   number. Allowing a superfluous var to be part of that calc kills
   perf. Interpolating with True allows to ignore an input. This can be done at
@@ -257,11 +261,16 @@ class NAND(nn.Module):
         elif self.clip == 'abs':
             cos_sim = cos_sim.abs()
 
-        interpolated = self.interp([
+        interp = self.interp(method='softmax')
+        sinp = torch.stack([
             cos_sim,                  # Params Match
             1 - cos_sim,              # NOT Params Match
             torch.ones_like(cos_sim), # Ignore (IE becomes: ... AND True)
-        ], method='softmax')
+        ], dim=1) # [batch, n_interpoland, n_choices, n_vecs]
+
+        interpolated = einsum('inv, binv -> bnv', interp, sinp)
+
+        # interpolated = self.interp(, method='softmax')
 
         # # interpolate between cos_sim and 1-cos_sim. This sends 1.0 (parallel) to 0.0
         # # (orthogonal) and vice versa.
@@ -456,14 +465,14 @@ class NNModel(nn.Module):
             attend_var, x_name, x = inps[i]
             inp = torch.stack([running_sum,
                                F.normalize(x, dim=-1),
-                               F.normalize(x_name * attend_var, dim=-1),
-                               torch.randn_like(attend_var) # experiment
+                               F.normalize(x_name * attend_var, dim=-1), # necessary for indirection task
+                               torch.randn_like(attend_var) # experiment, does interpolater ignore?
                                ], dim=1) # [batch, n_vecs, vec_size]
 
             interp = self.interp(method='softmax') # [n_interpolands, n_vecs]
             sinp = torch.stack([inp,
                                 torch.zeros_like(inp), # interpolate to 0 to ignore
-                                torch.randn_like(inp), # noise, for testing
+                                torch.randn_like(inp), # experiment, does interpolater ignore?
                                 ], dim=1) # [batch, n_interpolands, n_vecs, vec_size]
             inp = einsum('in, binv -> bnv', interp, sinp)
 
@@ -600,7 +609,7 @@ test_dl = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=True)
 # GO
 
 experiments = [
-    # {'Model': SymModel, 'redundancy': R, 'n_choices': 10, 'vec_size':VEC_SIZE, 'name': 'SymModel'},
+    {'Model': SymModel, 'redundancy': R, 'n_choices': 10, 'vec_size':VEC_SIZE, 'name': 'SymModel'},
     {'Model': NNModel,  'redundancy': R, 'n_choices': 10, 'vec_size':VEC_SIZE, 'name': 'FFNN'},
 ]
 
