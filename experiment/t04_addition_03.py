@@ -150,7 +150,7 @@ WD = 0.0
 
 INIT_SHARPEN = 10.0
 
-NUM_EPOCHS = 60
+NUM_EPOCHS = 600
 
 # NAND_CLIP = 'leaky_relu'
 NAND_CLIP = 'abs'
@@ -159,7 +159,7 @@ NAND_CLIP = 'abs'
 NAND_BIAS = 3.0
 # NAND_BIAS = None
 
-REDUNDANCY = 2
+REDUNDANCY = 10
 
 
 ##########
@@ -941,7 +941,7 @@ class Cyborg(nn.Module):
         N_STACKS = 2
         self.N_STACKS = N_STACKS
 
-        self.REDUNDANCY = 2
+        self.REDUNDANCY = REDUNDANCY
         H = 30  # number of symbols
         self.H = H
 
@@ -1036,7 +1036,7 @@ class Cyborg(nn.Module):
                             out_opts_again,
                             (self.calc_out(inps)).view(batch_size,
                                                      self.H + self.N_STACKS,
-                                                     self.REDUNDANCY))
+                                                       self.REDUNDANCY))
 
             # out = self.dropout(out)
             outputs.append(out)

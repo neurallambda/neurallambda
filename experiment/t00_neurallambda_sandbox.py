@@ -195,8 +195,8 @@ GC_STEPS = 2
 # A curious person may enjoy playing with each different small program, and
 # watching how it gets reduced step by step.
 
-# # Trivial
-# x, total_steps = "((fn [x] x) 42)", 7
+# Trivial
+x, total_steps = "((fn [x] x) 42)", 7
 
 # # Simple Fn Application: -> '(1 13)
 # x, total_steps = "((fn [x] '(1 x)) 13)", 13
@@ -214,17 +214,17 @@ GC_STEPS = 2
 # x, total_steps = "((fn [x f] (f x)) 42 (fn [y] '(0 y y 100 y)))", 42
 
 
-# Composition: -> (fn [z] '('(z z) '(z z) '(z z)))
-#
-# NOTE: this level of complexity is enough that successful reduction depends on
-#       the starting RNG seed. I think that noise issue can be solved tho.
-x, total_steps = """
-(
- (fn [g f z] (g (f z)))
- (fn [y] '(y y y))
- (fn [x] '(x x))
-)
-""", 53
+# # Composition: -> (fn [z] '('(z z) '(z z) '(z z)))
+# #
+# # NOTE: this level of complexity is enough that successful reduction depends on
+# #       the starting RNG seed. I think that noise issue can be solved tho.
+# x, total_steps = """
+# (
+#  (fn [g f z] (g (f z)))
+#  (fn [y] '(y y y))
+#  (fn [x] '(x x))
+# )
+# """, 53
 
 
 # # Y Combinator: An interesting case, has issues.

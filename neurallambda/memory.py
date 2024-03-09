@@ -2,12 +2,12 @@
 
 The Dictionary-Memory form of a lambda calculus expression.
 
-This is an intermediate form, not yet a neurallambda, where a LC program has
-been converted into a dictionary with integer key addresses, and then each value
-is a `Block`, which is simply a tuple that represents the `Term` at this
-address. The tuple `Block` form represents "tags" marking the type of the
-`Term`. Then, most `Term`s also have `Terms` beneath them, and these are held as
-references to other addresses in the memory dict.
+This is an intermediate form, not yet a neurallambda, where a lambda calc
+program has been converted into a dictionary with integer key addresses, and
+then each value is a `Block`, which is simply a tuple that represents the `Term`
+at this address. The tuple `Block` form represents "tags" marking the type of
+the `Term`. Then, most `Term`s also have `Terms` beneath them, and these are
+held as references to other addresses in the memory dict.
 
 
 An Expression is an ADT of syntactic pieces.
@@ -24,8 +24,6 @@ KEYS: Addresses, which hold ints, which correspond directly to the index in
 
 VALUES: A 1-, 2-, or 3-ary tuple called `Block` (see definition for
         description.
-
-
 
 '''
 
@@ -287,10 +285,6 @@ def process_term(term: Term, next_address: int, memory: Dict[Address, Block], va
 
 ####################
 #  Convert Dictionary `memory_to_terms` -> Expression
-
-class FROM_MEMORY:
-    pass  # for jumping to this location in code
-
 
 ##########
 # Lambda
