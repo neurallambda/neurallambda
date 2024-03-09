@@ -15,6 +15,11 @@ import neurallambda.debug as D
 from neurallambda.torch import cosine_similarity
 
 class Latch(nn.Module):
+    '''A Latch has 3 learned parameters, each vectors: predicate, true,
+    false. It learns to emit false until the predicate has been matched, and
+    then emits true for the rest of time.
+
+    '''
     def __init__(self, vec_size):
         super(Latch, self).__init__()
         self.vec_size = vec_size
