@@ -79,7 +79,7 @@ An important mention is that most of this library works more like "data structur
 Neural Turing Machines, Differentiable Neural Computers, Neurosymbolics, Hyperdimensional Computing / Vector Symbolic Architectures.
 
 
-## 3 Tiers of "Programming Ability" / "Reasoning Ability"
+## Tiers of "Programming Ability" / "Reasoning Ability"
 
 1. An AI can execute programs
 
