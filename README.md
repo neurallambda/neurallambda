@@ -1,33 +1,40 @@
 # Neurallambda
 
-Lambda Calculus, Fully Differentiable. And other NeuroSymbolic Architecture stuff (Stacks, Queues, Addressable Memory, Lists, Trees, Latches, etc.)
+Lambda Calculus, Fully Differentiable. 
+
+And other NeuroSymbolic Architecture stuff (Stacks, Queues, Addressable Memory, Lists, Trees, Latches, etc.)
 
 
 ## The Problem
 
 My premise all comes down to **"reasoning"**, and the lack thereof, in current AI models. I'll provide my working definition of "reasoning", but for a moment, please bear with a couple examples of reasoning failures.
 
-Transformer models cannot reason:
+**Transformer models cannot reason:**
 
-![Blueberry soil pH](doc/blueberries.png)
+<div align="center">
+  <img src="doc/blueberries.png" width="400" alt="Blueberry soil pH">
+</div>
 
 The correct response should have been `4.5 - 5.5`, and in reference to blueberries. These "multi leap" problems are tough for AI.
 
 
-Diffusion models cannot reason:
+**Diffusion models cannot reason:**
 
-![A horse riding a human](doc/horse.png)
+<div align="center">
+  <img src="doc/horse.png" width="400" alt="A horse riding atop a human.">
+</div>
 
 It's training set strongly biased its understanding of the relation between "riding" and "humans" and "horses", and it cannot navigate around that bias (even though the LLM portion recognized this inversion of the normal relationship!).
 
 Current RNNs, SSMs, etc all also lack the ability to reason.
 
-AI is currently like a living textbook. They can capture logic, performed by humans, and added into the training set, and then recombine and emit that human reasoning, and thus appear to reason, even perhaps slightly beyond their scope of training:
+**AI is currently like a living textbook.** They can capture logic, performed by humans, and added into the training set, and then recombine and emit that human reasoning, and thus appear to reason, even perhaps slightly beyond their scope of training:
 
-![Is Socrates mortal?](doc/socrates.png)
+<div align="center">
+  <img src="doc/socrates.png" width="300" alt="Is Socrates mortal?">
+</div>
 
-
-But they cannot perform reasoning themselves.
+**But they cannot perform reasoning themselves.**
 
 ## What is Reasoning?
 
@@ -48,7 +55,9 @@ It is my (unproven) hope that by injecting reasoning into part (just *part*) of 
 
 I am interested especially in the Chomsky Hierarchy:
 
-![Chomsky Hierarchy](https://devopedia.org/images/article/210/7090.1571152901.jpg)
+<div align="center">
+  <img src="https://devopedia.org/images/article/210/7090.1571152901.jpg" width="300" alt="Chomsky Hierarchy">
+</div>
 
 There are several classes of "programs":
 
@@ -101,6 +110,8 @@ tensors
 ## The Frontier
 
 **TL;DR:** Jam some of this work into the [RWKV](https://github.com/BlinkDL/RWKV-LM) project; a pretrained LLM that uses an RNN only, no transformer, but is competitive with same-sized transformers.
+
+**TL;DR 2:** Please let's collaborate! **neurallambda -AT- proton -DOT- me**
 
 This work so far proves that some of the most extreme cases of Reasoning are possible in an end-to-end differentiable setting, but I suspect that the full Lambda Calculus may be (significantly) more heavy handed than is needed.
 
