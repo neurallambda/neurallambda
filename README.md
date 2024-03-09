@@ -140,3 +140,16 @@ For instance, it is known that if you have a classical Finite State Machine, and
     * If the "programs" remain human readable, and perhaps if not, during inference we can replace all the super heavy tensor stuff with super cheap conventional system calls.
 
     * All the "machinery" in this library relies basically just on **linear projections and softmax**. That's mostly it. I'm sure we could compile the wild tensor stuff before training to dramatically reduce the FLOPs needed.
+
+  * **License**: Thus far, this work is unlicensed and I retain all rights to it, but would like to determine the ideal mode of opensourcing it.
+
+
+# Conclusion
+
+There's work to be done!
+   
+I'm happy to accept Grants, GH Issues, PRs, chat with people, start a discord, maybe a youtube to explain some of these ideas, etc.
+
+Please get involved!
+
+**neurallambda -AT- proton -DOT- me**
