@@ -4,6 +4,8 @@ neurallambda_*.zip
 memray*
 *.prof
 log/
+*.png~
+*.kra~
 
 # Python
 .env/
