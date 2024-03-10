@@ -3,9 +3,9 @@
 <div align="center">
   <img src="doc/logo.png" width="250" alt="Blueberry soil pH">
   
-Lambda Calculus, Fully Differentiable. 
+Reasoning AI, via Differentiable Lambda Calculus.
 
-And other NeuroSymbolic Architecture stuff (Stacks, Queues, Addressable Memory, Lists, Trees, Latches, etc.)
+(And other NeuroSymbolic stuff: Stacks, Queues, Addressable Memory, Lists, Trees, Latches, etc.)
 
 </div>
 
