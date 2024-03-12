@@ -128,6 +128,100 @@ I'm improving the ergonomics of this lib daily, but it's research grade right no
 
 I'm sure there's more you'd like to know, help me focus my communication efforts by asking a question in an [Issue](https://github.com/neurallambda/neurallambda/issues) or collabing however you see fit! I'd love to work together.
 
+## Neurallambda, a little more in depth:
+
+Here's a example of reading in a simple program, and doing differentiable beta reduction on it.
+
+```python
+# Human Readable
+
+((fn [x] x) 42)   # python: (lambda x: x)(42)
+
+# Parsed AST
+
+Apply (Lambda (Var "x") (Var "x")) (Int 42)
+
+# Virtual Memory. "A1" means "Address 1", pointing back into this dictionary
+#   All tuples are sized 1, 2 or 3.
+
+{
+0: ("Apply", A1, A3)
+1: ("Lambda", A2, A2)
+2: ("Var", "x")
+3: ("Int", 42)
+}
+
+# 4 Tensors: address, tag, col1, col2
+#   These 4 tensors correspond to those tuples and their addresses
+
+# The concept (not the implementation).
+#   Recall, `project` sends any python object to `torch.randn(vec_size)`, and
+#   keeps a lookup table so you can project back
+{
+project(0): (project("Apply"), project(A1), project(A3))
+project(1): (project("Lambda"), project(A2), project(A2))
+project(2): (project("Var"), project("x"))
+project(3): (project("Int"), project(42))
+}
+
+# Actual tensor implementation is this, but `torch.stack`ed into one
+# tensor. "Column 1/2" refers to the position in that tuple.
+
+| Addres     | Tag               | Column 1     | Column 2    |
+|------------+-------------------+--------------+-------------|
+| project(0) | project("Apply")  | project(A1)  | project(A3) |
+| project(1) | project("Lambda") | project(A2)  | project(A2) |
+| project(2) | project("Var")    | project("x") |             |
+| project(3) | project("Int")    | project(42)  |             |
+
+
+# Beta reduction
+
+1. That tensor above represents the "program".
+
+2. To do `beta reduction`, we'll need to mutate that tensor. To start, we'll
+   need to keep track of whether or not an expression is reduced yet. We can't
+   reduce a compound term until we know if its subexpressions are reduced.
+
+   Let's keep track of "Is Reduced" with 2 new columns, IR1 and IR2. These hold
+   scalars in `[0.0, 1.0]` which are conceptually `bool`s:
+
+| Addres     | Tag               | Column 1     | Column 2    | IR1 | IR2 |
+|------------+-------------------+--------------+-------------+-----+-----|
+| project(0) | project("Apply")  | project(A1)  | project(A3) |   0 |   0 |
+| project(1) | project("Lambda") | project(A2)  | project(A2) |   0 |   0 |
+| project(2) | project("Var")    | project("x") |             |   0 |   0 |
+| project(3) | project("Int")    | project(42)  |             |   0 |   0 |
+
+3. Now we need to start a depth first tree search, to check if nodes of the tensor-AST are reduced yet, and do substitution if they look like `Apply (Lambda x body) y`
+
+   We start at address 0. It's that `Apply`, with an expression on the left
+   (col1) and right (col2). We can see that IR1 and IR2 are both False, so push
+   both on a Neuralstack because we'll need to visit them next.
+
+4. Pop the stack and handle the expression at that address similarly to step 3.
+
+5. If at any point we've come across an expression where both `IR1 ~= 1.0` and
+   `IR2 ~= 1.0`, we can mark this expression also as reduced. This is done by
+   updating the entire tensor-AST. Any cell that refers to this address gets its
+   corresponding `IR` column changed to 1.0. Now remember, this is all happening
+   in this non-binary, superpositiony way, so all of these operations are a
+   little bit fuzzy.
+
+6. Furthermore, if an expression has reduced left and right terms, and looks
+   like `Apply (Lambda param body) arg`, we can do substitution. This is done by
+   replacing the `Apply` term at the current address with the `body`, but also
+   replacing every occurence of `param` with `arg`. Now, big caveat here. In a
+   normal setting, variables are properly scoped, and you only replace `param`
+   with `arg` within the `body`. This library doesn't support var scoping yet,
+   so, every occurence of eg the variable `x` in the entire program gets
+   replaced with the `arg`. If your program came in from a human readable
+   program, via "alpha equivalence" you can make sure that every var name is
+   unique so this isn't an issue in practice. The one place it becomes an issue
+   is with recursion, which this lib doesn't handle yet, but there is a path to
+   it.
+```
+
 ## The Frontier
 
 **TL;DR:** Jam some of this work into the [RWKV](https://github.com/BlinkDL/RWKV-LM) project; a pretrained LLM that uses an RNN only, no transformer, but is competitive with same-sized transformers.
