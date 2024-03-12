@@ -112,7 +112,9 @@ tensors
 
 ## Where to get started with this Lib?
 
-Great question. I'm improving the ergonomics of this lib daily, but it's research grade right now, so, make sure you have a stiff cup of coffee, and a heavy dose of forgiveness at the ready.
+Great question. Right now there's a libraryish portion in `neurallambda/`, and the improvements are starting in `experiments/`, but this whole repo is largely temporarily more like an Open Research project.
+
+I'm improving the ergonomics of this lib daily, but it's research grade right now, so, make sure you have a stiff cup of coffee, and a heavy dose of forgiveness at the ready.
 
 * **[Lambda Calc Example](https://github.com/neurallambda/neurallambda/blob/master/experiment/t00_neurallambda_sandbox.py)**: This should "just run". It demonstrates hand-written programs getting read into tensors, then being beta-reduced for a fixed number of steps, and then the resulting program read back out of tensor land and made human readable. Everything that goes `tensor -> tensor` is backprop friendly (ie just not the `human string -> tensor` portion, nor `tensor -> human string`).
 
@@ -120,7 +122,7 @@ Great question. I'm improving the ergonomics of this lib daily, but it's researc
 
 * **[Stacks](https://github.com/neurallambda/neurallambda/blob/master/neurallambda/stack.py#L65)**: These are great for explaining some underlying concepts. That link shows how the stack's pointer is a superposition of 3 potentialities: the user `push`ed, `pop`ped, or `null_op`ed. If the caller intended a `pop`, they would pass in `should_pop == 1.0`, and `should_push, should_null_op == 0.0`. Then all 3 things happen in superposition, but only one matters. The reason for this is, this superposition technique is required to make the stack differentiable. You can't differentiate `if should_pop: ... elif: should_push...`.
 
-* **[Substitution in lambda calc](https://github.com/neurallambda/neurallambda/blob/master/neurallambda/stack.py#L65)**: If you're craving a headache, check out how substitution is done in the lambda calc example. I'll repeat, this is likely far too heavy handed compared to the theoretical ideal of what we'll eventually stick in an LLM, but, this is an existence proof that reasoning is possible inside a fully differentiable setting, and this `substitution` operation is the key to computation.
+* **[Substitution in lambda calc](https://github.com/neurallambda/neurallambda/blob/master/neurallambda/tensor.py#L523)**: If you're craving a headache, check out how substitution is done in the lambda calc example. I'll repeat, this is likely far too heavy handed compared to the theoretical ideal of what we'll eventually stick in an LLM, but, this is an existence proof that reasoning is possible inside a fully differentiable setting, and this `substitution` operation is the key to computation.
 
 * **[Lighter-weight Substitution](https://github.com/neurallambda/neurallambda/blob/master/experiment/t05_hyperdimensional_nand_02_substitution.py)**: Substitution is so critical to many formalisms of "computation", that I [created this experiment](https://github.com/neurallambda/neurallambda/blob/master/experiment/t05_hyperdimensional_nand_02_substitution.py#L171) to see how simple I could get while still performing something that looks like substitution. It eschews the `neurallambda` stuff, and just uses a small symbolicy module called `NAND` which can take in arbitrary numbers of vectors, determine if they match/don't an internal parameter which conceptually gives a `True/False` analog, and then NAND them all together.
 
