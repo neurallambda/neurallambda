@@ -124,7 +124,7 @@ Great question. I'm improving the ergonomics of this lib daily, but it's researc
 
 * **[Lighter-weight Substitution](https://github.com/neurallambda/neurallambda/blob/master/experiment/t05_hyperdimensional_nand_02_substitution.py)**: Substitution is so critical to many formalisms of "computation", that I [created this experiment](https://github.com/neurallambda/neurallambda/blob/master/experiment/t05_hyperdimensional_nand_02_substitution.py#L171) to see how simple I could get while still performing something that looks like substitution. It eschews the `neurallambda` stuff, and just uses a small symbolicy module called `NAND` which can take in arbitrary numbers of vectors, determine if they match/don't an internal parameter which conceptually gives a `True/False` analog, and then NAND them all together.
 
-I'm sure there's more you'd like to know, help me focus my pedagogy efforts by asking a question in an [Issue](https://github.com/neurallambda/neurallambda/issues) or collabing however you see fit! I'd love to work together.
+I'm sure there's more you'd like to know, help me focus my communication efforts by asking a question in an [Issue](https://github.com/neurallambda/neurallambda/issues) or collabing however you see fit! I'd love to work together.
 
 ## The Frontier
 
