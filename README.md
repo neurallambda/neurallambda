@@ -1,5 +1,9 @@
 # Neurallambda
 
+<a href="https://discord.gg/HRrPTQn2Uf">
+  <img height="32" src="./doc/discord.jpg" alt="Join Discord">
+</a>
+
 <div align="center">
   <img src="doc/logo.png" width="250" alt="Blueberry soil pH">
   
