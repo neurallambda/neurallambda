@@ -197,7 +197,8 @@ project(3): (project("Int"), project(42))
 | project(2) | project("Var")    | project("x") |             |   0 |   0 |
 | project(3) | project("Int")    | project(42)  |             |   0 |   0 |
 
-3. Now we need to start a depth first tree search, to check if nodes of the tensor-AST are reduced yet, and do substitution if they look like `Apply (Lambda x body) y`
+3. Now we need to start a depth first tree search, to check if nodes of the tensor-AST
+   are reduced yet, and do substitution if they look like `Apply (Lambda x body) y`
 
    We start at address 0. It's that `Apply`, with an expression on the left
    (col1) and right (col2). We can see that IR1 and IR2 are both False, so push
