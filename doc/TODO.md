@@ -1,5 +1,12 @@
 # TODO
 
+- Roadmap as of March 2024
+  - [ ] Get Neuralstack + Sum Sequence working. `[t04_addition](./experiments/)`.
+  - [ ] Integrate Neuralstack with RWKV. `[t06_rwkv](./experiments/)`.
+  - [ ] Test new transformer stacks. `[t07_transformer](./experiments/)`.
+
+# Misc
+
 * Toy Problems, to test components:
   * [ ] Sum Sequence
   * [ ] RNG
