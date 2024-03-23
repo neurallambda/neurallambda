@@ -36,6 +36,10 @@ RESULTS:
   interpolation block down weighting the running_sum, whereas I expected it to
   have full weight.
 
+- Training with batch_size=1 got loss of 0.09 after 25 epochs, whereas previous
+  attempts with batch_size=100 only reached ~0.45 at a range of LR and total
+  epochs.
+
 '''
 
 import torch
@@ -71,20 +75,22 @@ import time
 from torch import pi
 from neurallambda.util import format_number
 
+from torch.utils.tensorboard import SummaryWriter
+writer = SummaryWriter('log/t05_hyperdimensional_nand_04_against_memorization_03_stack')
+LOG = True
 
-
-DEVICE = 'cuda'
 torch.set_printoptions(precision=3, sci_mode=False)
-torch.manual_seed(152)
+# torch.manual_seed(152)
 
+DEBUG = True
 DEVICE = 'cuda'
-VEC_SIZE = 64
+VEC_SIZE = 128
 BATCH_SIZE = 100
-NUM_EPOCHS = 30
-LR = 1e-2
-WD = 0.0
+NUM_EPOCHS = 200
+LR = 1e-3
+WD = 1e-3
 
-REDUNDANCY = 10
+REDUNDANCY = 3
 R = REDUNDANCY
 
 NAND_CLIP = 'abs'
@@ -96,10 +102,12 @@ except:
     CONTINUE = False  # on first pass, can't continue
 
 '''
-CONTINUE = True
-CONTINUE = False
-'''
 
+CONTINUE = True
+
+CONTINUE = False
+
+'''
 
 ##################################################
 # NAND Lib
@@ -136,17 +144,17 @@ if False:
 
     # favor the first and the last interpoland more than the middle
     with torch.no_grad():
-        module.weights.data = torch.tensor([[[1.0]], [[0.0]], [[1.0]]])
+        module.weights.data = torch.tensor([[[1.0]], [[0.0]], [[2.0]]])
 
     inps = [torch.tensor([[[1.0]]]), torch.tensor([[[2.0]]]), torch.tensor([[[3.0]]])]
+    inps = torch.stack(inps, dim=1)
 
     favored_values_counts = [0, 0, 0]  # Count how often each interpoland's influence dominates
     n_runs = 1000
 
     for _ in range(n_runs):
-        output = module(inps, method='gumbel_softmax', hard=True)
-        # Find which of the input values the output is closest to
-        closest_inp_idx = (torch.abs(output - torch.stack(inps)).squeeze()).argmin().item()
+        output = module(method='gumbel_softmax', hard=True).unsqueeze(0)
+        closest_inp_idx = output.squeeze(0).argmax().item()
         favored_values_counts[closest_inp_idx] += 1
     print(favored_values_counts)
 
@@ -154,6 +162,8 @@ if False:
     # than the 2nd one, given the parameter settings.
     assert favored_values_counts[0] > n_runs * 0.4 and favored_values_counts[2] > n_runs * 0.4, \
         "Interpolation did not favor the correct interpolands as expected."
+
+    BRK
 
 # @@@@@@@@@@
 
@@ -196,6 +206,7 @@ class NAND(nn.Module):
     def __init__(self, vec_size, n_vecs, n_choices, clip='leaky_relu', nand_bias=3.0):
         super(NAND, self).__init__()
         assert clip in {'leaky_relu', 'abs', 'none'}
+        assert isinstance(vec_size, int)
 
         self.vec_size = vec_size
         self.n_vecs = n_vecs
@@ -234,7 +245,6 @@ class NAND(nn.Module):
             1 - cos_sim,              # NOT Params Match
             torch.ones_like(cos_sim), # Ignore (IE becomes: ... AND True)
         ], dim=1) # [batch, n_interpoland, n_choices, n_vecs]
-
         interpolated = einsum('inv, binv -> bnv', interp, sinp)
 
         # product along n_vecs dimension to aggregate the NAND logic
@@ -256,17 +266,20 @@ class FwdNAND(nn.Module):
         self.n_choices = n_choices
 
         # interpolation factors. 1 -> cossim. 0 -> 1-cossim
-        self.nand_weight = nn.Parameter(torch.rand(n_choices, n_cos_sim))
+        self.nand_weight = nn.Parameter(torch.randn(n_choices, n_cos_sim))
 
     def forward(self, cos_sims):
         # handle either lists or pre-hstacked inputs
 
         if isinstance(cos_sims, list):
-            cos_sims = torch.stack(cos_sims, dim=1)
+            cos_sims = torch.cat(cos_sims, dim=1)
         assert cos_sims.size(1) == self.n_cos_sim
         batch_size = cos_sims.size(0)
 
         cos_sims = cos_sims.unsqueeze(1).expand(-1, self.n_choices, -1)
+
+        # # TODO: hack
+        # interpolated =  cos_sims
 
         # interpolate between cos_sim and 1-cos_sim
         nw = self.nand_weight.sigmoid()
@@ -277,12 +290,168 @@ class FwdNAND(nn.Module):
 
         # product along n_cos_sim dimension to aggregate the NAND logic
         output = interpolated.prod(dim=2)  # [batch, n_choices]
-
         return output
 
 
 ##################################################
 # Run Training
+
+def train_sum(model):
+    print('CHEAT: TRAINING SUM')
+
+    num_epochs = 100
+
+    dataset = []
+    for ux in range(10):
+        for uy in range(10):
+            x = project(ux)
+            y = project(uy)
+            uout = (ux + uy) % 10
+            out = project(uout)
+
+            dataset.append(dict(inps = (x, y), outs = out))
+    dl = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+
+    opt_params = (
+        [model.syms] +
+        list(model.summer.parameters())
+    )
+    opt_params = list(filter(lambda p: p.requires_grad, opt_params))
+    optimizer = optim.Adam(opt_params, lr=1e-1, weight_decay=0.0)
+    for e in range(num_epochs):
+        for batch in dl:
+            inps = batch['inps']
+            trg = batch['outs']
+
+            optimizer.zero_grad()
+
+            out = model.sum(inps)
+
+            loss = (1 - torch.cosine_similarity(trg, out, dim=1)).mean()
+            loss.backward()
+            optimizer.step()
+        if e % 100 == 0:
+            print(f'{e} {loss.item():>.3f}')
+    return opt_params
+
+
+def train_stacks(model):
+    print('CHEAT: TRAINING STACKS')
+
+    num_epochs = 300
+    batch_size = 250
+
+    dataset_len = 1000
+    dataset = []
+    chars = Sym.chars
+    schars = set(Sym.chars)
+    default = torch.zeros(VEC_SIZE, device=DEVICE) # default push_val, eg if a thing is noping
+    default[0] = 1.0
+
+    for _ in range(dataset_len):
+        # Inputs
+        c1 = random.choice(chars)
+        c2 = random.choice(list(schars - {c1}))
+        charset = [c1, c2]
+        uattend = random.choice(charset)
+        uop = random.choice(['pop', 'push'])
+        uxvar = random.choice(charset)
+        ux = random.choice(range(10))
+        uyvar = random.choice(list(set(charset) - {uxvar}))
+        uy = random.choice(range(10))
+        uinps = [uattend, uop, uxvar, ux, uyvar, uy]
+        inps = [project(x) for x in uinps]
+
+        # Outputs
+        if uattend == uxvar and uop == 'push':
+            trg_ops = [0, 1, # stack1 pop/nullop
+                       1, 0, # stack1 push/nullop
+                       0, 1, # stack2 pop/nullop
+                       0, 1] # stack2 push/nullop
+            push_val = project(ux) # push val
+        elif uattend == uxvar and uop == 'pop':
+            trg_ops = [1, 0, 0, 1,
+                       0, 1, 0, 1]
+            push_val = project(ux) # consider default
+        elif uattend == uyvar and uop == 'push':
+            trg_ops = [0, 1, 0, 1,
+                       0, 1, 1, 0]
+            push_val = project(uy)
+        elif uattend == uyvar and uop == 'pop':
+            trg_ops = [0, 1, 0, 1,
+                       1, 0, 0, 1]
+            push_val = project(uy) # consider default
+        else:
+            breakpoint()
+            ERROR
+
+        dataset.append(dict(uinps = uinps, inps = inps,
+                            trg_ops = trg_ops, push_val = push_val))
+
+    dl = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+
+    # for i in range(10):
+    #     print(dataset[i]['uinps'])
+    #     print(dataset[i]['trg_ops'])
+    #     print()
+    # breakpoint()
+
+
+    # Super cheat:
+    with torch.no_grad():
+        model.op_choice.weight[0, :] = project('push')
+        model.op_choice.weight[1, :] = project('pop')
+        model.op_choice.weight[2, :] = project('nop')
+
+        # [n_interp, n_choices, n_vecs], ie [3, 3, 1]
+        model.op_choice.interp.weights[:, 0, :] = torch.tensor([10, 0, 0.], device=DEVICE).unsqueeze(1)
+        model.op_choice.interp.weights[:, 1, :] = torch.tensor([10, 0, 0.], device=DEVICE).unsqueeze(1)
+        model.op_choice.interp.weights[:, 2, :] = torch.tensor([10, 0, 0.], device=DEVICE).unsqueeze(1)
+
+        # [n_choices, n_cossim]
+        model.var_choice.nand_weight[0,:] = torch.tensor([10, -10.], device=DEVICE)
+        model.var_choice.nand_weight[1,:] = torch.tensor([-10, 10.], device=DEVICE)
+
+    opt_params = (
+        # [model.default] +
+        list(model.op_choice.parameters()) +
+        list(model.var_choice.parameters()) +
+        list(model.stacks.parameters())
+
+        # model.parameters()
+
+    )
+    opt_params = list(filter(lambda p: p.requires_grad, opt_params))
+    optimizer = optim.Adam(opt_params, lr=1e-2, weight_decay=0.0)
+    for e in range(num_epochs):
+        for batch in dl:
+            inps = batch['inps']
+            trg_ops  = [x.to(DEVICE, dtype=torch.float) for x in batch['trg_ops']]
+            push_val  = torch.stack([x.to(DEVICE) for x in batch['push_val']])
+
+            optimizer.zero_grad()
+
+            out = model.stack_ops(inps)
+
+            loss = 0
+            for t, o in zip(trg_ops[0:8], out):
+                loss += F.mse_loss(t, o)
+            # breakpoint()
+            loss += (1 - torch.cosine_similarity(push_val, out[8], dim=1)).mean()
+
+            loss.backward()
+            optimizer.step()
+        if e % 1 == 0:
+            print(f'{e} {loss.item():>.3f}')
+
+    if DEBUG:
+        for i in range(10):
+            print([f'{x[i].item():>.2f}' for x in out[:8]])
+        # breakpoint()
+
+    return opt_params
+
 
 def train_and_report(n_choices, redundancy, vec_size, Model, model=None, *args, **kwargs):
     print('------------------------------')
@@ -293,25 +462,21 @@ def train_and_report(n_choices, redundancy, vec_size, Model, model=None, *args, 
         model = Model(vec_size, n_choices, redundancy)
         model.cuda()
 
-    if Model == SymModel:
-        set_weights(
-            model.summer,
-            model.syms,
-            [
-                ([((i, j), (1, 1)) for i in range(10) for j in range(10) if (i+j)%10==0], 0),
-                ([((i, j), (1, 1)) for i in range(10) for j in range(10) if (i+j)%10==1], 1),
-                ([((i, j), (1, 1)) for i in range(10) for j in range(10) if (i+j)%10==2], 2),
-                ([((i, j), (1, 1)) for i in range(10) for j in range(10) if (i+j)%10==3], 3),
-                ([((i, j), (1, 1)) for i in range(10) for j in range(10) if (i+j)%10==4], 4),
-                ([((i, j), (1, 1)) for i in range(10) for j in range(10) if (i+j)%10==5], 5),
-                ([((i, j), (1, 1)) for i in range(10) for j in range(10) if (i+j)%10==6], 6),
-                ([((i, j), (1, 1)) for i in range(10) for j in range(10) if (i+j)%10==7], 7),
-                ([((i, j), (1, 1)) for i in range(10) for j in range(10) if (i+j)%10==8], 8),
-                ([((i, j), (1, 1)) for i in range(10) for j in range(10) if (i+j)%10==9], 9),
+        if isinstance(model, SymModel):
+            print('RUNNING CHEATS')
 
-                # default
-                # ([(('X', 'X'), (0, 0))]*10, 'X'),
-            ], 10, confidence=5)
+            # Train Sum
+            opt_params = train_sum(model)
+            # print('turn off sum gradients')
+            # for p in opt_params:
+            #     p.requires_grad = False
+
+            # Train Stacks
+            opt_params = train_stacks(model)
+            # print('turn off stacks gradients')
+            # for p in opt_params:
+            #     p.requires_grad = False
+
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f'Total Params: {format_number(n_params)}')
@@ -332,13 +497,13 @@ def train_and_report(n_choices, redundancy, vec_size, Model, model=None, *args, 
             inps = batch['inps']
             trg = torch.stack(batch['outs'], dim=1) # list of batch of steps
 
-            # TEST NOISE
-            with torch.no_grad():
-                NOISE_LVL = 1e-2
-                for i in range(len(inps)): # iter over sequence
-                    for ti in range(len(inps[i])): # iter over tuple
-                        inps[i][ti] = inps[i][ti] + torch.randn_like(inps[i][ti]) * NOISE_LVL
-                    # trg = trg + torch.randn_like(trg) * NOISE_LVL
+            # # TODO: EXPERIMENT, TEST NOISE
+            # with torch.no_grad():
+            #     NOISE_LVL = 1e-3
+            #     for i in range(len(inps)): # iter over sequence
+            #         for ti in range(len(inps[i])): # iter over tuple
+            #             inps[i][ti] = inps[i][ti] + torch.randn_like(inps[i][ti]) * NOISE_LVL
+            #         # trg = trg + torch.randn_like(trg) * NOISE_LVL
 
             optimizer.zero_grad()
             output = model(inps)
@@ -353,8 +518,21 @@ def train_and_report(n_choices, redundancy, vec_size, Model, model=None, *args, 
             epoch_loss += loss.item()
             train_loss = epoch_loss / len(train_dl)
         print(f'Epoch: {epoch + 1:02} | Train Loss: {train_loss:.5f}')
+
+        # Log weight histogram
+        if LOG:
+            for name, param in model.named_parameters():
+                if param.requires_grad:
+                    writer.add_histogram(f'weights/{name}', param.data.cpu().numpy(), epoch)
+                    if param.grad is not None:
+                        writer.add_histogram(f'grads/{name}', param.grad.data.cpu().numpy(), epoch)
+
     end = time.time()
     print(f'Epoch: {epoch + 1:02} | Train Loss: {train_loss:.5f}  |  time={end - start:>.2f}')
+
+
+    ##########
+    # EVAL
 
     model.eval()
     correct = 0
@@ -385,109 +563,7 @@ def train_and_report(n_choices, redundancy, vec_size, Model, model=None, *args, 
 
 
 ##################################################
-# Control Model
-
-class NNModel(nn.Module):
-    '''Control model, using standard FFNN. Hm, I'm actually adding
-    unconventional stuff and it's helping.'''
-    def __init__(self, vec_size, n_choices, redundancy, *args, **kwargs):
-        super(NNModel, self).__init__()
-
-        self.vec_size = vec_size
-        self.n_choices = n_choices
-        self.redundancy = redundancy
-
-        H = 64
-        n_vecs = 4
-
-        self.interp = Interpolate(3, (n_vecs,))
-
-        self.choice = nn.Sequential(
-            nn.Linear(n_vecs * vec_size, H), # running_sum + all inputs
-            nn.ReLU(),
-            # nn.Linear(H, H),
-            # nn.ReLU(),
-            nn.Linear(H, n_choices * redundancy),
-            nn.ReLU(),
-        )
-
-        # # use choice to select an output vec
-        self.vecs = nn.Parameter(torch.randn(n_choices, vec_size))
-
-    def forward(self, inps):
-        # type(inps)=list, len(inps)=sequence len
-        # type(inps[0])=list, len(inps[0])=input tuple len
-        # type(inps[0][0])=tensor, inps[0][0].shape = [batch, vec_size]
-        batch_size = inps[0][0].size(0)
-        seq_len = len(inps)
-        device = inps[0][0].device
-
-        outputs = []
-        running_sum = torch.zeros(batch_size, self.vec_size, device=device) + 1e-6
-        for i in range(seq_len):
-            attend_var, x_name, x = inps[i]
-            inp = torch.stack([running_sum,
-                               F.normalize(x, dim=-1),
-                               F.normalize(x_name * attend_var, dim=-1), # necessary for indirection task
-                               torch.randn_like(attend_var) # experiment, does interpolater ignore?
-                               ], dim=1) # [batch, n_vecs, vec_size]
-
-            interp = self.interp(method='softmax') # [n_interpolands, n_vecs]
-            sinp = torch.stack([inp,
-                                torch.zeros_like(inp), # interpolate to 0 to ignore
-                                torch.randn_like(inp), # experiment, does interpolater ignore?
-                                ], dim=1) # [batch, n_interpolands, n_vecs, vec_size]
-            inp = einsum('in, binv -> bnv', interp, sinp)
-
-            inp = inp.flatten(start_dim=1)
-            choices = self.choice(inp)
-            running_sum = torch.einsum('cv, bcr -> bv', self.vecs, choices.view(batch_size, self.n_choices, self.redundancy))
-            running_sum = F.normalize(running_sum, dim=-1)
-            outputs.append(running_sum)
-        outputs = torch.stack(outputs, dim=1)
-        return outputs
-
-
-##################################################
 # Symbolic Model
-
-def set_weights(nand: nn.Module,
-                out_vecs: torch.Tensor,
-                mappings: List[Tuple[Tuple[str, str], Tuple[int, int], str]],
-                redundancy,
-                confidence=3):
-    '''set weights in nand and out_vecs according to mappings. confidence scales
-    the initial nand_weight, which gets sigmoided. When confidence=3,
-    sigmoid(3)=0.953, which is confident but with reasonable gradients.
-
-    Redundancy is handled by view-wrapping tensors, ie, redundant elems are not
-    in adjacent indices.
-
-    '''
-
-    n_choices = nand.weight.size(0) // redundancy
-
-    with torch.no_grad():
-
-        nand.interp.weights[1, :] = torch.tensor([confidence])
-
-        temp_weight = torch.zeros(n_choices, redundancy, nand.weight.size(1), device=nand.weight.device)
-        temp_nand_weight = torch.zeros(n_choices, redundancy, nand.interp.weights[1].size(1), device=nand.interp.weights.device)
-
-        for choice_i, (vals, out) in enumerate(mappings):
-            out_vecs[:, choice_i] = project(out) # no redundancy
-
-            # add all the vecs into the matcher vec
-            for r_i_, (ins, nand_weight) in enumerate(vals):
-                # TODO: modulo redundancy is buggy in nand_weight if it wraps around
-                r_i = r_i_ % redundancy
-                temp_weight[choice_i, r_i, :] += torch.concat([project(x) for x in ins])
-                temp_nand_weight[choice_i, r_i, :] = torch.tensor([confidence if x==1 else -confidence for x in nand_weight]).to(DEVICE)
-
-        upto = len(mappings) * redundancy  # don't overwrite rows for which no mappings were set
-        nand.weight[:upto] = temp_weight.flatten(start_dim=0, end_dim=1)[:upto]
-        nand.interp.weights[1, :upto] = temp_nand_weight.flatten(start_dim=0, end_dim=1)[:upto]
-
 
 class SymModel(nn.Module):
     def __init__(self, vec_size, n_choices, redundancy):
@@ -497,104 +573,158 @@ class SymModel(nn.Module):
         self.n_choices = n_choices
         self.redundancy = redundancy
 
-        # self.syms = nn.Parameter(torch.randn(n_choices, vec_size))
-        self.syms = torch.randn(vec_size, n_choices)
+        self.syms = nn.Parameter(torch.randn(vec_size, n_choices))
+        # self.syms = torch.randn(vec_size, n_choices)
 
-        self.summer = NAND(vec_size, 2, n_choices * redundancy, clip='abs')
+        SUMMER_REDUNDANCY = 10
+        self.SUMMER_REDUNDANCY = SUMMER_REDUNDANCY
+        self.summer = NAND(vec_size, 2, n_choices * SUMMER_REDUNDANCY, clip='abs')
         with torch.no_grad():
             self.summer.interp.weights[0, :] += 5 # bias toward not NOTed
 
         n_cos_sim = 2
-        n_choices_var_choice = 4
-        self.default = nn.Parameter(torch.randn(n_choices_var_choice - 2, vec_size))
-        self.var_choice = FwdNAND(n_cos_sim, n_choices_var_choice)
+        n_choices_var_choice = 2
+        # self.default = nn.Parameter(torch.randn(n_choices_var_choice - 2, vec_size))
+        self.var_choice = FwdNAND(n_cos_sim, n_choices_var_choice) # [attend=xvar + attend=yvar, onehot (x,y,default)]
+        self.op_choice  = NAND(vec_size, 1, 3, clip='leaky_relu', nand_bias=20) # vec -> one-hot of push, pop, or nullop
+
+        # project var_choice result to a vector symbol for use downstream in
+        # stack operation determination
+        # self.op_vals = nn.Parameter(torch.randn(vec_size, n_choices_var_choice))
 
         # Stacks
         N_STACKS = 2
         self.N_STACKS = N_STACKS
         stack_depth = 8
-        init_sharpen = 8.0
+        init_sharpen = 50.0
         self.stacks = nn.ParameterList([])
-        self.stack_init_vec = F.normalize(torch.randn(vec_size), dim=0)
+        # self.stack_init_vec = nn.Parameter(project(0))
+        self.stack_init_vec = project(0)
         self.zero_offset = 1e-3
+
         for _ in range(N_STACKS):
             stack = S.Stack(stack_depth, vec_size)
             sharp = nn.Parameter(torch.tensor([init_sharpen]))
-            pop_op  = NAND(vec_size, 2, 2 * redundancy, clip=NAND_CLIP, nand_bias=NAND_BIAS)
-            push_op = NAND(vec_size, 2, 2 * redundancy, clip=NAND_CLIP, nand_bias=NAND_BIAS)
-            push    = NAND(vec_size, 2, n_choices * redundancy, clip=NAND_CLIP, nand_bias=NAND_BIAS)
-            params = nn.ParameterList([stack, sharp, pop_op, push_op, push])
-            self.stacks.append(params)
 
-        self.dropout = nn.Dropout(0.1)
+            pop_op  = FwdNAND(5, 2) # [push+pop+nop+xvar+yvar+default, Bool]
+            push_op = FwdNAND(5, 2) # [push+pop+nop+xvar+yvar+default, Bool]
+
+
+            # # TODO: NON SYM Experiment
+            # H = 16
+            # pop_op  = nn.Sequential(Fn(lambda x: torch.cat(x, dim=1)), nn.Linear(5, H), nn.ReLU(), nn.Linear(H, H), nn.ReLU(), nn.Linear(H, 2), nn.Sigmoid())
+            # push_op = nn.Sequential(Fn(lambda x: torch.cat(x, dim=1)), nn.Linear(5, H), nn.ReLU(), nn.Linear(H, H), nn.ReLU(), nn.Linear(H, 2), nn.Sigmoid())
+
+            params = nn.ParameterList([stack, sharp, pop_op, push_op])
+            self.stacks.append(params)
 
     def forward(self, all_inps):
         # type(all_inps)=list, len(all_inps)=sequence len
         # type(all_inps[0])=list, len(all_inps[0])=input tuple len
         # type(all_inps[0][0])=tensor, all_inps[0][0].shape = [batch, vec_size]
-        batch_size = all_inps[0][0].size(0)
         seq_len = len(all_inps)
-        device = all_inps[0][0].device
-        self.syms = self.syms.to(device=device)
 
-        # Stacks prep
-        self.stack_init_vec = self.stack_init_vec.to(device=device)
-        for (stack, _, _, _, _) in self.stacks:
-            stack.init(batch_size, self.zero_offset, device)
-            stack.push(self.stack_init_vec.expand(batch_size, -1))
+        batch_size = all_inps[0][0].size(0)
+        device = all_inps[0][0].device
+        self.init_fwd(batch_size, device)
 
         outputs = []
         for i in range(seq_len):
-            attend, opcode, xvar, x, yvar, y = all_inps[i]
+            inps = all_inps[i]
+            attend, opcode, xvar, x, yvar, y = inps
 
-            var_choice = self.var_choice(torch.stack([torch.cosine_similarity(attend, xvar, dim=1),
-                                                      torch.cosine_similarity(attend, yvar, dim=1),], dim=1))
+            self.apply_ops(self.stack_ops(inps))
 
-            # Handle Stacks
-            all_pops = []
-
-            for (stack, sharp, pop_op, push_op, push_fn) in self.stacks:
-
-                push_val = torch.einsum('bc, bcv -> bv',
-                                        var_choice,
-                                        torch.cat([x.unsqueeze(1),
-                                                   y.unsqueeze(1),
-                                                   self.dropout(self.default.expand(batch_size, -1, -1))
-                                                   ], dim=1))
-                push_val = F.normalize(push_val, dim=-1)
-
-                opinp = [opcode, push_val]
-                pops   = pop_op(opinp)
-                pushes = push_op(opinp)
-                p = stack.pop_or_null_op(sharp,
-                                         pops[:,:self.redundancy].max(dim=1).values,
-                                         pops[:,self.redundancy:].max(dim=1).values)
-                stack.push_or_null_op(sharp,
-                                      pushes[:,:self.redundancy].max(dim=1).values,
-                                      pushes[:,self.redundancy:].max(dim=1).values,
-                                      push_val)
-
-            # Peek at stacks
+            # Sum from peeks
             peeks = []
-            for (stack, _, _, _, _) in self.stacks:
+            for (stack, _, _, _) in self.stacks:
                 peeks.append(stack.read())
-
-            summer_choices = self.summer(torch.hstack(peeks))
-            out = torch.einsum('vc, bcr -> bv',
-                                       self.syms,
-                                       self.dropout(summer_choices.view(batch_size,
-                                                                        self.n_choices,
-                                                                        self.redundancy)))
-            out = F.normalize(out, dim=-1)
+            out = self.sum(peeks)
             outputs.append(out)
         outputs = torch.stack(outputs, dim=1)
         return outputs
+
+    def init_fwd(self, batch_size, device):
+        self.syms = self.syms.to(device=device)
+        # self.op_vals = self.op_vals.to(device=device)
+
+        # Stacks prep
+        self.stack_init_vec = self.stack_init_vec.to(device=device)
+        for (stack, _, _, _) in self.stacks:
+            stack.init(batch_size, self.zero_offset, device)
+            stack.push(self.stack_init_vec.expand(batch_size, -1))
+            stack.push(self.stack_init_vec.expand(batch_size, -1))
+            stack.push(self.stack_init_vec.expand(batch_size, -1))
+            stack.push(self.stack_init_vec.expand(batch_size, -1))
+            stack.push(self.stack_init_vec.expand(batch_size, -1))
+            stack.push(self.stack_init_vec.expand(batch_size, -1))
+            stack.push(self.stack_init_vec.expand(batch_size, -1))
+            stack.push(self.stack_init_vec.expand(batch_size, -1))
+
+    def stack_ops(self, inps):
+        ''' Determine stack operations; to be performed later. This allows separate training of this subnet. '''
+        attend, opcode, xvar, x, yvar, y = inps
+        batch_size = attend.size(0)
+
+        sims = torch.stack([torch.cosine_similarity(attend, xvar, dim=1),
+                            torch.cosine_similarity(attend, yvar, dim=1),], dim=1)
+        sims = sims.abs()
+
+        var_choice = self.var_choice(sims) # [batch, 3]
+        # var_choice = sims # TODO
+
+        op_choice = self.op_choice(opcode) # [batch, 3]
+        op_choice = op_choice.abs()
+
+        push_val = torch.einsum('bc, bcv -> bv',
+                                var_choice, # [batch, n_choices]
+                                torch.cat([x.unsqueeze(1),
+                                           y.unsqueeze(1),
+                                           # self.default.expand(batch_size, -1, -1)
+                                           ], dim=1))
+
+
+        out = []
+        for stack, sharp, pop_op, push_op in self.stacks:
+            pops   = pop_op( [var_choice, op_choice])
+            pushes = push_op([var_choice, op_choice])
+            out += [pops[:,0], pops[:,1], pushes[:,0], pushes[:,1]]
+
+        out.append(push_val)
+        # breakpoint()
+
+        return out
+
+    def apply_ops(self, stack_ops):
+        s0_pop, s0_popnop, s0_push, s0_pushnop, s1_pop, s1_popnop, s1_push, s1_pushnop, push_val = stack_ops
+
+        stack0 = self.stacks[0][0]
+        sharp0 = self.stacks[0][1]
+        stack0.pop_or_null_op(sharp0, s0_pop, s0_popnop)
+        stack0.push_or_null_op(sharp0, s0_push, s0_pushnop, push_val)
+
+        stack1 = self.stacks[1][0]
+        sharp1 = self.stacks[1][1]
+        stack1.pop_or_null_op(sharp1, s1_pop, s1_popnop)
+        stack1.push_or_null_op(sharp1, s1_push, s1_pushnop, push_val)
+
+
+    def sum(self, inps):
+        batch_size = inps[0].size(0)
+        summer_choices = self.summer(torch.cat(inps, dim=-1))
+        out = torch.einsum('vc, bcr -> bv',
+                           self.syms,
+                           summer_choices.view(batch_size,
+                                               self.n_choices,
+                                               self.SUMMER_REDUNDANCY))
+        out = F.normalize(out, dim=-1)
+        return out
 
 
 ####################
 # Dataset
 
-all_symbols =  list(range(10)) + ['a', 'b', 'c', 'd', 'e', 'f', 'push', 'pop', 'nop']
+all_symbols =  list(range(10)) + Sym.chars + ['push', 'pop', 'nop']
 sym_map = Sym.SymbolMapper(VEC_SIZE, all_symbols, device=DEVICE)
 project = sym_map.project
 unproject = sym_map.unproject
@@ -653,7 +783,7 @@ def build_dataset(data_len, seq_len, var_names):
             uxpeek = uxstack[-1] if len(uxstack) > 0 else 0
             uypeek = uystack[-1] if len(uystack) > 0 else 0
 
-            uout = (uxpeek + uypeek) %10
+            uout = (uxpeek + uypeek) % 10
             out = project(uout)
 
             uinp = (uattend, uop, uxvar, ux, uyvar, uy)
@@ -667,10 +797,11 @@ def build_dataset(data_len, seq_len, var_names):
                             uouts = uouts, outs = outs))
     return dataset
 
+
 train_dataset = build_dataset(1000, 12, ['a', 'b'])
 train_dl = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 
-test_dataset = build_dataset(200, 12, ['d', 'e', 'f'])
+test_dataset = build_dataset(200, 12, ['d', 'e'])
 test_dl = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=True)
 
 '''
@@ -714,8 +845,7 @@ for i, e in enumerate(experiments):
 
 
 # Default to continuing after a run
-if not CONTINUE:
-    CONTINUE = True
+# CONTINUE = True
 
 
 ##########
@@ -749,3 +879,8 @@ plt.ylabel("Loss")
 plt.legend()
 plt.grid(True)
 plt.show()
+
+
+##########
+
+# torch.cosine_similarity(x.unsqueeze(0), torch.einsum('bc, bcv -> bv', var_choice, torch.cat([x.unsqueeze(1), y.unsqueeze(1),], dim=1)), dim=1)

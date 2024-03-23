@@ -12,3 +12,8 @@ matplotlib
 # Experimentation
 matplotlib
 datasets
+
+
+# LLMs
+transformers
+accelerate
