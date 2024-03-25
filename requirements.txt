@@ -17,3 +17,8 @@ datasets
 # LLMs
 transformers
 accelerate
+
+# RWKV
+#   git clone https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-v5
+#   ln -s RWKV-LM/RWKV-v5/src/ neurallambda/rwkv-v5
+lightning  # pytorch-lightning
