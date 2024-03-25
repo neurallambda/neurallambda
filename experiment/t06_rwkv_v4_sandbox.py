@@ -70,45 +70,107 @@ Rwkv5ForCausalLM(
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch.nn as nn
+torch.manual_seed(42)
+
+
+##################################################
+# Load model
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-def generate_prompt(instruction, input=""):
-    instruction = instruction.strip().replace('\r\n','\n').replace('\n\n','\n')
-    input = input.strip().replace('\r\n','\n').replace('\n\n','\n')
-    if input:
-        return f"""Instruction: {instruction}
+def generate_prompt(prompt):
+    prompt = prompt.strip().replace('\r\n','\n').replace('\n\n','\n')
 
-Input: {input}
+    return f'''User: {prompt}
 
-Response:"""
-    else:
-        return f"""User: hi
-
-Assistant: Hi. I am your assistant and I will provide expert full response in full details. Please feel free to ask any question and I will always answer it.
-
-User: {instruction}
-
-Assistant:"""
+Assistant:'''
 
 try:
     already_loaded
 except:
-    model_name, revision = "RWKV/rwkv-5-world-1b5", "a2d9eeb70aa2095fb81a05b0a306b1fb0e5a6547"
-    # model_name, revision = "RWKV/rwkv-4-world-169m", "598b039e6be5298de3f6f82ee373b6acdfae2858"
+    # model_name, revision = "RWKV/rwkv-5-world-1b5", "a2d9eeb70aa2095fb81a05b0a306b1fb0e5a6547"
+    model_name, revision = "RWKV/rwkv-4-world-169m", "598b039e6be5298de3f6f82ee373b6acdfae2858"
 
     model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True, torch_dtype=torch.float16, revision=revision, device_map=DEVICE)
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True, revision=revision)
     already_loaded = True
 
-text = "Hi review of product plz. Apple iPhone v18."
+
+##################################################
+# Modify
+
+
+class CustomRwkvBlock(nn.Module):
+    def __init__(self, original_module, model_name):
+        super(CustomRwkvBlock, self).__init__()
+        self.original_module = original_module
+        self.model_name = model_name
+
+    def forward(self, *args, **kwargs):
+        '''
+        NOTES on 169m:
+          x: torch.Size([1, 15, 768])
+          state: list, len == 5; all shapes == torch.Size([1, 768, 12])
+          use_cache == True
+          output_attentions == False
+        '''
+
+        if '169m' in model_name:
+            x = args[0]
+            state, use_cache, output_attentions = kwargs.values()
+            return self.original_module(x, state, use_cache, output_attentions)
+
+        elif '1b5' in self.model_name:
+            x = args[0]
+            state, use_cache, output_attentions, seq_mode = kwargs.values()
+
+            new_state = []
+            for s in state:
+                s_ = s + torch.randn_like(s) * 1e-1
+                new_state.append(s_)
+            state = new_state
+
+            x = x + torch.randn_like(x) * 1e-1
+
+            return self.original_module(x, state, use_cache, output_attentions, seq_mode)
+
+    def __getattr__(self, name):
+        """If an attribute is not found in this custom module, try to find it
+        in the original_module."""
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.original_module, name)
+
+#####
+# Replace an RWKV block
+block_id = 10
+
+# replace last experimental block with the original (handy if experimenting in
+# an interpreter)
+if str(type(model.rwkv.blocks[block_id])) == "<class '__main__.CustomRwkvBlock'>":
+    print('replacing')
+    model.rwkv.blocks[block_id] = model.rwkv.blocks[block_id].original_module
+
+# sub in new experimental block
+original_block = model.rwkv.blocks[block_id]
+custom_block = CustomRwkvBlock(original_block, model_name)
+model.rwkv.blocks[block_id] = custom_block
+
+
+##################################################
+# Run
+
+text = "What's the weather like on the Sun?"
 prompt = generate_prompt(text)
 
 inputs = tokenizer(prompt, return_tensors="pt").to(0)
-output = model.generate(inputs["input_ids"],
-                        max_new_tokens=512,
+output = model.generate(**inputs, # ["input_ids"],
+                        max_new_tokens=128,
                         do_sample=False,
-                        temperature=0.0,
-                        top_p=0.3,
-                        top_k=0, )
+                        # temperature=0.1,
+                        # top_p=0.3,
+                        # top_k=2,
+                        )
 print(tokenizer.decode(output[0].tolist(), skip_special_tokens=True))
