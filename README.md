@@ -13,6 +13,18 @@ Reasoning AI, via Differentiable Lambda Calculus.
 
 </div>
 
+## **TL;DR**
+
+If AI can compile a program in its latent space, it can Reason.
+
+"Compile a program" will likely mean something much simpler than the following, but this full e2e-differentiable lambda calculus serves as an existence proof that this is possible, and compatible with gradient descent based AIs.
+
+This library & research endeavor is compatible with SoTA Transformers and RNNs to eventually confer reasoning ability on them.
+
+<div align="center">
+  <img src="doc/neurallambda demo.png" width="300" alt="Neurallambda compiling a program">
+</div>
+
 ## The Problem
 
 My premise all comes down to **"reasoning"**, and the lack thereof, in current AI models. I'll provide my working definition of "reasoning", but for a moment, please bear with a couple examples of reasoning failures.
