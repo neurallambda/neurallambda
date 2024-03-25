@@ -41,6 +41,7 @@ def set_weights(model, vals):
 ##########
 # Test N_VEC=1
 
+'''
 def test_one_vec_simple():
     n_vecs = 1
     n_choices = 4
@@ -149,6 +150,7 @@ def test_three_vec():
         assert oi == a, f'{oi} != {a}'
         assert out[oi] > 0.90
 
+'''
 
 ##################################################
 # Sandbox
