@@ -824,8 +824,9 @@ def reduce_step(
     return tags, col1, col2, ir1, ir2
 
 
-class Neuralbeta:
+class Neuralbeta(nn.Module):
     def __init__(self, nl, n_stack, initial_sharpen_pointer):
+        super(Neuralbeta, self).__init__()
         STACK_INITIAL_SHARPEN = 100
         STACK_ZERO_OFFSET = 1e-3
 
