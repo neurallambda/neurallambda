@@ -12,6 +12,10 @@ log/
 venv/
 .pytest_cache/
 __pycache__/
+lib/
 
 # Haskell
 dist-newstyle/
+
+# RWKV
+neurallambda/rwkv*
