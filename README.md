@@ -21,6 +21,8 @@ If AI can compile a program in its latent space, it can Reason.
 
 This library & research endeavor is compatible with SoTA Transformers and RNNs to eventually confer reasoning ability on them.
 
+(run this demo [here](https://github.com/neurallambda/neurallambda/blob/e3c9dcd94c89640f1cf844ed4060e5369549cb68/demo/d01_neurallambda.py#L7))
+
 <div align="center">
   <img src="doc/neurallambda demo.png" width="300" alt="Neurallambda compiling a program">
 </div>
