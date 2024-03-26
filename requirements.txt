@@ -19,6 +19,9 @@ transformers
 accelerate
 
 # RWKV
+#
+#   sudo apt install ninja-build
 #   git clone https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-v5
-#   ln -s RWKV-LM/RWKV-v5/src/ neurallambda/rwkv-v5
+#   ln -s lib/RWKV-LM/RWKV-v5/src/ rwkv
+#   ln -s lib/RWKV-LM/RWKV-v5/cuda/ cuda
 lightning  # pytorch-lightning
