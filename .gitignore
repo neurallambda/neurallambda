@@ -13,11 +13,7 @@ venv/
 .pytest_cache/
 __pycache__/
 lib/
+*.egg-info/
 
 # Haskell
 dist-newstyle/
-
-# RWKV
-neurallambda/rwkv*
-cuda
-rwkv
