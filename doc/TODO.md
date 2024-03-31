@@ -1,9 +1,44 @@
 # TODO
 
 - Roadmap as of March 2024
-  - [ ] Get Neuralstack + Sum Sequence working. `[t04_addition](./experiments/)`.
-  - [ ] Integrate Neuralstack with RWKV. `[t06_rwkv](./experiments/)`.
-  - [ ] Test new transformer stacks. `[t07_transformer](./experiments/)`.
+  - [ ] E001: Get Neuralstack + Sum Sequence working. `[t04_addition](./experiments/)`.
+  - [ ] E002: Integrate Neuralstack with RWKV. `[t06_rwkv](./experiments/)`.
+  - [ ] E003: Test new transformer stacks. `[t07_transformer](./experiments/)`.
+
+
+# Tickets
+
+- [ ] EMISC: clean up ticketing setup
+- [ ] EMISC: clean up TODO.md
+
+- [ ] E001: Stack should not be nn.Module
+- [ ] E001: Stack.fwd should pass in `stack`, not have as attribute
+- [ ] E001: Stack.initialize should be top-level, optional, module fn
+- [ ] E001: Build MyStack in rwkv repo
+- [ ] E001: Test running it
+
+
+# Tickets
+
+- [ ] Look into error correction, both differentiable (Hopfield net) and
+      non-differentiable (interpolate symbol vector with value from LuT).
+
+- [ ] Try stack in an RNN (`experiment/t03_modulo_game.py`)
+
+- [ ] Try Neurallambda in an RNN
+
+- [ ] Clean up imports
+
+- [ ] Clean up how classes initialize and handle batch_size, dtype, and device
+  - [X] Stack
+  - [ ] Neurallambda
+  - [ ] Neuralbeta
+
+- [X] Profile code, find some hotspots
+  - [X] Time profile results: `cosine_similarity` is the big obvious slowpoke
+  - [X] Memory profile results: worst offenders so far are outside the main ML
+        loop, and don't really matter: `string_to_neurallambda`, and `neurallambda_to_mem`
+
 
 
 # Misc
@@ -131,28 +166,6 @@ snakeviz t01_sandbox.prof
 ```
 
 
-## Tickets
-
-- [ ] Look into error correction, both differentiable (Hopfield net) and
-      non-differentiable (interpolate symbol vector with value from LuT).
-
-- [ ] Try stack in an RNN (`experiment/t03_modulo_game.py`)
-
-- [ ] Try Neurallambda in an RNN
-
-- [ ] Clean up imports
-
-- [ ] Clean up how classes initialize and handle batch_size, dtype, and device
-  - [X] Stack
-  - [ ] Neurallambda
-  - [ ] Neuralbeta
-
-- [X] Profile code, find some hotspots
-  - [X] Time profile results: `cosine_similarity` is the big obvious slowpoke
-  - [X] Memory profile results: worst offenders so far are outside the main ML
-        loop, and don't really matter: `string_to_neurallambda`, and `neurallambda_to_mem`
-
-
 ## TODO:
 
 - Avoiding "Reasoning Shortcuts"
@@ -163,3 +176,7 @@ snakeviz t01_sandbox.prof
     excel at reconstructing inputs.
   - Disentanglement. Is this just making sure latent concepts are orthogonal to each other?
   - energy-based methods.
+
+
+
+# Completed Tickets
