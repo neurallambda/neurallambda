@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project.urls]
+"Homepage" = "https://github.com/neurallambda/neurallambda"
+"Bug Tracker" = "https://github.com/neurallambda/neurallambda/issues"
+
+[project]
+name = "neurallambda"
+version = "0.0.1"
+authors = [
+    { name = "neurallambda", email = "neurallambda@proton.me" },
+]
+description = "Computation in the latent space"
+readme = "README.md"
+requires-python = ">=3.7"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = []
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -4,13 +4,10 @@
 #
 ##################################################
 
-.PHONY: run
-run:
-	PYTHONPATH=. python example/t01_sandbox.py
 
 .PHONY: test
 test:
-	PYTHONPATH=. pytest
+	pytest
 
 
 # USAGE:
@@ -21,7 +18,7 @@ watch:
 	@TEST_FILE=$(filter-out $@,$(MAKECMDGOALS)); \
 	LAST_FILE=""; \
 	LAST_TIME=$$(date +%s); \
-	inotifywait -r -m -e modify,move,create,delete "neurallambda/" "test/" --format '%w%f' --quiet | \
+	inotifywait -r -m -e modify,move,create,delete "src/" "test/" --format '%w%f' --quiet | \
 	while read FILE; do \
 		CURRENT_TIME=$$(date +%s); \
 		if echo "$$FILE" | grep -qE '\.py$$' && ! echo "$$FILE" | grep -qE '\.#'; then \
@@ -30,9 +27,9 @@ watch:
 			else \
 				echo "Python file changed: $$FILE"; \
 				if [ -z "$$TEST_FILE" ]; then \
-					PYTHONPATH=. pytest; \
+					pytest; \
 				else \
-					PYTHONPATH=. pytest $$TEST_FILE; \
+					pytest $$TEST_FILE; \
 				fi; \
 			fi; \
 			LAST_FILE="$$FILE"; \
