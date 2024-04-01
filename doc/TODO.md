@@ -10,6 +10,8 @@
 
 - [ ] EMISC: clean up ticketing setup
 - [ ] EMISC: clean up TODO.md
+- [ ] EMISC: Add directory layout to README
+- [ ] EMISC: Tighten up README
 
 - [ ] E001: Stack should not be nn.Module
 - [ ] E001: Stack.fwd should pass in `stack`, not have as attribute
@@ -18,30 +20,7 @@
 - [ ] E001: Test running it
 
 
-# Tickets
-
-- [ ] Look into error correction, both differentiable (Hopfield net) and
-      non-differentiable (interpolate symbol vector with value from LuT).
-
-- [ ] Try stack in an RNN (`experiment/t03_modulo_game.py`)
-
-- [ ] Try Neurallambda in an RNN
-
-- [ ] Clean up imports
-
-- [ ] Clean up how classes initialize and handle batch_size, dtype, and device
-  - [X] Stack
-  - [ ] Neurallambda
-  - [ ] Neuralbeta
-
-- [X] Profile code, find some hotspots
-  - [X] Time profile results: `cosine_similarity` is the big obvious slowpoke
-  - [X] Memory profile results: worst offenders so far are outside the main ML
-        loop, and don't really matter: `string_to_neurallambda`, and `neurallambda_to_mem`
-
-
-
-# Misc
+# Miscellaneous
 
 * Toy Problems, to test components:
   * [ ] Sum Sequence
@@ -55,10 +34,6 @@
   * [ ] Function over N-window-back
   * [ ] Fn Composition
 
-* Pedagogy:
-  * Motivation of 4 tensors: tag tensor allows sum types, columns 1 and 2 allow product types
-  * Computational Hierarchy: Pattern-matching < Prog Execution < Prog Validation < Prog Generation
-  * References
 
 * NOISE IN STACK VIA "zero_offset" when dotpdting pointer with stack values (IE zero_offset is highly biased, and adds up without cancelling). Randn may be too expensive to generate, plus not backproppable. No fixed value works. Maybe, diminish the values toward zero, and roll them (which makes them orthogonal). Test quantitty of noise reduction of this technique.
 
@@ -105,6 +80,7 @@
   * Make a Dequeue (double ended queue, put and pop from L+R)
 
 * Error correcting of neuralsymbols (eg tags, integers, addresses)
+  * Look into error correction, both differentiable (Hopfield net) and non-differentiable (interpolate symbol vector with value from LuT).
   * Pre-trained + frozen hopfield net? It's differentiable, and, could be linear, so, possibly some big optimizations possible.
   * Brute force: `without_grad` just replace symbols from LUT. This wouldn't work for training though.
 
@@ -141,32 +117,6 @@
     different architectures, it could be to beneficial to have a nice "Free" (as
     in cat theory) data structure, which was based on an Arrow.
 
-## Zip Repo
-
-```sh
-zip -r "neurallambda_$(date +"%Y-%m-%d_%H-%M-%S").zip" . -x "*__pycache__*" -x ".pytest_cache/*" -x ".env/*" -x ".git/*" -x "neurallambda*.zip" -x "*.html" -x "*.bin" -x "*dist-newstyle*" -x "*.prof"
-```
-
-## Profiling tips
-
-* Memory: `memray` makes this so easy:
-
-```sh
-  pip install memray
-  PYTHONPATH=. memray run experiment/t01_sandbox.py
-  memray flamegraph experiment/memray-t01_sandbox.py.64412.bin
-```
-
-* Time: cProfile makes this so easy:
-
-```sh
-pip install snakeviz
-PYTHONPATH=. python -m cProfile -o t01_sandbox.prof experiment/t01_sandbox.py
-snakeviz t01_sandbox.prof
-```
-
-
-## TODO:
 
 - Avoiding "Reasoning Shortcuts"
   - Train multiple tasks. Then a shortcut that would have worked for one task,
@@ -180,3 +130,15 @@ snakeviz t01_sandbox.prof
 
 
 # Completed Tickets
+
+(Recent completions @ bottom)
+
+- [X] EINIT: Initial checkin of a lot of disparate code.
+- [X] EMISC: Clean up imports
+- [X] EMISC: Try stack in an RNN (`experiment/t03_modulo_game.py`)
+- [X] EMISC: Profile code, find some hotspots
+- [X] EMISC: Time profile results: `cosine_similarity` is the big obvious slowpoke
+- [X] EMISC: Memory profile results: worst offenders so far are outside the main ML loop, and don't really matter: `string_to_neurallambda`, and `neurallambda_to_mem`
+- [X] EMISC: Clean up how Stack initializes and handle batch_size, dtype, and device
+- [X] EMISC: README: Motivation of 4 tensors: tag tensor allows sum types, columns 1 and 2 allow product types
+- [X] EMISC: README: Computational Hierarchy: Pattern-matching < Prog Execution < Prog Validation < Prog Generation

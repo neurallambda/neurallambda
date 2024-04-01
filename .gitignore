@@ -6,6 +6,7 @@ memray*
 log/
 *.png~
 *.kra~
+doc/MISC.md
 
 # Python
 .env/
