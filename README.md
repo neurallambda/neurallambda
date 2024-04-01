@@ -59,7 +59,7 @@ doc/
 
 My premise all comes down to **"reasoning"**, and the lack thereof, in current AI models. I'll provide my working definition of "reasoning", but for a moment, please bear with a couple examples of reasoning failures.
 
-**Transformer models cannot reason:** | **Diffusion models cannot reason:**
+**Transformers cannot reason:** | **Diffusion cannot reason:**
 -- | --
 ![](doc/blueberries.png) | ![](doc/horse.png)
 The correct response should have been `4.5 - 5.5`, and in reference to blueberries. These "multi leap" problems are tough for AI. | It's training set strongly biased its understanding of the relation between "riding" and "humans" and "horses", and it cannot navigate around that bias (even though the LLM portion recognized this inversion of the normal relationship!).
