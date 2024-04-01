@@ -27,26 +27,42 @@ This library & research endeavor is compatible with SoTA Transformers and RNNs t
   <img src="doc/neurallambda demo.png" width="300" alt="Neurallambda compiling a program">
 </div>
 
+## Layout
+
+```sh
+demo/
+    d01_neurallambda.py  # The example of e2e differentiable lambda calc
+
+src/neurallambda/
+    language.py          # the language spec of the Lambda Calculus
+    memory.py            # the intermediary addressable "memory" representation
+    stack.py             # a NeuralStack
+    queue.py             # a NeuralQueue
+    symbol.py            # Helpers for projecting python objs to/from floating point tensors
+    tensor.py            # (poor naming) the NeuralLambda and NeuralBeta classes
+    transformer/stack.py # an experiment in adding a Stack to a Transformer
+
+experiment/
+    t00_neurallambda_sandbox.py      # the original Neurallambda demo
+    t01_latch.py                     # a latch is like a stack with depth=1
+    t03_palindrome.py                # a trivial proof that the Stack can train
+    t04_addition*                    # trying to get more complex combos of Stacks to train
+    t05_hyperdimensional_nand*       # a NANDish gate
+    t06_rwkv_v4_sandbox.py           # ignore this, a better attempt is here: https://github.com/neurallambda/RWKV-infctx-trainer
+    t07_transformer_stack_sandbox.py # Can we get a Stack into a transformer?
+
+doc/
+    TODO.md  # Coordinating the roadmap
+```
+
 ## The Problem
 
 My premise all comes down to **"reasoning"**, and the lack thereof, in current AI models. I'll provide my working definition of "reasoning", but for a moment, please bear with a couple examples of reasoning failures.
 
-**Transformer models cannot reason:**
-
-<div align="center">
-  <img src="doc/blueberries.png" width="400" alt="Blueberry soil pH">
-</div>
-
-The correct response should have been `4.5 - 5.5`, and in reference to blueberries. These "multi leap" problems are tough for AI.
-
-
-**Diffusion models cannot reason:**
-
-<div align="center">
-  <img src="doc/horse.png" width="400" alt="A horse riding atop a human.">
-</div>
-
-It's training set strongly biased its understanding of the relation between "riding" and "humans" and "horses", and it cannot navigate around that bias (even though the LLM portion recognized this inversion of the normal relationship!).
+**Transformer models cannot reason:** | **Diffusion models cannot reason:**
+-- | --
+![](doc/blueberries.png) | ![](doc/horse.png)
+The correct response should have been `4.5 - 5.5`, and in reference to blueberries. These "multi leap" problems are tough for AI. | It's training set strongly biased its understanding of the relation between "riding" and "humans" and "horses", and it cannot navigate around that bias (even though the LLM portion recognized this inversion of the normal relationship!).
 
 Current RNNs, SSMs, etc all also lack the ability to reason.
 
