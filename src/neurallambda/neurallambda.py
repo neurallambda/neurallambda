@@ -609,7 +609,7 @@ def reduce_step(
         sharpen_pointer,
         ir1,
         ir2,
-        stack,
+        ss: S.StackState,
         gc_steps:int
 ):
     '''How to Reduce a Neurallambda?
@@ -804,24 +804,24 @@ def reduce_step(
     # now.
 
     # 1. If the current term is a base type, we will need to pop the stack.
-    stack(sharpen_pointer, base_should_push, base_should_pop, base_should_null_op, zero_vec)
+    nss1, _ = S.push_pop_nop(ss, sharpen_pointer, base_should_push, base_should_pop, base_should_null_op, zero_vec)
 
     # 2. If the current term is an unreduced reference, let's push it on the
     # stack to get dealt with.
-    stack(sharpen_pointer, should_push_1, should_pop_1, should_null_op_1, col1_addr)
-    stack(sharpen_pointer, should_push_2, should_pop_2, should_null_op_2, col2_addr)
+    nss2, _ = S.push_pop_nop(nss1, sharpen_pointer, should_push_1, should_pop_1, should_null_op_1, col1_addr)
+    nss3, _ = S.push_pop_nop(nss2, sharpen_pointer, should_push_2, should_pop_2, should_null_op_2, col2_addr)
 
     # 3. If this term has 2 references, we need to check if they both have been
     # reduced. This would happen if this term was pushed, then other stuff got
     # pushed, then eventually reduced. Then we finally pop this original thing,
     # and if it indeed has both references now reduced, we can pop it off the
     # stack.
-    stack(sharpen_pointer, should_push_3, should_pop_3, should_null_op_3, zero_vec)
+    nss4, _ = S.push_pop_nop(nss3, sharpen_pointer, should_push_3, should_pop_3, should_null_op_3, zero_vec)
 
     ir1 = ir1.clip(0, 1)
     ir2 = ir2.clip(0, 1)
 
-    return tags, col1, col2, ir1, ir2
+    return tags, col1, col2, ir1, ir2, nss4
 
 
 class Neuralbeta(nn.Module):
@@ -838,37 +838,20 @@ class Neuralbeta(nn.Module):
         self.ir1 = torch.zeros((nl.batch_size, nl.n_addresses)).to(nl.device)
         self.ir2 = torch.zeros((nl.batch_size, nl.n_addresses)).to(nl.device)
 
-        # Neuralstack, to keep track of where to reduce next
-        self.stack = S.Stack(
-            n_stack,
-            nl.vec_size,
-        )
-        self.stack.init(
-            nl.batch_size,
-            zero_offset=STACK_ZERO_OFFSET,
-            device=nl.device,
-            dtype=torch.float32
-        )
+        # Stack State
+        self.ss = S.initialize(nl.vec_size, n_stack, nl.batch_size, STACK_ZERO_OFFSET, nl.device)
         self.sharpen_pointer = nn.Parameter(torch.tensor([initial_sharpen_pointer], dtype=torch.float))
 
     def push_address(self, address):
         ''' Push an address onto the stack. '''
-        should_push    = torch.ones((self.nl.batch_size,), device=self.stack.device)
-        should_pop     = torch.zeros((self.nl.batch_size,), device=self.stack.device)
-        should_null_op = torch.zeros((self.nl.batch_size,), device=self.stack.device)
-        self.stack(
-            self.sharpen_pointer,
-            should_push,
-            should_pop,
-            should_null_op,
-            address,
-        )
+        self.ss = S.push(self.ss, address)
 
     def select_address(self, address, list_of_values):
+        ''' Get values out of columns (see docstring of top-level `select_address`. '''
         return select_address(address, self.nl.addresses, list_of_values)
 
     def reduce_step(self, at_addr, gc_steps:int):
-        tags, col1, col2, ir1, ir2 = reduce_step(
+        tags, col1, col2, ir1, ir2, nss = reduce_step(
             at_addr,
             self.nl,
 
@@ -876,7 +859,7 @@ class Neuralbeta(nn.Module):
             self.sharpen_pointer,
             self.ir1,
             self.ir2,
-            self.stack,
+            self.ss,
             gc_steps,
         )
         self.nl.tags = tags
@@ -884,82 +867,83 @@ class Neuralbeta(nn.Module):
         self.nl.col2 = col2
         self.ir1 = ir1
         self.ir2 = ir2
+        self.ss = nss
         return None # this function mutates class's state
 
 
 ##################################################
 # CosineSimilarity
 
-class Weight(nn.Module):
-    def __init__(self, input_features, output_features, init_method='kaiming'):
-        super(Weight, self).__init__()
-        self.weight = nn.Parameter(torch.empty(input_features, output_features))
-        self.init_method = init_method
-        self.reset_parameters()
+# class Weight(nn.Module):
+#     def __init__(self, input_features, output_features, init_method='kaiming'):
+#         super(Weight, self).__init__()
+#         self.weight = nn.Parameter(torch.empty(input_features, output_features))
+#         self.init_method = init_method
+#         self.reset_parameters()
 
-    def reset_parameters(self):
-        if self.init_method == 'kaiming':
-            nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
-        elif self.init_method == 'xavier':
-            nn.init.xavier_uniform_(self.weight)
-        elif self.init_method == 'orthogonal':
-            nn.init.orthogonal_(self.weight)
-        else:
-            raise ValueError(f"Invalid initialization method: {self.init_method}")
+#     def reset_parameters(self):
+#         if self.init_method == 'kaiming':
+#             nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+#         elif self.init_method == 'xavier':
+#             nn.init.xavier_uniform_(self.weight)
+#         elif self.init_method == 'orthogonal':
+#             nn.init.orthogonal_(self.weight)
+#         else:
+#             raise ValueError(f"Invalid initialization method: {self.init_method}")
 
-    def forward(self, input):
-        raise Exception("You must not call Weight's forward function ever.")
+#     def forward(self, input):
+#         raise Exception("You must not call Weight's forward function ever.")
 
-class CosineSimilarity(nn.Module):
-    def __init__(self, weight, dim, unsqueeze_inputs=[], unsqueeze_weights=[]):
-        super(CosineSimilarity, self).__init__()
-        self.weight = weight.weight
-        self.dim = dim
-        self.unsqueeze_inputs = unsqueeze_inputs
-        self.unsqueeze_weights = unsqueeze_weights
+# class CosineSimilarity(nn.Module):
+#     def __init__(self, weight, dim, unsqueeze_inputs=[], unsqueeze_weights=[]):
+#         super(CosineSimilarity, self).__init__()
+#         self.weight = weight.weight
+#         self.dim = dim
+#         self.unsqueeze_inputs = unsqueeze_inputs
+#         self.unsqueeze_weights = unsqueeze_weights
 
-    def forward(self, input):
-        for ix in self.unsqueeze_inputs:
-            input = input.unsqueeze(ix)
+#     def forward(self, input):
+#         for ix in self.unsqueeze_inputs:
+#             input = input.unsqueeze(ix)
 
-        weight = self.weight
-        for ix in self.unsqueeze_weights:
-            weight = weight.unsqueeze(ix)
+#         weight = self.weight
+#         for ix in self.unsqueeze_weights:
+#             weight = weight.unsqueeze(ix)
 
-        return torch.cosine_similarity(input, weight, dim=self.dim)
+#         return torch.cosine_similarity(input, weight, dim=self.dim)
 
 
-    def diagnose(self, input):
-        '''An interpreter-time helper to help devs get shapes right.'''
-        print()
+#     def diagnose(self, input):
+#         '''An interpreter-time helper to help devs get shapes right.'''
+#         print()
 
-        # Normal weights
-        print('Input:', input.shape)
-        print('Weight:', self.weight.shape)
-        print()
+#         # Normal weights
+#         print('Input:', input.shape)
+#         print('Weight:', self.weight.shape)
+#         print()
 
-        # Unsquoze Input
-        uinput = torch.empty_like(input)
-        for ix in self.unsqueeze_inputs:
-            uinput = uinput.unsqueeze(ix)
-        print('Unsquoze Input :', uinput.shape)
+#         # Unsquoze Input
+#         uinput = torch.empty_like(input)
+#         for ix in self.unsqueeze_inputs:
+#             uinput = uinput.unsqueeze(ix)
+#         print('Unsquoze Input :', uinput.shape)
 
-        # Unsquoze Weights
-        uweight = torch.empty_like(self.weight)
-        for ix in self.unsqueeze_weights:
-            uweight = uweight.unsqueeze(ix)
-        print('Unsquoze Weight:', uweight.shape)
-        print()
+#         # Unsquoze Weights
+#         uweight = torch.empty_like(self.weight)
+#         for ix in self.unsqueeze_weights:
+#             uweight = uweight.unsqueeze(ix)
+#         print('Unsquoze Weight:', uweight.shape)
+#         print()
 
-        # Broadcasted
-        binput, bweight = torch.broadcast_tensors(uinput, uweight)
-        print('Broadcasted Weight:', binput.shape)
-        print('Broadcasted Exp Input :', bweight.shape)
-        print()
+#         # Broadcasted
+#         binput, bweight = torch.broadcast_tensors(uinput, uweight)
+#         print('Broadcasted Weight:', binput.shape)
+#         print('Broadcasted Exp Input :', bweight.shape)
+#         print()
 
-        # Ouptut
-        out = self(input)
-        print('Out:', out.shape)
+#         # Ouptut
+#         out = self(input)
+#         print('Out:', out.shape)
 
 
 # @@@@@@@@@@

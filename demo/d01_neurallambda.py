@@ -7,7 +7,7 @@ USAGE:
   PYTHONPATH=. python demo/d01_neurallambda.py
 
   # Demo Programs
-  PYTHONPATH=. python demo/d01_neurallambda.py --device cuda --demo-ix 1
+  PYTHONPATH=. python demo/d01_neurallambda.py --device cuda --demo_ix 1
 
   # Custom Program
   PYTHONPATH=. python demo/d01_neurallambda.py --device cuda --n_steps 14 --program "((fn [x] '(x x)) 42)"
@@ -26,7 +26,7 @@ import torch.nn.functional as F
 
 import neurallambda.language as L
 import neurallambda.stack as S
-import neurallambda.tensor as T
+import neurallambda.neurallambda as N
 import neurallambda.memory as M
 
 torch.set_printoptions(precision=3, sci_mode=False)
@@ -56,7 +56,7 @@ def reduce_neurallambda(nl, n_stack, start_address, total_steps, gc_steps, devic
     function will create a helper stack, and some other helper
     functions.'''
 
-    nb = T.Neuralbeta(nl, n_stack, initial_sharpen_pointer=20)
+    nb = N.Neuralbeta(nl, n_stack, initial_sharpen_pointer=20)
     nb.to(device)
     nb.push_address(start_address)
 
@@ -64,7 +64,8 @@ def reduce_neurallambda(nl, n_stack, start_address, total_steps, gc_steps, devic
 
     for step in range(total_steps):
         # The address chosen to be reduced next
-        at_addr = nb.stack.read()
+        # at_addr = nb.stack.read()
+        at_addr = S.read(nb.ss)
 
         # Perform one step of reduction.
         # tags, col1, col2, ir1, ir2 = nb.reduce_step(at_addr, gc_steps)
@@ -81,7 +82,7 @@ def reduce_neurallambda(nl, n_stack, start_address, total_steps, gc_steps, devic
         print()
         print(f'STEP {step} @ix={ix} ----------')
         debug_ixs.append(ix)
-        recon_mem = T.neurallambda_to_mem(
+        recon_mem = N.neurallambda_to_mem(
             nl,
             nl.addresses,
             nl.tags,
@@ -143,7 +144,6 @@ sample_programs = [
 )
 """, 53),
 
-
     # 6)  Y Combinator: An interesting case, HAS ISSUES.
     #
     #  * corrupts if GC is turned on because referenced memory
@@ -170,7 +170,7 @@ def main(args):
     else:
         program, total_steps = sample_programs[args.demo_ix]
 
-    nl = T.string_to_neurallambda(
+    nl = N.string_to_neurallambda(
         program,
         batch_size=BATCH_SIZE,
         n_addresses=N_ADDRESSES,
@@ -192,7 +192,7 @@ def main(args):
         )
 
     # pretty print results
-    S.pp_stack(nb.stack, nl)
+    S.pp_stack(nb.ss, nl)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run a program from the sample_programs list.")

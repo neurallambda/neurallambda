@@ -6,7 +6,7 @@
 
 <div align="center">
   <img src="doc/logo.png" width="250" alt="Blueberry soil pH">
-  
+
 Reasoning AI, via Differentiable Lambda Calculus.
 
 (And other NeuroSymbolic stuff: Stacks, Queues, Addressable Memory, Lists, Trees, Latches, etc.)
@@ -38,8 +38,8 @@ src/neurallambda/
     memory.py            # the intermediary addressable "memory" representation
     stack.py             # a NeuralStack
     queue.py             # a NeuralQueue
-    symbol.py            # Helpers for projecting python objs to/from floating point tensors
-    tensor.py            # (poor naming) the NeuralLambda and NeuralBeta classes
+    symbol.py            # project python objs to/from floating point tensors
+    neurallambda.py      # the NeuralLambda and NeuralBeta classes
     transformer/stack.py # an experiment in adding a Stack to a Transformer
 
 experiment/
@@ -297,7 +297,7 @@ For instance, it is known that if you have a classical Finite State Machine, and
 # Conclusion
 
 There's work to be done!
-   
+
 I'm happy to accept Grants, GH Issues, PRs, chat with people, start a discord, maybe a youtube to explain some of these ideas, etc.
 
 Please get involved!

@@ -8,11 +8,19 @@
 
 # Tickets
 
-- [ ] E001: Stack should not be nn.Module
-- [ ] E001: Stack.fwd should pass in `stack`, not have as attribute
-- [ ] E001: Stack.initialize should be top-level, optional, module fn
-- [ ] E001: Build MyStack in rwkv repo
-- [ ] E001: Test running it
+- [ ] E001: Stack: Test stack initialization: zeros vs small offset vs noise offset vs symbolic offset (eg prebaked "empty" symbol)
+- [ ] E001: Stack: Test pop val interpolation. IE if should_pop~0, popped_val will *still* have high cossim with popped_val interpolated toward 0, and that probably should not be the case. Should interpolate with zero_vec?
+- [ ] E001: Stack: abstract sharpening function
+- [ ] E001: Stack: Test sharpening
+
+
+- [X] E002: Stack should not be nn.Module
+- [X] E002: Stack.fwd should pass in `stack`, not have as attribute
+- [X] E002: Stack.initialize should be top-level, optional, module fn
+- [X] E002: chase through broken tests
+- [X] E002: chase through broken deps (demo/)
+- [ ] E002: Build MyStack in rwkv repo
+- [ ] E002: Test running it in RWKV!
 
 
 # Miscellaneous
