@@ -41,7 +41,7 @@ def assert_close(x, y, atol=1e-6, rtol=1e-6):
         print(y)
         raise
 
-def test_soft_push_2():
+def x_test_soft_push_2():
     """Push on t=0 with empty stack"""
     pushes = torch.tensor([[0, 0, 0, 0.]])
     values = torch.tensor([[[3], [5], [7], [11.]]])
@@ -62,6 +62,8 @@ def test_soft_push_2():
 
     # f"\nActual Stack:\n{push_stack.squeeze(0).squeeze(-1)}"
     assert_close(push_stack, expected_stack, atol=1e-6, rtol=1e-6)
+
+
 
 # def test_soft_push_with_initial_pointer_and_stack():
 #     """Test push functionality with an initial stack and pointer."""

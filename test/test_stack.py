@@ -13,6 +13,7 @@ from neurallambda.torch import Fn
 from typing import Any, Iterable, List, Optional, Tuple
 
 VEC_SIZE = 256
+ZERO_OFFSET = 1e-6
 DEVICE = 'cuda'
 
 tokens = [
@@ -36,50 +37,46 @@ zero = torch.zeros((batch_size,), device=DEVICE)
 sharp = torch.ones((batch_size, 1), device=DEVICE) * 20
 
 def test_forward_simple():
-    stack = S.Stack(n_stack, VEC_SIZE)
-    stack.init(batch_size, 1e-6, DEVICE)
-
+    ss = S.initialize(VEC_SIZE, n_stack, batch_size, ZERO_OFFSET, DEVICE)
     aa = ['a1', 'a2', 'a3']
-    stack(sharp, should_push=one, should_pop=zero, should_null_op=zero, value=ps(aa))
-    out = stack.pop()
-    for t, o in zip(aa, out):
+    ss1, _ = S.push_pop_nop(ss, sharp, should_push=one, should_pop=zero, should_null_op=zero, value=ps(aa))
+    _, pop_val = S.pop(ss1)
+    for t, o in zip(aa, pop_val):
         uo, uo_sim = u(o, return_sim=True)
         assert uo == t
         assert uo_sim.item() > 0.98
 
 def test_forward_multiple():
-    stack = S.Stack(n_stack, VEC_SIZE)
-    stack.init(batch_size, 1e-6, DEVICE)
+    ss = S.initialize(VEC_SIZE, n_stack, batch_size, ZERO_OFFSET, DEVICE)
 
     aa = ['a1', 'a2', 'a3']
     bb = ['b1', 'b2', 'b3']
     cc = ['c1', 'c2', 'c3']
 
-    stack(sharp, should_push=one, should_pop=zero, should_null_op=zero, value=ps(aa)) # push
-    stack(sharp, should_push=one, should_pop=zero, should_null_op=zero, value=ps(bb)) # push
-    stack(sharp, should_push=one, should_pop=zero, should_null_op=zero, value=ps(cc)) # push
+    nss1, _ = S.push_pop_nop(ss, sharp, should_push=one, should_pop=zero, should_null_op=zero, value=ps(aa)) # push
+    nss2, _ = S.push_pop_nop(nss1, sharp, should_push=one, should_pop=zero, should_null_op=zero, value=ps(bb)) # push
+    nss3, _ = S.push_pop_nop(nss2, sharp, should_push=one, should_pop=zero, should_null_op=zero, value=ps(cc)) # push
 
-    out = stack.pop()
+    nss4, out = S.pop(nss3)
     for t, o in zip(cc, out):
         uo, uo_sim = u(o, return_sim=True)
         assert uo == t
         assert uo_sim.item() > 0.98
 
-    out = stack.pop()
+    nss5, out = S.pop(nss4)
     for t, o in zip(bb, out):
         uo, uo_sim = u(o, return_sim=True)
         assert uo == t
         assert uo_sim.item() > 0.98
 
-    out = stack.pop()
+    nss6, out = S.pop(nss5)
     for t, o in zip(aa, out):
         uo, uo_sim = u(o, return_sim=True)
         assert uo == t
         assert uo_sim.item() > 0.98
 
 def test_forward_complex():
-    stack = S.Stack(n_stack, VEC_SIZE)
-    stack.init(batch_size, 1e-6, DEVICE)
+    ss = S.initialize(VEC_SIZE, n_stack, batch_size, ZERO_OFFSET, DEVICE)
 
     aa = ['a1', 'a2', 'a3']
     bb = ['b1', 'b2', 'b3']
@@ -88,88 +85,88 @@ def test_forward_complex():
     ee = ['e1', 'e2', 'e3']
     xx = ['x1', 'x2', 'x3']
 
-    stack(sharp, should_push=one, should_pop=zero, should_null_op=zero, value=ps(aa)) # push
-    stack(sharp, should_push=one, should_pop=zero, should_null_op=zero, value=ps(bb)) # push
+    nss1, _ = S.push_pop_nop(ss, sharp, should_push=one, should_pop=zero, should_null_op=zero, value=ps(aa)) # push
+    nss2, _ = S.push_pop_nop(nss1, sharp, should_push=one, should_pop=zero, should_null_op=zero, value=ps(bb)) # push
 
     # null-ops
-    stack(sharp, should_push=zero, should_pop=zero, should_null_op=one, value=ps(xx))
-    stack(sharp, should_push=zero, should_pop=zero, should_null_op=one, value=ps(xx))
-    stack(sharp, should_push=zero, should_pop=zero, should_null_op=one, value=ps(xx))
-    stack(sharp, should_push=zero, should_pop=zero, should_null_op=one, value=ps(xx))
-    stack(sharp, should_push=zero, should_pop=zero, should_null_op=one, value=ps(xx))
+    nss3, _ = S.push_pop_nop(nss2, sharp, should_push=zero, should_pop=zero, should_null_op=one, value=ps(xx))
+    nss4, _ = S.push_pop_nop(nss3, sharp, should_push=zero, should_pop=zero, should_null_op=one, value=ps(xx))
+    nss5, _ = S.push_pop_nop(nss4, sharp, should_push=zero, should_pop=zero, should_null_op=one, value=ps(xx))
+    nss6, _ = S.push_pop_nop(nss5, sharp, should_push=zero, should_pop=zero, should_null_op=one, value=ps(xx))
+    nss7, _ = S.push_pop_nop(nss6, sharp, should_push=zero, should_pop=zero, should_null_op=one, value=ps(xx))
 
     # pop
-    out = stack(sharp, should_push=zero, should_pop=one, should_null_op=zero, value=ps(xx)) # pop
+    nss8, out = S.push_pop_nop(nss7, sharp, should_push=zero, should_pop=one, should_null_op=zero, value=ps(xx)) # pop
     for t, o in zip(bb, out):
         uo, uo_sim = u(o, return_sim=True)
         assert uo == t
         assert uo_sim.item() > 0.98
 
-    out = stack(sharp, should_push=zero, should_pop=one, should_null_op=zero, value=ps(xx)) # pop
+    nss9, out = S.push_pop_nop(nss8, sharp, should_push=zero, should_pop=one, should_null_op=zero, value=ps(xx)) # pop
     for t, o in zip(aa, out):
         uo, uo_sim = u(o, return_sim=True)
         assert uo == t
         assert uo_sim.item() > 0.98
 
     # push more
-    stack(sharp, should_push=one, should_pop=zero, should_null_op=zero, value=ps(cc)) # push
-    stack(sharp, should_push=one, should_pop=zero, should_null_op=zero, value=ps(dd)) # push
+    nss10, _ = S.push_pop_nop(nss9, sharp, should_push=one, should_pop=zero, should_null_op=zero, value=ps(cc)) # push
+    nss11, _ = S.push_pop_nop(nss10, sharp, should_push=one, should_pop=zero, should_null_op=zero, value=ps(dd)) # push
 
     # null-op more
-    stack(sharp, should_push=zero, should_pop=zero, should_null_op=one, value=ps(xx))
-    stack(sharp, should_push=zero, should_pop=zero, should_null_op=one, value=ps(xx))
+    nss12, _ = S.push_pop_nop(nss11, sharp, should_push=zero, should_pop=zero, should_null_op=one, value=ps(xx))
+    nss13, _ = S.push_pop_nop(nss12, sharp, should_push=zero, should_pop=zero, should_null_op=one, value=ps(xx))
 
     # pop more
-    out = stack(sharp, should_push=zero, should_pop=one, should_null_op=zero, value=ps(xx)) # pop
+    nss14, out = S.push_pop_nop(nss13, sharp, should_push=zero, should_pop=one, should_null_op=zero, value=ps(xx)) # pop
     for t, o in zip(dd, out):
         uo, uo_sim = u(o, return_sim=True)
         assert uo == t
         assert uo_sim.item() > 0.98
 
-    out = stack(sharp, should_push=zero, should_pop=one, should_null_op=zero, value=ps(xx)) # pop
+    nss15, out = S.push_pop_nop(nss14, sharp, should_push=zero, should_pop=one, should_null_op=zero, value=ps(xx)) # pop
     for t, o in zip(cc, out):
         uo, uo_sim = u(o, return_sim=True)
         assert uo == t
         assert uo_sim.item() > 0.98
 
-    stack(sharp, should_push=one, should_pop=zero, should_null_op=zero, value=ps(ee)) # push
+    nss16, _ = S.push_pop_nop(nss15, sharp, should_push=one, should_pop=zero, should_null_op=zero, value=ps(ee)) # push
 
-    out = stack(sharp, should_push=zero, should_pop=one, should_null_op=zero, value=ps(xx)) # pop
+    _, out = S.push_pop_nop(nss16, sharp, should_push=zero, should_pop=one, should_null_op=zero, value=ps(xx)) # pop
     for t, o in zip(ee, out):
         uo, uo_sim = u(o, return_sim=True)
         assert uo == t
         assert uo_sim.item() > 0.98
 
+
 def test_forward_singles():
     ''' test non-forward functions: pop, push, read '''
-    stack = S.Stack(n_stack, VEC_SIZE)
-    stack.init(batch_size, 1e-6, DEVICE)
+    ss = S.initialize(VEC_SIZE, n_stack, batch_size, ZERO_OFFSET, DEVICE)
 
     aa = ['a1', 'a2', 'a3']
     bb = ['b1', 'b2', 'b3']
     cc = ['c1', 'c2', 'c3']
 
     # push
-    stack.push(ps(aa))
-    stack.push(ps(bb))
-    stack.push(ps(cc))
+    nss1 = S.push(ss, ps(aa))
+    nss2 = S.push(nss1, ps(bb))
+    nss3 = S.push(nss2, ps(cc))
 
     # pops
-    out = stack.read()
+    out = S.read(nss3)
     for t, o in zip(cc, out):
         uo, uo_sim = u(o, return_sim=True)
         assert uo == t
         assert uo_sim.item() > 0.98
-    stack.pop()
+    nss4, _ = S.pop(nss3)
 
-    out = stack.read()
+    out = S.read(nss4)
     for t, o in zip(bb, out):
         uo, uo_sim = u(o, return_sim=True)
         assert uo == t
         assert uo_sim.item() > 0.98
-    stack.pop()
+    nss5, _ = S.pop(nss4)
 
-    out = stack.read()
+    out = S.read(nss5)
     for t, o in zip(aa, out):
         uo, uo_sim = u(o, return_sim=True)
         assert uo == t
@@ -178,40 +175,39 @@ def test_forward_singles():
 
 def test_forward_doubles():
     ''' test non-forward functions: pop_or_null_op, push_or_null_op '''
-    stack = S.Stack(n_stack, VEC_SIZE)
-    stack.init(batch_size, 1e-6, DEVICE)
+    ss = S.initialize(VEC_SIZE, n_stack, batch_size, ZERO_OFFSET, DEVICE)
 
     aa = ['a1', 'a2', 'a3']
     bb = ['b1', 'b2', 'b3']
     cc = ['c1', 'c2', 'c3']
 
     # push
-    stack.push_or_null_op(sharp, one, zero, ps(aa))
-    stack.push_or_null_op(sharp, one, zero, ps(bb))
-    stack.push_or_null_op(sharp, one, zero, ps(cc))
+    nss1 = S.push_or_null_op(ss, sharp, one, zero, ps(aa))
+    nss2 = S.push_or_null_op(nss1, sharp, one, zero, ps(bb))
+    nss3 = S.push_or_null_op(nss2, sharp, one, zero, ps(cc))
 
     # null_ops
-    stack.push_or_null_op(sharp, zero, one, ps(aa))
-    stack.push_or_null_op(sharp, zero, one, ps(aa))
-    stack.push_or_null_op(sharp, zero, one, ps(aa))
-    stack.pop_or_null_op(sharp, zero, one)
-    stack.pop_or_null_op(sharp, zero, one)
-    stack.pop_or_null_op(sharp, zero, one)
+    nss4 = S.push_or_null_op(nss3, sharp, zero, one, ps(aa))
+    nss5 = S.push_or_null_op(nss4, sharp, zero, one, ps(aa))
+    nss6 = S.push_or_null_op(nss5, sharp, zero, one, ps(aa))
+    nss7, _ = S.pop_or_null_op(nss6, sharp, zero, one)
+    nss8, _ = S.pop_or_null_op(nss7, sharp, zero, one)
+    nss9, _ = S.pop_or_null_op(nss8, sharp, zero, one)
 
     # pops
-    out = stack.pop_or_null_op(sharp, one, zero)
+    nss10, out = S.pop_or_null_op(nss9, sharp, one, zero)
     for t, o in zip(cc, out):
         uo, uo_sim = u(o, return_sim=True)
         assert uo == t
         assert uo_sim.item() > 0.98
 
-    out = stack.pop_or_null_op(sharp, one, zero)
+    nss11, out = S.pop_or_null_op(nss10, sharp, one, zero)
     for t, o in zip(bb, out):
         uo, uo_sim = u(o, return_sim=True)
         assert uo == t
         assert uo_sim.item() > 0.98
 
-    out = stack.pop_or_null_op(sharp, one, zero)
+    nss12, out = S.pop_or_null_op(nss11, sharp, one, zero)
     for t, o in zip(aa, out):
         uo, uo_sim = u(o, return_sim=True)
         assert uo == t
