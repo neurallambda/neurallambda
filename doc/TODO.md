@@ -14,11 +14,11 @@
 - [ ] E001: Stack: Test sharpening
 
 
-- [ ] E002: Stack should not be nn.Module
-- [ ] E002: Stack.fwd should pass in `stack`, not have as attribute
-- [ ] E002: Stack.initialize should be top-level, optional, module fn
-- [ ] E002: chase through broken tests
-- [ ] E002: chase through broken deps (experiments/)
+- [X] E002: Stack should not be nn.Module
+- [X] E002: Stack.fwd should pass in `stack`, not have as attribute
+- [X] E002: Stack.initialize should be top-level, optional, module fn
+- [X] E002: chase through broken tests
+- [X] E002: chase through broken deps (demo/)
 - [ ] E002: Build MyStack in rwkv repo
 - [ ] E002: Test running it in RWKV!
 

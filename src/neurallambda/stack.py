@@ -231,7 +231,7 @@ def pp_sim_addresses(nl, stack_ix, stack_val, zero_vec, addresses):
     return (stack_ix, null_sim, txts)
 
 
-def pp_stack(stack, nl):
+def pp_stack(ss: StackState, nl):
     ''' Color the indexes in the stack according to the pointer. Calculate a
     similarity between the address at the pointer and every other address in
     `addresses` (and Null). Color code the print out according to
@@ -245,12 +245,12 @@ def pp_stack(stack, nl):
     print()
     print('STACK:')
 
-    ss = stack.stack[BATCH_I]  # [batch, stack_size, vec_size]
-    pp = stack.pointer[BATCH_I] # [batch, stack_size]
+    sb = ss.stack[BATCH_I]  # [batch, stack_size, vec_size]
+    pb = ss.pointer[BATCH_I] # [batch, stack_size]
     BATCH_I = 0
 
     similarities = [] # [(pointer_p, stack_ix, null_sim, txt)]
-    for stack_ix, (stack_val, p) in enumerate(zip(ss, pp)):
+    for stack_ix, (stack_val, p) in enumerate(zip(sb, pb)):
         similarities.append((p,) + pp_sim_addresses(nl, stack_ix, stack_val, nl.zero_vec, addresses[BATCH_I]))
 
     similarities = transform_runs(
