@@ -8,11 +8,6 @@
 
 # Tickets
 
-- [ ] EMISC: clean up ticketing setup
-- [ ] EMISC: clean up TODO.md
-- [ ] EMISC: Add directory layout to README
-- [ ] EMISC: Tighten up README
-
 - [ ] E001: Stack should not be nn.Module
 - [ ] E001: Stack.fwd should pass in `stack`, not have as attribute
 - [ ] E001: Stack.initialize should be top-level, optional, module fn
@@ -142,3 +137,7 @@
 - [X] EMISC: Clean up how Stack initializes and handle batch_size, dtype, and device
 - [X] EMISC: README: Motivation of 4 tensors: tag tensor allows sum types, columns 1 and 2 allow product types
 - [X] EMISC: README: Computational Hierarchy: Pattern-matching < Prog Execution < Prog Validation < Prog Generation
+- [X] EMISC: clean up ticketing setup
+- [X] EMISC: clean up TODO.md
+- [X] EMISC: Add directory layout to README
+- [X] EMISC: Tighten up README
