@@ -19,8 +19,17 @@
 - [X] E002: Stack.initialize should be top-level, optional, module fn
 - [X] E002: chase through broken tests
 - [X] E002: chase through broken deps (demo/)
-- [ ] E002: Build MyStack in rwkv repo
-- [ ] E002: Test running it in RWKV!
+- [X] E002: dataset caching is not working, re-downloads and processes every time.
+- [X] E002: Build MyStack in rwkv repo
+- [X] E002: Test running it in RWKV!
+- [ ] E002: Update prompting strategy in accordance with used dataset
+- [ ] E002: What datasets to start using?
+- [ ] E002: Integrate tensorboard
+- [ ] E002: 4 way test: 1) random init + vanilla RWKV
+- [ ] E002: 4 way test: 2) random init + stack + RWKV
+- [ ] E002: 4 way test: 3) pretrained + vanilla RWKV
+- [ ] E002: 4 way test: 4) pretrained + stack + RWKV
+
 
 
 # Miscellaneous
@@ -68,6 +77,7 @@
 
 * Misc:
   * Improve test coverage
+  * For Stack, pointer is updated with torch.roll. This wraps around, possibly superposing unrelated information. Consider nn.ZeroPad2d(0, 0, -1, 1)
   * Does my computational hierarchy map back to the Chomsky hierarchy?
   * Neuralbeta currently uses kv_loopkup and replace functions that might be better abstracted as a Neuralarray.
   * Try other machines/turing machines than lambda calc:
