@@ -19,7 +19,7 @@ If AI can compile a program in its latent space, it can Reason.
 
 "Compile a program" will likely mean something much simpler than the following, but this full e2e-differentiable lambda calculus serves as an existence proof that this is possible, and compatible with gradient descent based AIs.
 
-This library & research endeavor is compatible with SoTA Transformers and RNNs to eventually confer reasoning ability on them.
+This library & research endeavor is compatible with SoTA RNNs and likely Transformers to eventually confer reasoning ability on them.
 
 (run this demo [here](https://github.com/neurallambda/neurallambda/blob/e3c9dcd94c89640f1cf844ed4060e5369549cb68/demo/d01_neurallambda.py#L7))
 
