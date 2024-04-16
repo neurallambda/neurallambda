@@ -1,11 +1,15 @@
 # Neurallambda
 
+<a href="https://x.com/neurallambda">
+  <img src="https://raster.shields.io/badge/follow-@neurallambda-blue.png?logo=x&color=BD2C00&labelColor=474240" alt="Follow on X" height="20">
+</a>
+&nbsp;&nbsp;
 <a href="https://discord.gg/HRrPTQn2Uf">
-  <img height="32" src="./doc/discord.jpg" alt="Join Discord">
+  <img src="https://raster.shields.io/badge/discord-neurallambda-blue.png?logo=discord&logoColor=ffffff&color=BD2C00&labelColor=474240" alt="Join Discord" height="20">
 </a>
 
 <div align="center">
-  <img src="doc/logo.png" width="250" alt="Blueberry soil pH">
+  <img src="doc/logo.png" width="150" alt="Blueberry soil pH">
 
 Reasoning AI, via Differentiable Lambda Calculus.
 
