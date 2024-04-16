@@ -1,4 +1,4 @@
-# Neurallambda
+# neurallambda
 
 <a href="https://x.com/neurallambda">
   <img src="https://raster.shields.io/badge/follow-@neurallambda-blue.png?logo=x&color=BD2C00&labelColor=474240" alt="Follow on X" height="20">
@@ -17,7 +17,7 @@ Reasoning AI, via Differentiable Lambda Calculus.
 
 </div>
 
-## **TL;DR**
+## **tl;dr**
 
 If AI can compile a program in its latent space, it can Reason.
 
@@ -31,7 +31,7 @@ This library & research endeavor is compatible with SoTA RNNs and likely Transfo
   <img src="doc/neurallambda demo.png" width="300" alt="Neurallambda compiling a program">
 </div>
 
-## Layout
+## layout
 
 ```sh
 demo/
@@ -59,7 +59,7 @@ doc/
     TODO.md  # Coordinating the roadmap
 ```
 
-## The Problem
+## the problem
 
 My premise all comes down to **"reasoning"**, and the lack thereof, in current AI models. I'll provide my working definition of "reasoning", but for a moment, please bear with a couple examples of reasoning failures.
 
@@ -78,7 +78,7 @@ Current RNNs, SSMs, etc all also lack the ability to reason.
 
 **But they cannot perform reasoning themselves.**
 
-## What is Reasoning?
+## what is reasoning?
 
 **Reasoning** is the ability to know true things without having learned them.
 
@@ -93,7 +93,7 @@ To make **reasoning** tractable for the scope of this library, I will consider f
 It is my (unproven) hope that by injecting reasoning into part (just *part*) of the architecture of LLMs, standard LLMs can begin to reason about natural language concerns (IE recipes, business advice, science, etc, and not just cold "programs"), and then beyond to other modes such as vision.
 
 
-## What are programs?
+## what are programs?
 
 I am interested especially in the Chomsky Hierarchy:
 
@@ -116,12 +116,12 @@ This library ports this "machinery" into the world of fully differentiable Tenso
 An important mention is that most of this library works more like "data structures" and "machinery" than classical neural nets. This work can all operate *untrained*. IE the lambda calculus example executes programs with zero training/dataset/etc. It just works with whatever program you feed into it, like a python interpreter.
 
 
-## Prior Art
+## prior art
 
 Neural Turing Machines, Differentiable Neural Computers, Neurosymbolics, Hyperdimensional Computing / Vector Symbolic Architectures.
 
 
-## Tiers of "Programming Ability" / "Reasoning Ability"
+## tiers of "programming ability" / "reasoning ability"
 
 1. An AI can execute programs
 
@@ -148,7 +148,7 @@ tensors
 '(42 42 42)              # In python syntax: [42, 42, 42]
 ```
 
-## Where to get started with this Lib?
+## where to get started with this lib?
 
 Great question. Right now there's a libraryish portion in `neurallambda/`, and the improvements are starting in `experiments/`, but this whole repo is largely temporarily more like an Open Research project.
 
@@ -166,7 +166,7 @@ I'm improving the ergonomics of this lib daily, but it's research grade right no
 
 I'm sure there's more you'd like to know, help me focus my communication efforts by asking a question in an [Issue](https://github.com/neurallambda/neurallambda/issues) or collabing however you see fit! I'd love to work together.
 
-## Neurallambda, a little more in depth:
+## neurallambda, a little more in depth:
 
 Here's a example of reading in a simple program, and doing differentiable beta reduction on it.
 
@@ -261,7 +261,7 @@ project(3): (project("Int"), project(42))
    it.
 ```
 
-## The Frontier
+## the frontier
 
 **TL;DR:** Jam some of this work into the [RWKV](https://github.com/BlinkDL/RWKV-LM) project; a pretrained LLM that uses an RNN only, no transformer, but is competitive with same-sized transformers.
 
@@ -298,7 +298,7 @@ For instance, it is known that if you have a classical Finite State Machine, and
   * **License**: Thus far, this work is unlicensed and I retain all rights to it, but would like to determine the ideal mode of opensourcing it.
 
 
-# Conclusion
+# conclusion
 
 There's work to be done!
 
