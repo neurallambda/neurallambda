@@ -59,7 +59,7 @@ def replace(new_value, prev_value, tensr):
     return  keep + rep
 
 
-def kv_insert(state_k, state_v, k, x, eps=1e-8, cos_sim_keys=True):
+def kv_insert(state_k, state_v, k, x, eps=1e-8):
     '''
     Args:
       state_k: [batch?, address, key]   # batch dim optional
