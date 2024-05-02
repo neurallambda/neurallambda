@@ -117,7 +117,6 @@ import torch.nn.functional as F
 from torch.nn.functional import elu, selu, gelu, leaky_relu
 import neurallambda.symbol as Sym
 import copy
-from neurallambda.tensor import CosineSimilarity, Weight, ReverseCosineSimilarity
 from neurallambda.torch import NormalizedLinear, Fn, Parallel, Cat, Stack, Diagnose, Id, cosine_similarity, NuLinear, Choice
 from neurallambda.util import print_grid, colored, format_number
 import re

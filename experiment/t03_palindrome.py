@@ -289,7 +289,6 @@ class NeuralstackOnly(nn.Module):
         self.n_stack = 12
         self.initial_sharpen = 5
         self.stack_vec_size = input_dim
-        self.stack = S.Stack(self.n_stack, self.stack_vec_size)
         self.sharpen_pointer = nn.Parameter(torch.tensor([5.0]))
 
         ##########
@@ -317,8 +316,10 @@ class NeuralstackOnly(nn.Module):
         device = x.device
         batch_size = x.shape[0]
         vec_size = x.shape[2]
-        # stack = S.Stack(self.n_stack, self.stack_vec_size)
-        self.stack.init(batch_size, zero_offset, device)
+        dtype = x.dtype
+
+        # self.stack.init(batch_size, zero_offset, device)
+        ss = S.initialize(self.input_dim, self.n_stack, batch_size, zero_offset, device, dtype=dtype)
 
         # Latch Init
         # latch_state = torch.zeros((batch_size, self.input_dim), device=device) + zero_offset
@@ -351,8 +352,8 @@ class NeuralstackOnly(nn.Module):
             null_op = torch.zeros_like(pop)
 
             # Update Stack
-            self.stack(self.sharpen_pointer, push, pop, null_op, inp)
-            s = self.stack.read()
+            ss, pop_val = S.push_pop_nop(ss, self.sharpen_pointer, push, pop, null_op, inp)
+            s = S.read(ss)
 
             out = (
                 einsum('b, bv -> bv', pop, s)
@@ -377,7 +378,7 @@ class NeuralstackOnly(nn.Module):
             latch_states.append(latch_state)
             relay.append(latch_state)
             relay = relay[1:]
-            stack_tops.append(self.stack.read())
+            stack_tops.append(S.read(ss))
 
         outputs = torch.stack(outputs, dim=1)
 
