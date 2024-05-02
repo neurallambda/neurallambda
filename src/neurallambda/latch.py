@@ -42,12 +42,14 @@ class Latch(nn.Module):
         )
 
 class DataLatch(nn.Module):
-    def __init__(self, vec_size, init_scale, dropout=0.01):
+    def __init__(self, vec_size, init_scale, dropout=None):
         super(DataLatch, self).__init__()
         self.vec_size = vec_size
         self.init_scale = init_scale
         self.enable = nn.Parameter(torch.randn(vec_size, ) * init_scale)
-        self.dropout = torch.nn.Dropout(dropout)
+        self.dropout = dropout
+        if dropout is not None:
+            self.dropout = torch.nn.Dropout(dropout)
 
     def forward(self, state, enable, data):
         # state  : [batch_size, vec_size]
@@ -67,4 +69,6 @@ class DataLatch(nn.Module):
         if_not_matched  = einsum('bv, b -> bv', state, 1-matched)
 
         out = if_matched + if_not_matched
-        return self.dropout(out)
+        if self.dropout is not None:
+            out = self.dropout(out)
+        return out
