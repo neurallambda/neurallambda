@@ -40,6 +40,13 @@ def print_grid(data):
         formatted_row = "  ".join(str(item).ljust(width) for item, width in zip(row, column_widths))
         print(formatted_row)
 
+def print_model_info(model):
+    print('------------')
+    print('MODEL PARAMS')
+    info = []
+    for name, param in model.named_parameters():
+        info.append((name, param.numel(), f'{list(param.shape)}'))
+    print_grid(info)
 
 def iterator(all_datasets: List[Dataset], keys: List[str], special_tokens):
     ''' Iterate over a list of datasets and build a vocab for them. '''
@@ -170,21 +177,19 @@ def build_tokenizer_dataloader(
 
 torch.manual_seed(11)
 DEVICE = 'cuda'
-BATCH_SIZE = 32
 VEC_SIZE = 256
 
-TRAIN_NUM_SAMPLES = 1000
-TRAIN_MAX_SEQUENCE_LENGTH = 20
+TRAIN_NUM_SAMPLES = 2000
+TRAIN_MAX_SEQUENCE_LENGTH = 10
 
-VAL_NUM_SAMPLES = 100
-VAL_MAX_SEQUENCE_LENGTH = 30
-
-BATCH_SIZE = 10
+VAL_NUM_SAMPLES = 200
+VAL_MAX_SEQUENCE_LENGTH = 20
 
 LR = 1e-2
+BATCH_SIZE = 32
 
 NUM_EPOCHS = 8
-GRAD_CLIP = 10
+GRAD_CLIP = None
 
 # Symbols that go into palindrome
 train_lang = 'a b c d e f g h i j'.split(' ')
@@ -225,55 +230,131 @@ val_raw = sorted(val_raw, key=lambda x: len(x['inputs']))
 
 tokenizer, (train_dl, val_dl) = build_tokenizer_dataloader([train_raw, val_raw])
 
-# dataloader_info(train_loader, tokenizer)
-# dataloader_info(val_loader, tokenizer)
-
+# dataloader_info(train_dl, tokenizer)
 
 
 ##########
 # LSTM
 
 class LSTMModel(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
+    def __init__(self, input_dim, hidden_dim, output_dim, tokenizer):
         super(LSTMModel, self).__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
+
+        self.vocab_size = tokenizer.get_vocab_size()
+        self.embeddings = nn.Embedding(self.vocab_size, input_dim)
+
         self.lc1 = nn.LSTMCell(input_dim, hidden_dim)
         self.lc2 = nn.LSTMCell(hidden_dim, hidden_dim)
-        self.fc = nn.Linear(hidden_dim, output_dim)
+        self.fc = nn.Linear(hidden_dim, self.vocab_size)
 
-    def forward(self, x):
-        # Initialize the hidden and cell states to zeros
+    def forward(self, x_ids):
+        x = model.embeddings(x_ids)
+        # init
         h1 = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
         c1 = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
         h1s = []
-
         for i in range(x.size(1)):
             h1, c1 = self.lc1(x[:, i, :], (h1, c1))
             h1s.append(h1)
-
-        # Run LSTM2
-        h1s = torch.stack(h1s, dim=1) # input to lstm2
-
-        h2 = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
-        c2 = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
-        h2s = []
-
+        h1s = torch.stack(h1s, dim=1) # [batch, seq, dim]
+        h2 = torch.zeros(x.size(0), self.hidden_dim).to(x.device) # [batch, dim]
+        c2 = torch.zeros(x.size(0), self.hidden_dim).to(x.device) # [batch, dim]
+        outputs = []
         for i in range(x.size(1)):
-            h2, c2 = self.lc2(h1s[:, i, :], (h2, c2))
-            h2s.append(h2)
+            h2, c2 = self.lc2(h1s[:, i], (h2, c2))
+            output = self.fc(h2)
+            output = F.softmax(output, dim=1)
+            outputs.append(output)
+        outputs = torch.stack(outputs, dim=1)
+        return outputs
 
-        # Stack the outputs (hidden states) from each time step
-        outputs = torch.stack(h2s, dim=1)
 
-        # Apply the linear layer to each time step's output
-        # We reshape the outputs tensor to (-1, self.hidden_dim) before applying the linear layer
-        # Then reshape it back to (batch_size, seq_len, output_dim)
-        out = self.fc(outputs.view(-1, self.hidden_dim))
-        out = out.view(-1, x.size(1), self.output_dim)
+class RNNModel(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, tokenizer):
+        super(RNNModel, self).__init__()
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.output_dim = output_dim
 
-        return out, {}
+        self.vocab_size = tokenizer.get_vocab_size()
+        self.embeddings = nn.Embedding(self.vocab_size, input_dim)
+
+        self.lc1 = nn.RNNCell(input_dim, hidden_dim)
+        self.lc2 = nn.RNNCell(hidden_dim, hidden_dim)
+        self.fc = nn.Linear(hidden_dim, self.vocab_size)
+
+    def forward(self, x_ids):
+        x = model.embeddings(x_ids)
+        # init
+        h1 = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
+        h1s = []
+        for i in range(x.size(1)):
+            h1 = self.lc1(x[:, i, :], h1)
+            h1s.append(h1)
+        h1s = torch.stack(h1s, dim=1) # [batch, seq, dim]
+        h2 = torch.zeros(x.size(0), self.hidden_dim).to(x.device) # [batch, dim]
+        outputs = []
+        for i in range(x.size(1)):
+            h2 = self.lc2(h1s[:, i], h2)
+            output = self.fc(h2)
+            output = F.softmax(output, dim=1)
+            outputs.append(output)
+        outputs = torch.stack(outputs, dim=1)
+        return outputs
+
+
+class RNNStack(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, tokenizer):
+        super(RNNStack, self).__init__()
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.output_dim = output_dim
+
+        self.vocab_size = tokenizer.get_vocab_size()
+        self.embeddings = nn.Embedding(self.vocab_size, input_dim)
+
+        self.lc1 = nn.RNNCell(input_dim, hidden_dim)
+        self.lc2 = nn.RNNCell(hidden_dim, hidden_dim)
+        self.fc = nn.Linear(hidden_dim + input_dim, self.vocab_size)
+
+        ##########
+        # Stack
+        self.n_stack = 10
+        self.initial_sharpen = 5
+        self.zero_offset = 0
+        self.stack_vec_size = input_dim
+        self.sharp = nn.Parameter(torch.tensor([5.0]))
+
+        self.ops = nn.Sequential(
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, 3), # rnn hidden -> push,pop,nop
+            nn.Softmax(dim=1)
+        )
+
+
+    def forward(self, x_ids):
+        x = model.embeddings(x_ids)
+        batch_size, device, dtype = x.size(0), x.device, x.dtype
+        # init
+        ss = S.initialize(self.input_dim, self.n_stack, batch_size, self.zero_offset, device, dtype=dtype)
+        h1 = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
+        outputs = []
+        for i in range(x.size(1)):
+            h1 = self.lc1(x[:, i], h1)
+
+            ops = self.ops(h1)
+            push, pop, nop = [x.squeeze(1) for x in torch.chunk(ops, chunks=3, dim=-1)]
+            ss, pop_val = S.push_pop_nop(ss, self.sharp, push, pop, nop, x[:, i])
+
+            output = self.fc(torch.cat([h1, pop_val], dim=1))
+            output = F.softmax(output, dim=1)
+            outputs.append(output)
+        outputs = torch.stack(outputs, dim=1)
+        return outputs
+
 
 
 ##########
@@ -287,38 +368,38 @@ class NeuralstackOnly(nn.Module):
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
 
-        self.embeddings = nn.Embedding(tokenizer.get_vocab_size(), input_dim)
+        self.vocab_size = tokenizer.get_vocab_size()
+        self.embeddings = nn.Embedding(self.vocab_size, input_dim)
 
         ##########
         # Stack
-        self.n_stack = 32
+        self.n_stack = 10
         self.initial_sharpen = 5
-        self.zero_offset = 1e-6
+        self.zero_offset = 0
         self.stack_vec_size = input_dim
         self.sharpen_pointer = nn.Parameter(torch.tensor([5.0]))
 
         ##########
         # Latch
-        self.latch = L.DataLatch(input_dim, init_scale=1e-2, dropout=0.02)
+        self.latch = L.DataLatch(input_dim, init_scale=1e-2, dropout=None)
 
         ##########
         # NNs
 
-        HIDDEN_DIM = 128
-
         self.should_pop = nn.Parameter(torch.randn(input_dim))
         self.null_symbol = nn.Parameter(torch.randn(output_dim))
-        self.dropout = torch.nn.Dropout(0.02)
 
-        # with torch.no_grad():
-        #     print()
-        #     print('CHEATING')
-        #     self.latch.enable[:] = project_int(REFLECT_SYMBOL)
-        #     self.should_pop[:] = project_int(REFLECT_SYMBOL)
-        #     # self.null_symbol[:] = project_int(NULL_SYMBOL)
+        self.proj_out = nn.Sequential(
+            nn.LayerNorm(output_dim),
+            nn.Linear(output_dim, self.vocab_size, bias=False)
+        )
 
-    def forward(self, x):
+
+    def forward(self, x_ids):
         # Stack Init
+
+        x = model.embeddings(x_ids)
+
         device = x.device
         batch_size = x.shape[0]
         vec_size = x.shape[2]
@@ -328,8 +409,8 @@ class NeuralstackOnly(nn.Module):
         ss = S.initialize(self.input_dim, self.n_stack, batch_size, self.zero_offset, device, dtype=dtype)
 
         # Latch Init
-        # latch_state = torch.zeros((batch_size, self.input_dim), device=device) + zero_offset
-        latch_state = torch.randn((batch_size, self.input_dim), device=device)
+        latch_state = torch.zeros((batch_size, self.input_dim), device=device) + self.zero_offset
+        # latch_state = torch.randn((batch_size, self.input_dim), device=device)
 
         outputs = []
 
@@ -338,18 +419,18 @@ class NeuralstackOnly(nn.Module):
         pops = []
         stack_tops = []
 
-        relay = [latch_state, ]
+        # relay = [latch_state, ]
 
         # Loop over sequence
         for i in range(x.size(1)):
-            inp = x[:, i, :]
+            inp = x[:, i]
 
-            lsr = relay[0]
+            # lsr = relay[0]
+            lsr = latch_state
 
             # Decide what to do
             pop = cosine_similarity(self.should_pop.unsqueeze(0), lsr)
-            pop = elu(pop)
-            pop = self.dropout(pop)
+            # pop = elu(pop)
             # pop = gelu(pop)
             # pop = leaky_relu(pop)
             pops.append(pop)
@@ -361,35 +442,28 @@ class NeuralstackOnly(nn.Module):
             ss, pop_val = S.push_pop_nop(ss, self.sharpen_pointer, push, pop, null_op, inp)
             s = S.read(ss)
 
-            out = (
-                einsum('b, bv -> bv', pop, s)
-                # einsum('b,  v -> bv', 1 - pop, self.null_symbol)
+            out = self.proj_out(
+                einsum('b, bv -> bv', pop, s) +
+                einsum('b,  v -> bv', 1 - pop, self.null_symbol)
             )
-            # out = self.dropout(out)
+            out = F.softmax(out, dim=1)
             outputs.append(out)
 
             # Update Latch
             latch_state = self.latch(latch_state, enable=inp, data=inp)
             latch_states.append(latch_state)
-            relay.append(latch_state)
-            relay = relay[1:]
+            # relay.append(latch_state)
+            # relay = relay[1:]
             stack_tops.append(S.read(ss))
 
         outputs = torch.stack(outputs, dim=1)
-
         return outputs
-
-    # , {
-    #         'latch': {'data':torch.stack(latch_states, dim=1), 'fn': unproject_int},
-    #         'pops': {'data':torch.stack(pops, dim=1), 'fn': lambda x: x.tolist()},
-    #         'stack': {'data': torch.stack(stack_tops, dim=1), 'fn': unproject_int},
-    #     }
 
 
 ##################################################
 # Training
 
-def train_epoch(model, dl, optimizer, device, clip):
+def train_epoch(model, dl, optimizer, device, clip=None):
     '''
     Args:
       warm_up: ignore loss for this many steps
@@ -398,18 +472,17 @@ def train_epoch(model, dl, optimizer, device, clip):
     epoch_loss = 0
 
     for i, (src_ids, trg_ids) in enumerate(dl):
-        src = model.embeddings(src_ids.to(device))  # [batch, seq, vec_size]
-        trg = model.embeddings(trg_ids.to(device))  # [batch, seq, vec_size]
+        src_ids = src_ids.to(device)  # [batch, seq, vec_size]
+        trg_ids = trg_ids.to(device)
 
         optimizer.zero_grad()
-        # output, latch_states = model(src) # shape=[batch, seq, vec_size]
-        output = model(src) # shape=[batch, seq, vec_size]
+        output = model(src_ids) # [batch, seq, vec_size]
 
-        # loss = criterion(output, trg) * mask
-        loss = ((1 - torch.cosine_similarity(output, trg, dim=2))).mean()
-
+        # loss = ((1 - torch.cosine_similarity(output, trg, dim=2))).mean()
+        loss = F.cross_entropy(output.flatten(0, 1), trg_ids.flatten(), reduction='mean')
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
+        if clip is not None:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
         optimizer.step()
 
         epoch_loss += loss.item()
@@ -423,69 +496,39 @@ def evaluate(model, dl, device):
 
     with torch.no_grad():
         for i, (src_ids, trg_ids) in enumerate(dl):
-            src = model.embeddings(src_ids.to(device))
-            trg = model.embeddings(trg_ids.to(device))
-
-            # output, latch_states = model(src)
-            output = model(src)
-
-            # loss = criterion(output, trg) * mask
-            loss = ((1 - torch.cosine_similarity(output, trg, dim=2))).mean()
+            src_ids = src_ids.to(device)  # [batch, seq, vec_size]
+            trg_ids = trg_ids.to(device)
+            output = model(src_ids) # [batch, seq, vec_size]
+            loss = F.cross_entropy(output.flatten(0, 1), trg_ids.flatten(), reduction='mean')
             epoch_loss += loss.item()
 
     return epoch_loss / len(dl)
 
 def accuracy(model, val_dl, device, debug=False):
     model.eval()
-    correct_predictions = 0
-    total_predictions = 0
-
+    n_correct = 0
+    n = 0
+    outputs = []
     with torch.no_grad():
-        for i, (src, trg, mask) in enumerate(val_dl):
-            src = src.to(device)
-            trg = trg.to(device)
-            mask = mask.to(device)
-            mask_ix = mask > 0.00000001
-
-            output, states = model(src)
-            predicted_vectors = output
-
-            # Unproject the predicted vectors to integers
-            predicted_integers = [unproject_int(v) for v in predicted_vectors[mask_ix]]
-            target_integers = [unproject_int(v) for v in trg[mask_ix]]
-
-            # Compare the predicted integers with the actual integers
-            total_predictions += len(predicted_integers)
-            correct_predictions += (torch.tensor(predicted_integers) == torch.tensor(target_integers)).sum()
-
-            if debug:
-                labels = ['inps', 'trgs', 'outs', 'mask']
-                ins  = [[unproject_int(x.to('cuda')) for x in xs] for xs in src]
-                trgs = [[unproject_int(x.to('cuda')) for x in xs] for xs in trg]
-                outs = [[unproject_int(x.to('cuda')) for x in xs] for xs in predicted_vectors]
-                mask = [x.to(int).tolist() for x in mask]
-
-                ss = []
-                for k,v in states.items():
-                    labels.append(k)
-                    data = v['data']
-                    fn = v['fn']
-                    if fn is not None:
-                        ss.append([[fn(x.to('cuda')) for x in xs] for xs in data])
-                    else:
-                        ss.append(data)
-                all_seqs = [ins, trgs, outs, mask] + ss
-                print_grid(zip(*all_seqs), labels)
-
-    acc = correct_predictions / total_predictions
-    return acc
+        for i, (src_ids, trg_ids) in enumerate(val_dl):
+            src_ids = src_ids.to(device)  # [batch, seq, vec_size]
+            trg_ids = trg_ids.to(device)
+            output = model(src_ids) # [batch, seq, vec_size]
+            output_ids = output.argmax(dim=2)
+            n += trg_ids.shape[0] * trg_ids.shape[1] # total count
+            n_correct += (output_ids == trg_ids).sum()
+            outputs.append((src_ids, trg_ids, output_ids))
+    acc = n_correct / n
+    return acc.item(), outputs
 
 
 ##########
 # Setup
 
 # MyModel = LSTMModel
-MyModel = NeuralstackOnly
+# MyModel = RNNModel
+MyModel = RNNStack
+# MyModel = NeuralstackOnly
 
 model = MyModel(
     input_dim=VEC_SIZE,
@@ -496,7 +539,10 @@ model = MyModel(
 model.to(DEVICE)
 
 
-params = [x for name, x in model.named_parameters() if 'Embedding' not in name]
+params = [x for name, x in model.named_parameters() if 'embeddings' not in name]
+assert len(params) == len(list(model.named_parameters())) - 1, 'make sure to remove embeddings'
+print_model_info(model)
+
 optimizer = optim.Adam(params, lr=LR)
 
 train_losses = []
@@ -511,22 +557,21 @@ for epoch in range(NUM_EPOCHS):
     val_loss = evaluate(model, val_dl, DEVICE)
     val_losses.append(val_loss)
 
-    # tacc = accuracy(model, train_dl, DEVICE)
-    # train_accuracies.append(tacc)
+    tacc, _ = accuracy(model, train_dl, DEVICE)
+    train_accuracies.append(tacc)
 
-    # vacc = accuracy(model, val_dl, DEVICE)
-    # val_accuracies.append(vacc)
+    vacc, _ = accuracy(model, val_dl, DEVICE)
+    val_accuracies.append(vacc)
 
-    # print(f'Epoch: {epoch + 1:02} | Train Loss: {train_loss:.3f} | Val. Loss: {val_loss:.3f} | Train Acc: {tacc:.3f} | Val Acc: {vacc:.3f}')
-    print(f'Epoch: {epoch + 1:02} | Train Loss: {train_loss:.3f} | Val. Loss: {val_loss:.3f}')
+    print(f'Epoch: {epoch + 1:02} | Train Loss: {train_loss:.3f} | Val. Loss: {val_loss:.3f} | Train Acc: {tacc:.3f} | Val Acc: {vacc:.3f}')
 
 # Plot training and validation loss
 plt.figure()
 n = np.arange(len(train_losses))
 plt.plot(n, train_losses, label='Train Loss')
 plt.plot(n, val_losses, label='Val Loss')
-# plt.plot(n, train_accuracies, label='Train Acc')
-# plt.plot(n, val_accuracies, label='Val Acc')
+plt.plot(n, train_accuracies, label='Train Acc')
+plt.plot(n, val_accuracies, label='Val Acc')
 plt.xlabel('Epoch')
 plt.ylabel('Loss')
 plt.legend()
@@ -536,4 +581,21 @@ plt.show()
 
 ##########
 
-# tacc = accuracy(model, val_dl, DEVICE, debug=True)
+tacc, outputs = accuracy(model, val_dl, DEVICE, debug=True)
+
+print()
+n = 0
+for src_idss, trg_idss, output_idss  in reversed(outputs):
+    for src_ids, trg_ids, output_ids in zip(src_idss, trg_idss, output_idss):
+        s = [tokenizer.decode([x]) for x in src_ids.tolist()]
+        t = [tokenizer.decode([x]) for x in trg_ids.tolist()]
+        o = [tokenizer.decode([x]) for x in output_ids.tolist()]
+        print('__________________________________________________')
+        print_grid([['src'] + s,
+                    ['out'] + o,
+                    ['trg'] + t])
+        n += 1
+        if n > 5:
+            break
+    if n > 5:
+        break
