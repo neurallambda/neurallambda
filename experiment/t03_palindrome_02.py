@@ -4,30 +4,30 @@ Moving toward a common interface for building and testing models
 
 '''
 
+import torch
+import random
 
-import tokenizers
-from tokenizers import Tokenizer, AddedToken
-from typing import List, Any, Dict
-import datasets
-import torch
-import random
-from datasets import Dataset
-from torch.utils.data import DataLoader
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, BatchSampler, SequentialSampler, RandomSampler
-from functools import partial
-import torch
-import random
-from datasets import Dataset
-import matplotlib.pyplot as plt
-from torch.utils.data import DataLoader
-import numpy as np
+SEED = 42
+torch.manual_seed(SEED)
+random.seed(SEED)
+
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
-import neurallambda.stack as S
-import neurallambda.latch as L
+
+from datasets import Dataset
+from functools import partial
+from tokenizers import Tokenizer, AddedToken
 from torch import cosine_similarity, einsum
 from torch.nn.functional import elu, selu, gelu, leaky_relu
+from torch.utils.data import DataLoader, BatchSampler, SequentialSampler, RandomSampler
+from typing import List, Any, Dict
+import matplotlib.pyplot as plt
+import neurallambda.latch as L
+import neurallambda.stack as S
+import numpy as np
+
+import tokenizers
 
 
 ##################################################
@@ -40,17 +40,22 @@ def print_grid(data):
         formatted_row = "  ".join(str(item).ljust(width) for item, width in zip(row, column_widths))
         print(formatted_row)
 
+
 def print_model_info(model):
     print('------------')
     print('MODEL PARAMS')
     info = []
+    total_params = 0
     for name, param in model.named_parameters():
-        info.append((name, param.numel(), f'{list(param.shape)}', f'grad:{param.requires_grad}'))
+        param_count = param.numel()
+        total_params += param_count
+        info.append((name, param_count, f'{list(param.shape)}', f'grad:{param.requires_grad}'))
     print_grid(info)
+    print(f'Total Parameters: {total_params:,}')
+
 
 def iterator(all_datasets: List[Dataset], keys: List[str], special_tokens):
     ''' Iterate over a list of datasets and build a vocab for them. '''
-    batch_size = 1000
     for tok in special_tokens:
         yield tok
     for dataset in all_datasets:
@@ -171,11 +176,19 @@ def build_tokenizer_dataloader(
 
 
 
+class GumbelSoftmax(nn.Module):
+    def __init__(self, temperature=1.0, hard=False, dim=-1):
+        super(GumbelSoftmax, self).__init__()
+        self.temperature = temperature
+        self.hard = hard
+        self.dim = dim
+
+    def forward(self, logits):
+        return F.gumbel_softmax(logits, tau=self.temperature, hard=self.hard, dim=self.dim)
+
 ##################################################
 # Palindrome
 
-
-torch.manual_seed(11)
 DEVICE = 'cuda'
 VEC_SIZE = 256
 
@@ -318,11 +331,13 @@ class RNNStack(nn.Module):
         self.vocab_size = tokenizer.get_vocab_size()
         self.embeddings = nn.Embedding(self.vocab_size, input_dim)
 
+        TODO: emit from stack + embedding vocab
+
         self.lc1 = nn.RNNCell(input_dim, hidden_dim)
-        self.lc2 = nn.RNNCell(hidden_dim, hidden_dim)
         self.fc = nn.Sequential(
-            nn.Linear(hidden_dim + input_dim, self.vocab_size, bias=False),
+            nn.Linear(input_dim, self.vocab_size, bias=False),
             nn.Softmax(dim=1)
+            # GumbelSoftmax(dim=1, temperature=1.0, hard=True)
         )
 
         ##########
@@ -354,7 +369,7 @@ class RNNStack(nn.Module):
             push, pop, nop = [x.squeeze(1) for x in torch.chunk(ops, chunks=3, dim=-1)]
             ss, pop_val = S.push_pop_nop(ss, self.sharp, push, pop, nop, x[:, i])
 
-            output = self.fc(torch.cat([h1, pop_val], dim=1))
+            output = self.fc(torch.cat([pop_val], dim=1))
             outputs.append(output)
         outputs = torch.stack(outputs, dim=1)
         return outputs
@@ -536,7 +551,7 @@ MyModel = RNNStack
 
 model = MyModel(
     input_dim=VEC_SIZE,
-    hidden_dim=8,
+    hidden_dim=16,
     output_dim=VEC_SIZE,
     tokenizer=tokenizer,
 )
@@ -606,3 +621,27 @@ for src_idss, trg_idss, output_idss  in reversed(outputs):
             break
     if n > 5:
         break
+
+
+'''
+
+# Hand check some things
+
+inp = 'a b c d e | . . . . .'.split(' ')
+trg = '. . . . . | e d c b a'.split(' ')
+
+inp_ids = torch.tensor(tokenizer.encode(inp, is_pretokenized=True).ids, device=DEVICE).unsqueeze(0)
+trg_ids = torch.tensor(tokenizer.encode(trg, is_pretokenized=True).ids, device=DEVICE).unsqueeze(0)
+logits = model(inp_ids)
+print(f'{logits.sum(dim=2)=}')
+print(f'{F.cross_entropy(logits.flatten(0, 1), trg_ids.flatten())=}')
+plt.imshow(logits[0].detach().cpu().numpy())
+plt.show()
+
+# convert cross-entropy by hand
+num_classes = logits.shape[-1]
+trg_one_hot = F.one_hot(trg_ids, num_classes=num_classes).float()
+loss = -torch.sum(trg_one_hot[0] * F.log_softmax(logits[0], dim=-1), dim=-1).mean()
+print(f'{loss=}')
+
+'''
