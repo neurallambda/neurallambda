@@ -1,13 +1,21 @@
 '''
 
-Moving toward a common interface for building and testing models
+1. Moving toward a common interface for building and testing models
+
+2. Get palindrome to work on untrained embeddings
+
+
+TODO:
+- [ ] trace stack ops
+- [ ] emit outputs from embedding vocab + symbolic (trace)
+- [ ] playground that others can use
 
 '''
 
 import torch
 import random
 
-SEED = 42
+SEED = 43
 torch.manual_seed(SEED)
 random.seed(SEED)
 
@@ -149,7 +157,6 @@ def build_tokenizer_dataloader(
         assert 'inputs' in data[0]
         assert 'outputs' in data[0]
 
-
     # Convert to HF Dataset
     hf_datasets = [Dataset.from_list(x) for x in raw_datasets]
 
@@ -162,18 +169,12 @@ def build_tokenizer_dataloader(
     print('training tokenizer')
     tokenizer.train_from_iterator(iterator(hf_datasets, ['inputs', 'outputs'], special_tokens))
     tokenizer.add_special_tokens([UNK_TOKEN, PAD_TOKEN])
-    # a = tokenizer.encode(['1', '2', '3'], is_pretokenized=True)
-    # print_grid([['tokens:'] + a.tokens,
-    #             ['ids:'] + a.ids])
     dataloaders = [
-        DataLoader(
-            x,
-            batch_size=BATCH_SIZE,
-            collate_fn=partial(collate_fn, PAD_TOKEN)
-        ) for x in hf_datasets]
+        DataLoader(x, batch_size=BATCH_SIZE, collate_fn=partial(collate_fn, PAD_TOKEN))
+        for x in hf_datasets
+    ]
 
     return tokenizer, dataloaders
-
 
 
 class GumbelSoftmax(nn.Module):
@@ -186,11 +187,14 @@ class GumbelSoftmax(nn.Module):
     def forward(self, logits):
         return F.gumbel_softmax(logits, tau=self.temperature, hard=self.hard, dim=self.dim)
 
+
 ##################################################
 # Palindrome
 
 DEVICE = 'cuda'
 VEC_SIZE = 256
+
+MIN_LENGTH = 8
 
 TRAIN_NUM_SAMPLES = 2000
 TRAIN_MAX_SEQUENCE_LENGTH = 10
@@ -198,12 +202,13 @@ TRAIN_MAX_SEQUENCE_LENGTH = 10
 VAL_NUM_SAMPLES = 200
 VAL_MAX_SEQUENCE_LENGTH = 20
 
-N_STACK = 10
+N_STACK = 12
+INITIAL_SHARPEN = 5.0
 
 LR = 1e-2
 BATCH_SIZE = 32
 
-NUM_EPOCHS = 8
+NUM_EPOCHS = 12
 GRAD_CLIP = None
 
 # Symbols that go into palindrome
@@ -218,10 +223,10 @@ val_lang   = 'a b c d e f g h i j'.split(' ')
 REFLECT_SYMBOL = '|'
 PAUSE_SYMBOL = '.'
 
-def palindrome(num_samples, max_length, lang) -> Dict[str, List[str]]:
+def palindrome(num_samples, min_length, max_length, lang) -> Dict[str, List[str]]:
     data = []
     for _ in range(num_samples):
-        length = random.randint(5, max_length)
+        length = random.randint(min_length, max_length)
         hlength = length // 2
         seed = [random.choice(lang) for _ in range(hlength)]
         # add pauses to inputs and outputs
@@ -237,10 +242,10 @@ def palindrome(num_samples, max_length, lang) -> Dict[str, List[str]]:
         })
     return data
 
-train_raw = palindrome(TRAIN_NUM_SAMPLES, TRAIN_MAX_SEQUENCE_LENGTH, lang=train_lang)
+train_raw = palindrome(TRAIN_NUM_SAMPLES, MIN_LENGTH, TRAIN_MAX_SEQUENCE_LENGTH, lang=train_lang)
 train_raw = sorted(train_raw, key=lambda x: len(x['inputs']))
 
-val_raw = palindrome(VAL_NUM_SAMPLES, VAL_MAX_SEQUENCE_LENGTH, lang=val_lang)
+val_raw = palindrome(VAL_NUM_SAMPLES, MIN_LENGTH, VAL_MAX_SEQUENCE_LENGTH, lang=val_lang)
 val_raw = sorted(val_raw, key=lambda x: len(x['inputs']))
 
 tokenizer, (train_dl, val_dl) = build_tokenizer_dataloader([train_raw, val_raw])
@@ -331,11 +336,11 @@ class RNNStack(nn.Module):
         self.vocab_size = tokenizer.get_vocab_size()
         self.embeddings = nn.Embedding(self.vocab_size, input_dim)
 
-        TODO: emit from stack + embedding vocab
+        # TODO: emit from stack + embedding vocab
 
         self.lc1 = nn.RNNCell(input_dim, hidden_dim)
         self.fc = nn.Sequential(
-            nn.Linear(input_dim, self.vocab_size, bias=False),
+            nn.Linear(input_dim + hidden_dim, self.vocab_size, bias=False),
             nn.Softmax(dim=1)
             # GumbelSoftmax(dim=1, temperature=1.0, hard=True)
         )
@@ -343,10 +348,10 @@ class RNNStack(nn.Module):
         ##########
         # Stack
         self.n_stack = N_STACK
-        self.initial_sharpen = 10
+        self.initial_sharpen = INITIAL_SHARPEN
         self.zero_offset = 0
         self.stack_vec_size = input_dim
-        self.sharp = nn.Parameter(torch.tensor([5.0]))
+        self.sharp = nn.Parameter(torch.tensor([self.initial_sharpen]))
 
         self.ops = nn.Sequential(
             nn.LayerNorm(hidden_dim),
@@ -355,24 +360,34 @@ class RNNStack(nn.Module):
         )
 
 
-    def forward(self, x_ids):
+    def forward(self, x_ids, debug=False):
         x = model.embeddings(x_ids)
         batch_size, device, dtype = x.size(0), x.device, x.dtype
         # init
         ss = S.initialize(self.input_dim, self.n_stack, batch_size, self.zero_offset, device, dtype=dtype)
         h1 = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
         outputs = []
+        if debug:
+            ops_trace = []
         for i in range(x.size(1)):
             h1 = self.lc1(x[:, i], h1)
 
             ops = self.ops(h1)
+            if debug:
+                ops_trace.append(ops)
             push, pop, nop = [x.squeeze(1) for x in torch.chunk(ops, chunks=3, dim=-1)]
             ss, pop_val = S.push_pop_nop(ss, self.sharp, push, pop, nop, x[:, i])
 
-            output = self.fc(torch.cat([pop_val], dim=1))
+            output = self.fc(torch.cat([h1, pop_val], dim=1))
             outputs.append(output)
         outputs = torch.stack(outputs, dim=1)
-        return outputs
+        if debug:
+            ops_trace = torch.stack(ops_trace, dim=1)
+            debug_out = {'ops_trace': ops_trace}
+            return outputs, debug_out
+        else:
+            return outputs
+
 
 
 
@@ -393,10 +408,10 @@ class NeuralstackOnly(nn.Module):
         ##########
         # Stack
         self.n_stack = N_STACK
-        self.initial_sharpen = 5
+        self.initial_sharpen = INITIAL_SHARPEN
         self.zero_offset = 0
         self.stack_vec_size = input_dim
-        self.sharpen_pointer = nn.Parameter(torch.tensor([5.0]))
+        self.sharpen_pointer = nn.Parameter(torch.tensor([self.initial_sharpen]))
 
         ##########
         # Latch
@@ -565,7 +580,7 @@ for no_train in no_trains:
 params = [x for x in model.parameters() if x.requires_grad]
 print_model_info(model)
 
-optimizer = optim.Adam(params, lr=LR)
+optimizer = optim.Adam(params, lr=LR, weight_decay=0)
 
 train_losses = []
 val_losses = []
@@ -623,25 +638,51 @@ for src_idss, trg_idss, output_idss  in reversed(outputs):
         break
 
 
-'''
+
 
 # Hand check some things
 
+print()
 inp = 'a b c d e | . . . . .'.split(' ')
 trg = '. . . . . | e d c b a'.split(' ')
 
 inp_ids = torch.tensor(tokenizer.encode(inp, is_pretokenized=True).ids, device=DEVICE).unsqueeze(0)
 trg_ids = torch.tensor(tokenizer.encode(trg, is_pretokenized=True).ids, device=DEVICE).unsqueeze(0)
-logits = model(inp_ids)
-print(f'{logits.sum(dim=2)=}')
+logits, debug = model(inp_ids, debug=True)
+ops = debug['ops_trace']
+push, pop, nop = [x.squeeze(1) for x in torch.chunk(ops, chunks=3, dim=-1)]
+
+max_scores = logits.max(dim=2)
+print_grid([[f'{x:>.2f}' for x in max_scores.values[0].tolist()],
+            max_scores.indices[0].tolist()])
+
 print(f'{F.cross_entropy(logits.flatten(0, 1), trg_ids.flatten())=}')
-plt.imshow(logits[0].detach().cpu().numpy())
+
+# Plot logits
+plt.figure(figsize=(8, 4))
+plt.subplot(1, 2, 1)
+plt.imshow(logits[0].T.detach().cpu().numpy())
+plt.title('Logits')
+plt.xlabel('Time')
+plt.ylabel('Token')
+
+# Plot push, pop, nop operations over time
+plt.subplot(1, 2, 2)
+time_steps = range(push.shape[1])
+plt.plot(time_steps, push[0].detach().cpu().numpy(), label='Push')
+plt.plot(time_steps, pop[0].detach().cpu().numpy(), label='Pop')
+plt.plot(time_steps, nop[0].detach().cpu().numpy(), label='Nop')
+plt.title('Operations over Time')
+plt.xlabel('Time')
+plt.ylabel('Value')
+plt.legend()
+
+plt.tight_layout()
 plt.show()
 
-# convert cross-entropy by hand
-num_classes = logits.shape[-1]
-trg_one_hot = F.one_hot(trg_ids, num_classes=num_classes).float()
-loss = -torch.sum(trg_one_hot[0] * F.log_softmax(logits[0], dim=-1), dim=-1).mean()
-print(f'{loss=}')
 
-'''
+# # convert cross-entropy by hand
+# num_classes = logits.shape[-1]
+# trg_one_hot = F.one_hot(trg_ids, num_classes=num_classes).float()
+# loss = -torch.sum(trg_one_hot[0] * F.log_softmax(logits[0], dim=-1), dim=-1).mean()
+# print(f'{loss=}')
