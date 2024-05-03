@@ -24,38 +24,6 @@ chars = (
 )
 default_symbols = nums + chars
 
-# def symbol_map(vec_size, symbols=default_symbols, device='cpu'):
-#     print('DEPRECATED')
-#     symbols_i2v = {i:v for i,v in enumerate(symbols)}
-#     symbols_v2i = {v:i for i,v in symbols_i2v.items()}
-
-#     symbols_vec = torch.stack([
-#         torch.randn((vec_size,))
-#         for _ in range(len(symbols_i2v))
-#     ]).to(device)
-
-
-#     def project(val):
-#         """Projects an integer to a vector space."""
-#         index = symbols_v2i[val]
-#         return symbols_vec[index]
-
-#     def unproject(vector):
-#         """Unprojects a vector from the vector space back to an integer.
-
-#         Assumes matrix formatted `vector`.
-#         """
-#         cs = torch.cosine_similarity(vector.unsqueeze(0), symbols_vec, dim=1)
-#         sim_ix = torch.argmax(cs).item()
-#         return symbols_i2v[sim_ix]
-
-#     # Test round tripping
-#     for v in symbols:
-#         rv = unproject(project(v))
-#         assert v == rv, f'Value {v} round-tripped to {rv}'
-
-#     return project, unproject, symbols_i2v, symbols_v2i, symbols_vec
-
 class SymbolMapper:
     def __init__(self, vec_size, symbols=default_symbols, device='cpu'):
         self.device = device

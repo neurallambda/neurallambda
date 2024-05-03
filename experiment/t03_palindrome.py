@@ -30,7 +30,6 @@ DATASET = 'palindrome'
 BATCH_SIZE = 32
 
 NUM_SAMPLES = 1000  # total number of samples in the dataset
-MAX_WINDOW_SIZE = 4  # maximum window size
 MAX_SEQUENCE_LENGTH = 10  # maximum length of the sequence
 
 LR = 1e-2
@@ -155,6 +154,17 @@ def collate_fn(batch):
 # Create DataLoaders with the new collate_fn
 train_dl = DataLoader(train_data, batch_size=BATCH_SIZE, collate_fn=collate_fn, shuffle=True)
 val_dl = DataLoader(val_data, batch_size=BATCH_SIZE, collate_fn=collate_fn)
+
+# for i, x in enumerate(train_dl):
+#     if i>5:
+#         break
+#     print(x)
+
+
+# for i, x in enumerate(val_dl):
+#     if i>5:
+#         break
+#     print(x)
 
 
 ##########
