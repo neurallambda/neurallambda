@@ -45,7 +45,7 @@ def print_model_info(model):
     print('MODEL PARAMS')
     info = []
     for name, param in model.named_parameters():
-        info.append((name, param.numel(), f'{list(param.shape)}'))
+        info.append((name, param.numel(), f'{list(param.shape)}', f'grad:{param.requires_grad}'))
     print_grid(info)
 
 def iterator(all_datasets: List[Dataset], keys: List[str], special_tokens):
@@ -185,6 +185,8 @@ TRAIN_MAX_SEQUENCE_LENGTH = 10
 VAL_NUM_SAMPLES = 200
 VAL_MAX_SEQUENCE_LENGTH = 20
 
+N_STACK = 10
+
 LR = 1e-2
 BATCH_SIZE = 32
 
@@ -318,19 +320,22 @@ class RNNStack(nn.Module):
 
         self.lc1 = nn.RNNCell(input_dim, hidden_dim)
         self.lc2 = nn.RNNCell(hidden_dim, hidden_dim)
-        self.fc = nn.Linear(hidden_dim + input_dim, self.vocab_size)
+        self.fc = nn.Sequential(
+            nn.Linear(hidden_dim + input_dim, self.vocab_size, bias=False),
+            nn.Softmax(dim=1)
+        )
 
         ##########
         # Stack
-        self.n_stack = 10
-        self.initial_sharpen = 5
+        self.n_stack = N_STACK
+        self.initial_sharpen = 10
         self.zero_offset = 0
         self.stack_vec_size = input_dim
         self.sharp = nn.Parameter(torch.tensor([5.0]))
 
         self.ops = nn.Sequential(
             nn.LayerNorm(hidden_dim),
-            nn.Linear(hidden_dim, 3), # rnn hidden -> push,pop,nop
+            nn.Linear(hidden_dim, 3, bias=False), # rnn hidden -> push,pop,nop
             nn.Softmax(dim=1)
         )
 
@@ -350,7 +355,6 @@ class RNNStack(nn.Module):
             ss, pop_val = S.push_pop_nop(ss, self.sharp, push, pop, nop, x[:, i])
 
             output = self.fc(torch.cat([h1, pop_val], dim=1))
-            output = F.softmax(output, dim=1)
             outputs.append(output)
         outputs = torch.stack(outputs, dim=1)
         return outputs
@@ -373,7 +377,7 @@ class NeuralstackOnly(nn.Module):
 
         ##########
         # Stack
-        self.n_stack = 10
+        self.n_stack = N_STACK
         self.initial_sharpen = 5
         self.zero_offset = 0
         self.stack_vec_size = input_dim
@@ -532,15 +536,18 @@ MyModel = RNNStack
 
 model = MyModel(
     input_dim=VEC_SIZE,
-    hidden_dim=64,
+    hidden_dim=8,
     output_dim=VEC_SIZE,
     tokenizer=tokenizer,
 )
 model.to(DEVICE)
 
+no_trains = [model.embeddings]
+for no_train in no_trains:
+    for p in no_train.parameters():
+        p.requires_grad = False
 
-params = [x for name, x in model.named_parameters() if 'embeddings' not in name]
-assert len(params) == len(list(model.named_parameters())) - 1, 'make sure to remove embeddings'
+params = [x for x in model.parameters() if x.requires_grad]
 print_model_info(model)
 
 optimizer = optim.Adam(params, lr=LR)
