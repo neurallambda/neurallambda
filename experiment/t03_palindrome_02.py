@@ -1,16 +1,8 @@
 '''
 
-1. Moving toward a common interface for building and testing models
+Get palindrome to work on untrained embeddings
 
-2. Get palindrome to work on untrained embeddings
-
-
-TODO:
-- [x] trace stack ops
-- [x] emit outputs from embedding vocab + symbolic (trace)
-- [ ] split out library
-- [ ] split out demo
-- [ ] playground that others can use
+(This work also led to the improved central training lib: `neurallambda/lab/common.py`
 
 '''
 
@@ -70,7 +62,7 @@ GRAD_CLIP = None
 # Symbols that go into palindrome
 train_lang = 'a b c d e f g h i j'.split(' ')
 # val_lang   = 'a b c d e f g h i j'.split(' ')
-val_lang   = 'k l m n o p q r s t'.split(' ')
+val_lang   = 'k l m n o p q r s t'.split(' ')  # NOTE: these tokens are never trained in any example
 
 
 ##########

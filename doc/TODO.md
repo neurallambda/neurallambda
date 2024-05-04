@@ -1,35 +1,33 @@
 # TODO
 
-- Roadmap as of March 2024
+- Roadmap as of May 2024
   - [ ] E001: Get Neuralstack + Sum Sequence working. `[t04_addition](./experiments/)`.
   - [ ] E002: Integrate Neuralstack with RWKV. `[t06_rwkv](./experiments/)`.
   - [ ] E003: Test new transformer stacks. `[t07_transformer](./experiments/)`.
+  - [ ] E004: Get Neuralqueue + Sort working
+  - [ ] E005: Social Demos: how to make this stuff more user friendly?
 
 
 # Tickets
 
-- [ ] E001: Stack: Test stack initialization: zeros vs small offset vs noise offset vs symbolic offset (eg prebaked "empty" symbol)
-- [ ] E001: Stack: Test pop val interpolation. IE if should_pop~0, popped_val will *still* have high cossim with popped_val interpolated toward 0, and that probably should not be the case. Should interpolate with zero_vec?
-- [ ] E001: Stack: abstract sharpening function
-- [ ] E001: Stack: Test sharpening
+SOCIAL DEMOS
+- [ ] E005: Add new `palindrome` thing to `demo/`
+- [ ] E005: Comment `palindrome` thing well
+- [ ] E005: Write something up about running this test
 
+STACK
+- [ ] E001: Work on Sum Sequence Again, built on new code. (Use binary representations?)
 
-- [X] E002: Stack should not be nn.Module
-- [X] E002: Stack.fwd should pass in `stack`, not have as attribute
-- [X] E002: Stack.initialize should be top-level, optional, module fn
-- [X] E002: chase through broken tests
-- [X] E002: chase through broken deps (demo/)
-- [X] E002: dataset caching is not working, re-downloads and processes every time.
-- [X] E002: Build MyStack in rwkv repo
-- [X] E002: Test running it in RWKV!
-- [ ] E002: Update prompting strategy in accordance with used dataset
-- [ ] E002: What datasets to start using?
-- [ ] E002: Integrate tensorboard
+QUEUE
+- [ ] E004: Sorting using queues
+
+RWKV
+- [ ] E002: After Sum Sequence + Sorting are solved, re-integrate into RWKV
+- [ ] E002: Determine if you should use infctx-trainer or RWKV-LM or custom
 - [ ] E002: 4 way test: 1) random init + vanilla RWKV
 - [ ] E002: 4 way test: 2) random init + stack + RWKV
 - [ ] E002: 4 way test: 3) pretrained + vanilla RWKV
 - [ ] E002: 4 way test: 4) pretrained + stack + RWKV
-
 
 
 # Miscellaneous
@@ -159,3 +157,15 @@
 - [X] EMISC: clean up TODO.md
 - [X] EMISC: Add directory layout to README
 - [X] EMISC: Tighten up README
+- [X] E002: Stack should not be nn.Module
+- [X] E002: Stack.fwd should pass in `stack`, not have as attribute
+- [X] E002: Stack.initialize should be top-level, optional, module fn
+- [X] E002: chase through broken tests
+- [X] E002: chase through broken deps (demo/)
+- [X] E002: dataset caching is not working, re-downloads and processes every time.
+- [X] E002: Build MyStack in rwkv repo
+- [X] E002: Test running it in RWKV!
+- [X] E002: Update prompting strategy in accordance with used dataset
+- [X] E002: What datasets to start using? (made `awesome-reasoning` repo)
+- [X] E002: Integrate tensorboard
+- [X] E001: Add new improved Palindrome RNNStack
