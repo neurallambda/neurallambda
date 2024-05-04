@@ -5,15 +5,20 @@
   - [ ] E002: Integrate Neuralstack with RWKV. `[t06_rwkv](./experiments/)`.
   - [ ] E003: Test new transformer stacks. `[t07_transformer](./experiments/)`.
   - [ ] E004: Get Neuralqueue + Sort working
-  - [ ] E005: Social Demos: how to make this stuff more user friendly?
+  - [ ] ESOCIAL: Social Demos: how to make this stuff more digestable + user friendly?
+  - [?] ESD: Stable Diffusion? that'd prob make it click with ppl
 
 
 # Tickets
 
 SOCIAL DEMOS
-- [ ] E005: Add new `palindrome` thing to `demo/`
-- [ ] E005: Comment `palindrome` thing well
-- [ ] E005: Write something up about running this test
+- [X] ESOCIAL: Add new `palindrome` thing to `demo/`
+- [X] ESOCIAL: Comment `palindrome` thing well
+- [ ] ESOCIAL: Build model comparison tooling for increased training + search
+- [ ] ESOCIAL: Compare LSTM etc
+- [ ] ESOCIAL: Write it up
+- [ ] ESOCIAL: Move current README to a neurallambda-specific writeup
+- [ ] ESOCIAL: Tighten up current README
 
 STACK
 - [ ] E001: Work on Sum Sequence Again, built on new code. (Use binary representations?)
