@@ -1,26 +1,25 @@
-'''
 
-* Build datasets
-
-* Tokenizer and Embedding
-
-* Loss
-
-* Training
-
-'''
-
-import tokenizers
-from tokenizers import Tokenizer, AddedToken
-from typing import List, Any, Dict
-import datasets
 import torch
 import random
-from datasets import Dataset
-from torch.utils.data import DataLoader
+import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, BatchSampler, SequentialSampler, RandomSampler
+import torch.optim as optim
+from datasets import Dataset
 from functools import partial
+from tokenizers import Tokenizer, AddedToken
+from torch import cosine_similarity, einsum
+from torch.nn.functional import elu, selu, gelu, leaky_relu
+from torch.utils.data import DataLoader, BatchSampler, SequentialSampler, RandomSampler
+from typing import List, Any, Dict
+import matplotlib.pyplot as plt
+import neurallambda.latch as L
+import neurallambda.stack as S
+import numpy as np
+import tokenizers
+
+
+##################################################
+# DATA
 
 def print_grid(data):
     # maximum width for each column
@@ -30,9 +29,21 @@ def print_grid(data):
         print(formatted_row)
 
 
+def print_model_info(model):
+    print('------------')
+    print('MODEL PARAMS')
+    info = []
+    total_params = 0
+    for name, param in model.named_parameters():
+        param_count = param.numel()
+        total_params += param_count
+        info.append((name, param_count, f'{list(param.shape)}', f'grad:{param.requires_grad}'))
+    print_grid(info)
+    print(f'Total Parameters: {total_params:,}')
+
+
 def iterator(all_datasets: List[Dataset], keys: List[str], special_tokens):
     ''' Iterate over a list of datasets and build a vocab for them. '''
-    batch_size = 1000
     for tok in special_tokens:
         yield tok
     for dataset in all_datasets:
@@ -42,16 +53,18 @@ def iterator(all_datasets: List[Dataset], keys: List[str], special_tokens):
                     yield x
 
 
-def collate_fn(pad_token, batch):
+def collate_fn(tokenizer, pad_token, batch):
     ''' Tokenize and pad batches of data. '''
-    input_ids = [tokenizer.encode(sample['inputs'], is_pretokenized=True).ids for sample in batch]
+
+    # is_pretokenized expects `isinstance(sample['inputs'], List[str])`
+    input_ids  = [tokenizer.encode(sample['inputs'], is_pretokenized=True).ids for sample in batch]
     output_ids = [tokenizer.encode(sample['outputs'], is_pretokenized=True).ids for sample in batch]
 
     # Get the maximum sequence length in the batch
     max_length = max(len(ids) for ids in input_ids + output_ids)
 
     # Pad the sequences on the left side
-    input_ids = [F.pad(torch.tensor(ids), (max_length - len(ids), 0), value=tokenizer.token_to_id(pad_token)) for ids in input_ids]
+    input_ids  = [F.pad(torch.tensor(ids), (max_length - len(ids), 0), value=tokenizer.token_to_id(pad_token)) for ids in input_ids]
     output_ids = [F.pad(torch.tensor(ids), (max_length - len(ids), 0), value=tokenizer.token_to_id(pad_token)) for ids in output_ids]
 
     # Stack the padded sequences into tensors
@@ -117,85 +130,85 @@ def dataloader_info(dataloader, tokenizer):
 def build_tokenizer_dataloader(
         raw_datasets: List[ # multiple datasets
             List[Dict[str, List[str]]] # a single dataset
-        ]):
+        ],
+        batch_size,
+        unk_token='[UNK]',
+        pad_token='[PAD]',
+        data_keys: List[str]=None,
+):
+    ''' Dataset has pretokenization applied, ie it's split into a list of str tokens (it has not been tokenized into ints yet). '''
     for data in raw_datasets:
         assert isinstance(data, list)
         assert isinstance(data[0], dict)
         assert 'inputs' in data[0]
         assert 'outputs' in data[0]
 
+    # the keys to pay attention to from the dataset
+    if data_keys is None:
+        keys = raw_datasets[0].keys()
+    else:
+        keys = data_keys
 
     # Convert to HF Dataset
     hf_datasets = [Dataset.from_list(x) for x in raw_datasets]
 
     # Make Tokenizer from Data
-    UNK_TOKEN = '[UNK]'
-    PAD_TOKEN = '[PAD]'
-    special_tokens = [UNK_TOKEN, PAD_TOKEN]
+    special_tokens = [unk_token, pad_token]
     # init tokenizer
-    tokenizer = Tokenizer(tokenizers.models.WordLevel(vocab={}, unk_token=UNK_TOKEN))
+    tokenizer = Tokenizer(tokenizers.models.WordLevel(vocab={}, unk_token=unk_token))
     print('training tokenizer')
-    tokenizer.train_from_iterator(iterator(hf_datasets, ['inputs', 'outputs'], special_tokens))
-    tokenizer.add_special_tokens([UNK_TOKEN, PAD_TOKEN])
-    # a = tokenizer.encode(['1', '2', '3'], is_pretokenized=True)
-    # print_grid([['tokens:'] + a.tokens,
-    #             ['ids:'] + a.ids])
+    tokenizer.train_from_iterator(iterator(hf_datasets, keys, special_tokens))
+    tokenizer.add_special_tokens([unk_token, pad_token])
     dataloaders = [
-        DataLoader(
-            x,
-            batch_size=BATCH_SIZE,
-            collate_fn=partial(collate_fn, PAD_TOKEN)
-        ) for x in hf_datasets]
+        DataLoader(x, batch_size=batch_size, collate_fn=partial(collate_fn, tokenizer, pad_token))
+        for x in hf_datasets
+    ]
 
     return tokenizer, dataloaders
 
 
-
 ##################################################
-# sandbox
+# TRAINING
 
-REFLECT_SYMBOL = '|'
-PAUSE_SYMBOL = '.'
+def run_epoch(model, dl, optimizer, mode, device, clip=None):
+    assert mode in ['eval', 'train'], "mode must be either 'eval' or 'train'"
+    if mode == 'train':
+        model.train()
+    else:
+        model.eval()
 
-def palindrome(num_samples, max_length, lang) -> Dict[str, List[str]]:
-    data = []
-    for _ in range(num_samples):
-        length = random.randint(5, max_length)
-        hlength = length // 2
-        seed = [random.choice(lang) for _ in range(hlength)]
-        # add pauses to inputs and outputs
-        inputs  = seed + [REFLECT_SYMBOL] + [PAUSE_SYMBOL] * hlength
-        outputs = [PAUSE_SYMBOL] * (hlength + 1) + seed[::-1]
-        # convert all symbols to str
-        inputs  = list(map(str, inputs))
-        outputs = list(map(str, outputs))
-        data.append({
-            'seed': seed,
-            'inputs': inputs,
-            'outputs': outputs,
-        })
-    return data
+    epoch_loss = 0
 
-TRAIN_NUM_SAMPLES = 1000
-TRAIN_MAX_SEQUENCE_LENGTH = 100
+    with torch.set_grad_enabled(mode == 'train'):
+        for i, (src_ids, trg_ids) in enumerate(dl):
+            src_ids = src_ids.to(device)  # [batch, seq, vec_size]
+            trg_ids = trg_ids.to(device)
+            output = model(src_ids) # [batch, seq, vec_size]
+            loss = F.cross_entropy(output.flatten(0, 1), trg_ids.flatten(), reduction='mean')
+            epoch_loss += loss.item()
 
-VAL_NUM_SAMPLES = 100
-VAL_MAX_SEQUENCE_LENGTH = 100
+            if mode == 'train':
+                optimizer.zero_grad()
+                loss.backward()
+                if clip is not None:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
+                optimizer.step()
 
-BATCH_SIZE = 10
+    return epoch_loss / len(dl)
 
-
-# train_lang = 'a b c d e f g h i j k l m n o p q r s t u v w x y z'.split(' ')
-train_lang = 'a b c d e'.split(' ')
-val_lang = 'f g h i j'.split(' ')
-
-train_raw = palindrome(TRAIN_NUM_SAMPLES, TRAIN_MAX_SEQUENCE_LENGTH, lang=train_lang)
-train_raw = sorted(train_raw, key=lambda x: len(x['inputs']))
-
-val_raw = palindrome(VAL_NUM_SAMPLES, VAL_MAX_SEQUENCE_LENGTH, lang=val_lang)
-val_raw = sorted(val_raw, key=lambda x: len(x['inputs']))
-
-tokenizer, (train_loader, val_loader) = build_tokenizer_dataloader([train_raw, val_raw])
-
-dataloader_info(train_loader, tokenizer)
-dataloader_info(val_loader, tokenizer)
+def accuracy(model, val_dl, device, debug=False):
+    model.eval()
+    n_correct = 0
+    n = 0
+    outputs = []
+    with torch.no_grad():
+        for i, (src_ids, trg_ids) in enumerate(val_dl):
+            src_ids = src_ids.to(device)  # [batch, seq, vec_size]
+            trg_ids = trg_ids.to(device)
+            output = model(src_ids) # [batch, seq, vec_size]
+            output_ids = output.argmax(dim=2)
+            n += trg_ids.shape[0] * trg_ids.shape[1] # total count
+            n_correct += (output_ids == trg_ids).sum()
+            outputs.append((src_ids, trg_ids, output_ids))
+    acc = n_correct / n
+    return acc.item(), outputs

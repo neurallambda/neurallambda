@@ -8,9 +8,12 @@
 TODO:
 - [x] trace stack ops
 - [x] emit outputs from embedding vocab + symbolic (trace)
+- [ ] split out library
+- [ ] split out demo
 - [ ] playground that others can use
 
 '''
+
 
 import torch
 import random
@@ -33,159 +36,12 @@ from typing import List, Any, Dict
 import matplotlib.pyplot as plt
 import neurallambda.latch as L
 import neurallambda.stack as S
+from neurallambda.lab.common import *
+from neurallambda.torch import GumbelSoftmax
+
 import numpy as np
 
 import tokenizers
-
-
-##################################################
-# Data concerns (this work is duplicated in `demo/common.py`
-
-def print_grid(data):
-    # maximum width for each column
-    column_widths = [max(len(str(item)) for item in column) for column in zip(*data)]
-    for row in data:
-        formatted_row = "  ".join(str(item).ljust(width) for item, width in zip(row, column_widths))
-        print(formatted_row)
-
-
-def print_model_info(model):
-    print('------------')
-    print('MODEL PARAMS')
-    info = []
-    total_params = 0
-    for name, param in model.named_parameters():
-        param_count = param.numel()
-        total_params += param_count
-        info.append((name, param_count, f'{list(param.shape)}', f'grad:{param.requires_grad}'))
-    print_grid(info)
-    print(f'Total Parameters: {total_params:,}')
-
-
-def iterator(all_datasets: List[Dataset], keys: List[str], special_tokens):
-    ''' Iterate over a list of datasets and build a vocab for them. '''
-    for tok in special_tokens:
-        yield tok
-    for dataset in all_datasets:
-        for xs in dataset:
-            for key in keys:
-                for x in xs[key]:
-                    yield x
-
-
-def collate_fn(pad_token, batch):
-    ''' Tokenize and pad batches of data. '''
-
-    # is_pretokenized expects `isinstance(sample['inputs'], List[str])`
-    input_ids  = [tokenizer.encode(sample['inputs'], is_pretokenized=True).ids for sample in batch]
-    output_ids = [tokenizer.encode(sample['outputs'], is_pretokenized=True).ids for sample in batch]
-
-    # Get the maximum sequence length in the batch
-    max_length = max(len(ids) for ids in input_ids + output_ids)
-
-    # Pad the sequences on the left side
-    input_ids  = [F.pad(torch.tensor(ids), (max_length - len(ids), 0), value=tokenizer.token_to_id(pad_token)) for ids in input_ids]
-    output_ids = [F.pad(torch.tensor(ids), (max_length - len(ids), 0), value=tokenizer.token_to_id(pad_token)) for ids in output_ids]
-
-    # Stack the padded sequences into tensors
-    input_ids = torch.stack(input_ids)
-    output_ids = torch.stack(output_ids)
-
-    return input_ids, output_ids
-
-
-def dataloader_info(dataloader, tokenizer):
-    ''' Print debug info about data, and get histogram of sequence length. '''
-    import matplotlib.pyplot as plt
-
-    # PRINT EXAMPLES
-    for batch_idx, batch in enumerate(dataloader):
-        input_ids, output_ids = batch
-
-        # a random sample from the batch
-        sample_idx = random.randint(0, input_ids.size(0) - 1)
-        sample_input_ids = input_ids[sample_idx].tolist()
-        sample_output_ids = output_ids[sample_idx].tolist()
-
-        # decode
-        #   NOTE: map decode since these ids are symbols in a list, not a string
-        sample_input_tokens  = [tokenizer.decode([x], skip_special_tokens=True) for x in sample_input_ids]
-        sample_output_tokens = [tokenizer.decode([x], skip_special_tokens=True) for x in sample_output_ids]
-
-        print(f"Batch {batch_idx + 1}:")
-        print_grid([
-            ['Input Tokens:'] + sample_input_tokens,
-            ['Output Tokens:'] + sample_output_tokens,
-            ['Input IDs:'] + list(map(str, sample_input_ids)),
-            ['Output IDs:'] + list(map(str, sample_output_ids))
-        ])
-        print()
-        if batch_idx >= 4:
-            break
-
-    # STATISTICS
-    sequence_lengths = []
-    batch_sizes = []
-    for batch in dataloader:
-        input_ids, _ = batch
-        batch_sizes.append(input_ids.size(0))
-        sequence_lengths.append(input_ids.size(1))
-
-    print("DATALOADER STATISTICS:")
-    print(f"number of batches: {len(batch_sizes)}")
-    print(f"avg batch size: {sum(batch_sizes) / len(batch_sizes):.2f}")
-    print(f"min padded sequence length: {min(sequence_lengths)}")
-    print(f"max padded sequence length: {max(sequence_lengths)}")
-    print(f"avg padded sequence length: {sum(sequence_lengths) / len(sequence_lengths):.2f}")
-
-    # histogram of sequence lengths
-    plt.figure(figsize=(8, 6))
-    plt.hist(sequence_lengths, bins=20, edgecolor='black')
-    plt.xlabel('Sequence Length')
-    plt.ylabel('Frequency')
-    plt.title('Histogram of Sequence Lengths')
-    plt.show()
-
-
-def build_tokenizer_dataloader(
-        raw_datasets: List[ # multiple datasets
-            List[Dict[str, List[str]]] # a single dataset
-        ]):
-    for data in raw_datasets:
-        assert isinstance(data, list)
-        assert isinstance(data[0], dict)
-        assert 'inputs' in data[0]
-        assert 'outputs' in data[0]
-
-    # Convert to HF Dataset
-    hf_datasets = [Dataset.from_list(x) for x in raw_datasets]
-
-    # Make Tokenizer from Data
-    UNK_TOKEN = '[UNK]'
-    PAD_TOKEN = '[PAD]'
-    special_tokens = [UNK_TOKEN, PAD_TOKEN]
-    # init tokenizer
-    tokenizer = Tokenizer(tokenizers.models.WordLevel(vocab={}, unk_token=UNK_TOKEN))
-    print('training tokenizer')
-    tokenizer.train_from_iterator(iterator(hf_datasets, ['inputs', 'outputs'], special_tokens))
-    tokenizer.add_special_tokens([UNK_TOKEN, PAD_TOKEN])
-    dataloaders = [
-        DataLoader(x, batch_size=BATCH_SIZE, collate_fn=partial(collate_fn, PAD_TOKEN))
-        for x in hf_datasets
-    ]
-
-    return tokenizer, dataloaders
-
-
-class GumbelSoftmax(nn.Module):
-    def __init__(self, temperature=1.0, hard=False, dim=-1):
-        super(GumbelSoftmax, self).__init__()
-        self.temperature = temperature
-        self.hard = hard
-        self.dim = dim
-
-    def forward(self, logits):
-        return F.gumbel_softmax(logits, tau=self.temperature, hard=self.hard, dim=self.dim)
 
 
 ##################################################
@@ -249,7 +105,7 @@ train_raw = sorted(train_raw, key=lambda x: len(x['inputs']))
 val_raw = palindrome(VAL_NUM_SAMPLES, MIN_LENGTH, VAL_MAX_SEQUENCE_LENGTH, lang=val_lang)
 val_raw = sorted(val_raw, key=lambda x: len(x['inputs']))
 
-tokenizer, (train_dl, val_dl) = build_tokenizer_dataloader([train_raw, val_raw])
+tokenizer, (train_dl, val_dl) = build_tokenizer_dataloader([train_raw, val_raw], data_keys=['inputs', 'outputs'], batch_size=BATCH_SIZE)
 
 # dataloader_info(train_dl, tokenizer)
 
@@ -352,13 +208,14 @@ class RNNStack(nn.Module):
 
         self.choose = nn.Sequential(
             nn.Linear(hidden_dim * 2, 2, bias=False),
-            # nn.Softmax(dim=1),
-            # GumbelSoftmax(dim=1, temperature=1.0, hard=True),
+            # nn.Softmax(dim=1)
+            # GumbelSoftmax(dim=1, temperature=1.0, hard=True)
             GumbelSoftmax(dim=1, temperature=1.0, hard=False)
         )
 
         ##########
         # Stack
+
         self.n_stack = N_STACK
         self.initial_sharpen = INITIAL_SHARPEN
         self.zero_offset = 0
@@ -369,8 +226,8 @@ class RNNStack(nn.Module):
             # nn.LayerNorm(hidden_dim),
             nn.Linear(hidden_dim * 2, 3, bias=False), # rnn hidden -> push,pop,nop
             # nn.Softmax(dim=1)
-            # GumbelSoftmax(dim=1, temperature=1.0, hard=True),
-            GumbelSoftmax(dim=1, temperature=1.0, hard=False),
+            # GumbelSoftmax(dim=1, temperature=1.0, hard=True)
+            GumbelSoftmax(dim=1, temperature=1.0, hard=False)
         )
 
     def forward(self, x_ids, debug=False):
@@ -416,68 +273,8 @@ class RNNStack(nn.Module):
             return outputs
 
 
-
 ##################################################
 # Training
-
-def train_epoch(model, dl, optimizer, device, clip=None):
-    '''
-    Args:
-      warm_up: ignore loss for this many steps
-    '''
-    model.train()
-    epoch_loss = 0
-
-    for i, (src_ids, trg_ids) in enumerate(dl):
-        src_ids = src_ids.to(device)  # [batch, seq, vec_size]
-        trg_ids = trg_ids.to(device)
-
-        optimizer.zero_grad()
-        output = model(src_ids) # [batch, seq, vec_size]
-
-        # loss = ((1 - torch.cosine_similarity(output, trg, dim=2))).mean()
-        loss = F.cross_entropy(output.flatten(0, 1), trg_ids.flatten(), reduction='mean')
-        loss.backward()
-        if clip is not None:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
-        optimizer.step()
-
-        epoch_loss += loss.item()
-
-    return epoch_loss / len(dl)
-
-
-def evaluate(model, dl, device):
-    model.eval()
-    epoch_loss = 0
-
-    with torch.no_grad():
-        for i, (src_ids, trg_ids) in enumerate(dl):
-            src_ids = src_ids.to(device)  # [batch, seq, vec_size]
-            trg_ids = trg_ids.to(device)
-            output = model(src_ids) # [batch, seq, vec_size]
-            loss = F.cross_entropy(output.flatten(0, 1), trg_ids.flatten(), reduction='mean')
-            epoch_loss += loss.item()
-
-    return epoch_loss / len(dl)
-
-def accuracy(model, val_dl, device, debug=False):
-    model.eval()
-    n_correct = 0
-    n = 0
-    outputs = []
-    with torch.no_grad():
-        for i, (src_ids, trg_ids) in enumerate(val_dl):
-            src_ids = src_ids.to(device)  # [batch, seq, vec_size]
-            trg_ids = trg_ids.to(device)
-            output = model(src_ids) # [batch, seq, vec_size]
-            output_ids = output.argmax(dim=2)
-            n += trg_ids.shape[0] * trg_ids.shape[1] # total count
-            n_correct += (output_ids == trg_ids).sum()
-            outputs.append((src_ids, trg_ids, output_ids))
-    acc = n_correct / n
-    return acc.item(), outputs
-
 
 ##########
 # Setup
@@ -510,10 +307,10 @@ train_accuracies = []
 val_accuracies = []
 
 for epoch in range(NUM_EPOCHS):
-    train_loss = train_epoch(model, train_dl, optimizer, DEVICE, GRAD_CLIP)
+    train_loss = run_epoch(model, train_dl, optimizer, 'train', DEVICE, GRAD_CLIP)
     train_losses.append(train_loss)
 
-    val_loss = evaluate(model, val_dl, DEVICE)
+    val_loss = run_epoch(model, val_dl, None, 'eval', DEVICE) # evaluate(model, val_dl, DEVICE)
     val_losses.append(val_loss)
 
     tacc, _ = accuracy(model, train_dl, DEVICE)
@@ -523,6 +320,10 @@ for epoch in range(NUM_EPOCHS):
     val_accuracies.append(vacc)
 
     print(f'Epoch: {epoch + 1:02} | Train Loss: {train_loss:.3f} | Val. Loss: {val_loss:.3f} | Train Acc: {tacc:.3f} | Val Acc: {vacc:.3f}')
+
+
+##################################################
+# RESULTS
 
 # Plot training and validation loss
 plt.figure()
@@ -567,10 +368,10 @@ for src_idss, trg_idss, output_idss  in reversed(outputs):
 print()
 
 inp = '^ a b c d e e e | . . . . . . .'.split(' ')
-trg = '^ . . . . . . . . e e e d c b a'.split(' ')
+trg = '. . . . . . . . . e e e d c b a'.split(' ')
 
 inp = '^ k l m n o o o | . . . . . . .'.split(' ')
-trg = '^ . . . . . . . . o o o n m l k'.split(' ')
+trg = '. . . . . . . . . o o o n m l k'.split(' ')
 
 inp_ids = torch.tensor(tokenizer.encode(inp, is_pretokenized=True).ids, device=DEVICE).unsqueeze(0)
 trg_ids = torch.tensor(tokenizer.encode(trg, is_pretokenized=True).ids, device=DEVICE).unsqueeze(0)

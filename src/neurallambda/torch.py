@@ -87,6 +87,7 @@ class Stack(nn.Module):
     def forward(self, inputs):
         return torch.stack(inputs, dim=self.dim)
 
+
 class Cat(nn.Module):
     def __init__(self, dim=-1):
         super(Cat, self).__init__()
@@ -96,6 +97,7 @@ class Cat(nn.Module):
         # inputs is a tuple of tensors
         # Each input tensor shape=[batch, features...]
         return torch.cat(inputs, dim=self.dim)
+
 
 class Parallel(nn.Module):
     def __init__(self, module_tuple):
@@ -108,6 +110,7 @@ class Parallel(nn.Module):
         outputs = tuple(module(input) for module, input in zip(self.ms, inputs))
         return outputs  # Output is a tuple of tensors, shapes depend on respective modules
 
+
 class Split(nn.Module):
     def __init__(self, split_sizes, dim=-1):
         super(Split, self).__init__()
@@ -119,11 +122,13 @@ class Split(nn.Module):
         # torch.split returns a tuple of tensors split according to self.split_sizes
         return torch.split(input, self.split_sizes, dim=self.dim)  # Output shapes depend on self.split_sizes
 
+
 class Id(nn.Module):
     def __init__(self):
         super(Id, self).__init__()
     def forward(self, x):
         return x
+
 
 class Squeeze(nn.Module):
     def __init__(self, dim):
@@ -131,6 +136,7 @@ class Squeeze(nn.Module):
         self.dim = dim
     def forward(self, x):
         return x.squeeze(self.dim)
+
 
 class Fn(nn.Module):
     def __init__(self, f, nargs=1, parameters=[]):
@@ -165,6 +171,17 @@ class Fn(nn.Module):
         if self.nargs == 8:
             a, b, c, d, e, f, g, h = input
             return self.f(a, b, c, d, e, f, g, h)
+
+
+class GumbelSoftmax(nn.Module):
+    def __init__(self, temperature=1.0, hard=False, dim=-1):
+        super(GumbelSoftmax, self).__init__()
+        self.temperature = temperature
+        self.hard = hard
+        self.dim = dim
+
+    def forward(self, logits):
+        return F.gumbel_softmax(logits, tau=self.temperature, hard=self.hard, dim=self.dim)
 
 
 class Diagnose(nn.Module):
