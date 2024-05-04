@@ -6,7 +6,7 @@
 
 
 TODO:
-- [ ] trace stack ops
+- [x] trace stack ops
 - [ ] emit outputs from embedding vocab + symbolic (trace)
 - [ ] playground that others can use
 
@@ -202,24 +202,25 @@ TRAIN_MAX_SEQUENCE_LENGTH = 10
 VAL_NUM_SAMPLES = 200
 VAL_MAX_SEQUENCE_LENGTH = 20
 
-N_STACK = 12
+N_STACK = 20
 INITIAL_SHARPEN = 5.0
 
 LR = 1e-2
 BATCH_SIZE = 32
 
-NUM_EPOCHS = 12
+NUM_EPOCHS = 6
 GRAD_CLIP = None
 
 # Symbols that go into palindrome
 train_lang = 'a b c d e f g h i j'.split(' ')
-val_lang   = 'a b c d e f g h i j'.split(' ')
-# val_lang   = 'k l m n o p q r s t'.split(' ')
+# val_lang   = 'a b c d e f g h i j'.split(' ')
+val_lang   = 'k l m n o p q r s t'.split(' ')
 
 
 ##########
 # DATA
 
+BOS_SYMBOL = '^'
 REFLECT_SYMBOL = '|'
 PAUSE_SYMBOL = '.'
 
@@ -230,8 +231,8 @@ def palindrome(num_samples, min_length, max_length, lang) -> Dict[str, List[str]
         hlength = length // 2
         seed = [random.choice(lang) for _ in range(hlength)]
         # add pauses to inputs and outputs
-        inputs  = seed + [REFLECT_SYMBOL] + [PAUSE_SYMBOL] * hlength
-        outputs = [PAUSE_SYMBOL] * (hlength + 1) + seed[::-1]
+        inputs  = [BOS_SYMBOL] + seed + [REFLECT_SYMBOL] + [PAUSE_SYMBOL] * hlength
+        outputs = [PAUSE_SYMBOL] * (hlength + 2) + seed[::-1]
         # convert all symbols to str
         inputs  = list(map(str, inputs))
         outputs = list(map(str, outputs))
@@ -338,11 +339,25 @@ class RNNStack(nn.Module):
 
         # TODO: emit from stack + embedding vocab
 
-        self.lc1 = nn.RNNCell(input_dim, hidden_dim)
+        # self.rnn = nn.RNNCell(input_dim, hidden_dim)
+        self.rnn_i = nn.Linear(input_dim, hidden_dim, bias=False)
+        self.rnn_h = nn.Linear(hidden_dim, hidden_dim, bias=False)
+
+
+        ##########
+        # Outputs
+
         self.fc = nn.Sequential(
-            nn.Linear(input_dim + hidden_dim, self.vocab_size, bias=False),
+            nn.Linear(hidden_dim * 2, self.vocab_size, bias=False),
             nn.Softmax(dim=1)
             # GumbelSoftmax(dim=1, temperature=1.0, hard=True)
+        )
+
+        self.choose = nn.Sequential(
+            nn.Linear(hidden_dim * 2, 2, bias=False),
+            # nn.Softmax(dim=1),
+            # GumbelSoftmax(dim=1, temperature=1.0, hard=True),
+            GumbelSoftmax(dim=1, temperature=1.0, hard=False)
         )
 
         ##########
@@ -354,32 +369,51 @@ class RNNStack(nn.Module):
         self.sharp = nn.Parameter(torch.tensor([self.initial_sharpen]))
 
         self.ops = nn.Sequential(
-            nn.LayerNorm(hidden_dim),
-            nn.Linear(hidden_dim, 3, bias=False), # rnn hidden -> push,pop,nop
-            nn.Softmax(dim=1)
+            # nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim * 2, 3, bias=False), # rnn hidden -> push,pop,nop
+            # nn.Softmax(dim=1)
+            # GumbelSoftmax(dim=1, temperature=1.0, hard=True),
+            GumbelSoftmax(dim=1, temperature=1.0, hard=False),
         )
-
 
     def forward(self, x_ids, debug=False):
         x = model.embeddings(x_ids)
         batch_size, device, dtype = x.size(0), x.device, x.dtype
         # init
-        ss = S.initialize(self.input_dim, self.n_stack, batch_size, self.zero_offset, device, dtype=dtype)
-        h1 = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
+        ss = S.initialize(self.input_dim, self.n_stack, batch_size, self.zero_offset + 1e-3, device, dtype=dtype)
+        h = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
         outputs = []
         if debug:
             ops_trace = []
         for i in range(x.size(1)):
-            h1 = self.lc1(x[:, i], h1)
+            # h = self.rnn(x[:, i], h)
+            ri = self.rnn_i(F.normalize(x[:, i], dim=1))
+            # ri = 1 - ri.relu()
+            rh = self.rnn_h(h)
+            h = (ri + rh).tanh()
+            # h = ri + rh
 
-            ops = self.ops(h1)
+            # hmod = torch.sigmoid(h)
+            hmod = h
+            hmod = torch.cat([hmod, hmod], dim=1)
+
+            # Stack
+            ops = self.ops(hmod)
             if debug:
                 ops_trace.append(ops)
-            push, pop, nop = [x.squeeze(1) for x in torch.chunk(ops, chunks=3, dim=-1)]
+            push, pop, nop = [o.squeeze(1) for o in torch.chunk(ops, chunks=3, dim=-1)]
             ss, pop_val = S.push_pop_nop(ss, self.sharp, push, pop, nop, x[:, i])
 
-            output = self.fc(torch.cat([h1, pop_val], dim=1))
+            # Outputs
+            semantic = self.fc(hmod)
+            # OPTIM: will this be memory hog?
+            syntactic = torch.cosine_similarity(pop_val.unsqueeze(1), # [B, 1, D]
+                                                self.embeddings.weight.unsqueeze(0), # [1, V, D]
+                                                dim=2) # [B, V]
+            choice = self.choose(hmod)
+            output = torch.einsum('bc, bcv -> bv', choice, torch.stack([semantic, syntactic], dim=1))
             outputs.append(output)
+
         outputs = torch.stack(outputs, dim=1)
         if debug:
             ops_trace = torch.stack(ops_trace, dim=1)
@@ -388,110 +422,6 @@ class RNNStack(nn.Module):
         else:
             return outputs
 
-
-
-
-##########
-# NeuralStack Only
-
-class NeuralstackOnly(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, tokenizer):
-        super(NeuralstackOnly, self).__init__()
-
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
-
-        self.vocab_size = tokenizer.get_vocab_size()
-        self.embeddings = nn.Embedding(self.vocab_size, input_dim)
-
-        ##########
-        # Stack
-        self.n_stack = N_STACK
-        self.initial_sharpen = INITIAL_SHARPEN
-        self.zero_offset = 0
-        self.stack_vec_size = input_dim
-        self.sharpen_pointer = nn.Parameter(torch.tensor([self.initial_sharpen]))
-
-        ##########
-        # Latch
-        self.latch = L.DataLatch(input_dim, init_scale=1e-2, dropout=None)
-
-        ##########
-        # NNs
-
-        self.should_pop = nn.Parameter(torch.randn(input_dim))
-        self.null_symbol = nn.Parameter(torch.randn(output_dim))
-
-        self.proj_out = nn.Sequential(
-            nn.LayerNorm(output_dim),
-            nn.Linear(output_dim, self.vocab_size, bias=False)
-        )
-
-
-    def forward(self, x_ids):
-        # Stack Init
-
-        x = model.embeddings(x_ids)
-
-        device = x.device
-        batch_size = x.shape[0]
-        vec_size = x.shape[2]
-        dtype = x.dtype
-
-        # self.stack.init(batch_size, zero_offset, device)
-        ss = S.initialize(self.input_dim, self.n_stack, batch_size, self.zero_offset, device, dtype=dtype)
-
-        # Latch Init
-        latch_state = torch.zeros((batch_size, self.input_dim), device=device) + self.zero_offset
-        # latch_state = torch.randn((batch_size, self.input_dim), device=device)
-
-        outputs = []
-
-        # Debugging
-        latch_states = []
-        pops = []
-        stack_tops = []
-
-        # relay = [latch_state, ]
-
-        # Loop over sequence
-        for i in range(x.size(1)):
-            inp = x[:, i]
-
-            # lsr = relay[0]
-            lsr = latch_state
-
-            # Decide what to do
-            pop = cosine_similarity(self.should_pop.unsqueeze(0), lsr)
-            # pop = elu(pop)
-            # pop = gelu(pop)
-            # pop = leaky_relu(pop)
-            pops.append(pop)
-
-            push    = 1 - pop
-            null_op = torch.zeros_like(pop)
-
-            # Update Stack
-            ss, pop_val = S.push_pop_nop(ss, self.sharpen_pointer, push, pop, null_op, inp)
-            s = S.read(ss)
-
-            out = self.proj_out(
-                einsum('b, bv -> bv', pop, s) +
-                einsum('b,  v -> bv', 1 - pop, self.null_symbol)
-            )
-            out = F.softmax(out, dim=1)
-            outputs.append(out)
-
-            # Update Latch
-            latch_state = self.latch(latch_state, enable=inp, data=inp)
-            latch_states.append(latch_state)
-            # relay.append(latch_state)
-            # relay = relay[1:]
-            stack_tops.append(S.read(ss))
-
-        outputs = torch.stack(outputs, dim=1)
-        return outputs
 
 
 ##################################################
@@ -566,7 +496,7 @@ MyModel = RNNStack
 
 model = MyModel(
     input_dim=VEC_SIZE,
-    hidden_dim=16,
+    hidden_dim=32,
     output_dim=VEC_SIZE,
     tokenizer=tokenizer,
 )
@@ -643,8 +573,12 @@ for src_idss, trg_idss, output_idss  in reversed(outputs):
 # Hand check some things
 
 print()
-inp = 'a b c d e | . . . . .'.split(' ')
-trg = '. . . . . | e d c b a'.split(' ')
+
+inp = '^ a b c d e | . . . . .'.split(' ')
+trg = '^ . . . . . | e d c b a'.split(' ')
+
+inp = '^ k l m n o | . . . . .'.split(' ')
+trg = '^ . . . . . | o n m l k'.split(' ')
 
 inp_ids = torch.tensor(tokenizer.encode(inp, is_pretokenized=True).ids, device=DEVICE).unsqueeze(0)
 trg_ids = torch.tensor(tokenizer.encode(trg, is_pretokenized=True).ids, device=DEVICE).unsqueeze(0)
