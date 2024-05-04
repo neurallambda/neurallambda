@@ -7,7 +7,7 @@
 
 TODO:
 - [x] trace stack ops
-- [ ] emit outputs from embedding vocab + symbolic (trace)
+- [x] emit outputs from embedding vocab + symbolic (trace)
 - [ ] playground that others can use
 
 '''
@@ -208,7 +208,7 @@ INITIAL_SHARPEN = 5.0
 LR = 1e-2
 BATCH_SIZE = 32
 
-NUM_EPOCHS = 6
+NUM_EPOCHS = 12
 GRAD_CLIP = None
 
 # Symbols that go into palindrome
@@ -337,9 +337,6 @@ class RNNStack(nn.Module):
         self.vocab_size = tokenizer.get_vocab_size()
         self.embeddings = nn.Embedding(self.vocab_size, input_dim)
 
-        # TODO: emit from stack + embedding vocab
-
-        # self.rnn = nn.RNNCell(input_dim, hidden_dim)
         self.rnn_i = nn.Linear(input_dim, hidden_dim, bias=False)
         self.rnn_h = nn.Linear(hidden_dim, hidden_dim, bias=False)
 
@@ -350,7 +347,7 @@ class RNNStack(nn.Module):
         self.fc = nn.Sequential(
             nn.Linear(hidden_dim * 2, self.vocab_size, bias=False),
             nn.Softmax(dim=1)
-            # GumbelSoftmax(dim=1, temperature=1.0, hard=True)
+            # GumbelSoftmax(dim=1, temperature=1.0, hard=False)
         )
 
         self.choose = nn.Sequential(
@@ -386,15 +383,11 @@ class RNNStack(nn.Module):
         if debug:
             ops_trace = []
         for i in range(x.size(1)):
-            # h = self.rnn(x[:, i], h)
             ri = self.rnn_i(F.normalize(x[:, i], dim=1))
-            # ri = 1 - ri.relu()
             rh = self.rnn_h(h)
             h = (ri + rh).tanh()
-            # h = ri + rh
 
-            # hmod = torch.sigmoid(h)
-            hmod = h
+            hmod = 1 - h.relu()
             hmod = torch.cat([hmod, hmod], dim=1)
 
             # Stack
@@ -492,7 +485,6 @@ def accuracy(model, val_dl, device, debug=False):
 # MyModel = LSTMModel
 # MyModel = RNNModel
 MyModel = RNNStack
-# MyModel = NeuralstackOnly
 
 model = MyModel(
     input_dim=VEC_SIZE,
@@ -574,15 +566,22 @@ for src_idss, trg_idss, output_idss  in reversed(outputs):
 
 print()
 
-inp = '^ a b c d e | . . . . .'.split(' ')
-trg = '^ . . . . . | e d c b a'.split(' ')
+inp = '^ a b c d e e e | . . . . . . .'.split(' ')
+trg = '^ . . . . . . . . e e e d c b a'.split(' ')
 
-inp = '^ k l m n o | . . . . .'.split(' ')
-trg = '^ . . . . . | o n m l k'.split(' ')
+inp = '^ k l m n o o o | . . . . . . .'.split(' ')
+trg = '^ . . . . . . . . o o o n m l k'.split(' ')
 
 inp_ids = torch.tensor(tokenizer.encode(inp, is_pretokenized=True).ids, device=DEVICE).unsqueeze(0)
 trg_ids = torch.tensor(tokenizer.encode(trg, is_pretokenized=True).ids, device=DEVICE).unsqueeze(0)
 logits, debug = model(inp_ids, debug=True)
+out_ids = logits.argmax(dim=2)[0]
+out_toks = [tokenizer.decode([x]) for x in out_ids]
+print_grid([['inp:'] + inp,
+            ['out:'] + out_toks,
+            ['trg:'] + trg])
+
+
 ops = debug['ops_trace']
 push, pop, nop = [x.squeeze(1) for x in torch.chunk(ops, chunks=3, dim=-1)]
 
