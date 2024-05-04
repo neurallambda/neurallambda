@@ -16,7 +16,6 @@ import torch.optim as optim
 
 import neurallambda.stack as S
 from neurallambda.lab.common import (
-    accuracy,
     build_tokenizer_dataloader,
     dataloader_info,
     print_grid,
@@ -238,19 +237,15 @@ train_accuracies = []
 val_accuracies = []
 
 for epoch in range(NUM_EPOCHS):
-    train_loss = run_epoch(model, train_dl, optimizer,
-                           'train', DEVICE, GRAD_CLIP)
+    train_loss, tacc, _ = run_epoch(
+        model, train_dl, optimizer, 'train', DEVICE, GRAD_CLIP,
+        check_accuracy=True)
     train_losses.append(train_loss)
 
-    val_loss = run_epoch(model, val_dl, None,
-                         'eval', DEVICE)
+    val_loss, vacc, _ = run_epoch(
+        model, val_dl, None, 'eval', DEVICE,
+        check_accuracy=True)
     val_losses.append(val_loss)
-
-    tacc, _ = accuracy(model, train_dl, DEVICE)
-    train_accuracies.append(tacc)
-
-    vacc, _ = accuracy(model, val_dl, DEVICE)
-    val_accuracies.append(vacc)
 
     print(f'Epoch: {epoch + 1:02} | Train Loss: {train_loss:.3f} | Val. Loss: {val_loss:.3f} | Train Acc: {tacc:.3f} | Val Acc: {vacc:.3f}')
 
@@ -274,7 +269,8 @@ plt.show()
 
 ##########
 
-tacc, outputs = accuracy(model, val_dl, DEVICE, debug=True)
+vloss, vacc, outputs = run_epoch(model, val_dl, None, 'eval', DEVICE, GRAD_CLIP,
+                                 check_accuracy=True)
 
 print()
 n = 0

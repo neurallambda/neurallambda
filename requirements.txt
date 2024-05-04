@@ -12,6 +12,7 @@ matplotlib
 # Experimentation
 matplotlib
 datasets
+ray[tune]
 
 
 # LLMs
