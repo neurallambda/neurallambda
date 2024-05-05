@@ -20,6 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from filelock import FileLock
+import math
 
 import neurallambda.stack as S
 from neurallambda.lab.common import (
@@ -62,9 +63,9 @@ val_lang = 'k l m n o p q r s t'.split(' ')  # NOTE: these tokens are never trai
 ##################################################
 # ARCHITECTURES
 
+
 ##############################
 # Transformer
-
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=5000):
@@ -74,11 +75,13 @@ class PositionalEncoding(nn.Module):
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0).transpose(0, 1)
+        pe = pe.unsqueeze(0)
         self.register_buffer('pe', pe)
 
     def forward(self, x):
-        return x + self.pe[:x.size(0), :]
+        x = x + self.pe[:, :x.size(1), :]
+        return x
+
 
 class PositionEmbedding(nn.Module):
     def __init__(self, d_model, max_len=5000):
@@ -86,44 +89,11 @@ class PositionEmbedding(nn.Module):
         self.pos_embedding = nn.Embedding(max_len, d_model)
 
     def forward(self, x):
-        seq_len = x.size(0)
-        positions = torch.arange(seq_len, dtype=torch.long, device=x.device)
-        return x + self.pos_embedding(positions)
+        seq_len = x.size(1)
+        positions = torch.arange(seq_len, dtype=torch.long, device=x.device).unsqueeze(0)
+        x = x + self.pos_embedding(positions)
+        return x
 
-class AlibiPositionalBias(nn.Module):
-    def __init__(self, num_heads, max_len=5000):
-        super(AlibiPositionalBias, self).__init__()
-        self.num_heads = num_heads
-        self.max_len = max_len
-        slopes = torch.Tensor(self._get_slopes(num_heads))
-        bias = slopes.unsqueeze(1).unsqueeze(1) * torch.arange(max_len).unsqueeze(0).unsqueeze(0)
-        self.register_buffer('bias', bias)
-
-    def _get_slopes(self, n):
-        def get_slopes_power_of_2(n):
-            start = (2 ** (-2 ** -(math.log2(n) - 3)))
-            ratio = start
-            return [start * ratio ** i for i in range(n)]
-
-        if math.log2(n).is_integer():
-            return get_slopes_power_of_2(n)
-        else:
-            closest_power_of_2 = 2 ** math.floor(math.log2(n))
-            return get_slopes_power_of_2(closest_power_of_2) + self._get_slopes(2 * closest_power_of_2)[0::2][:n - closest_power_of_2]
-
-    def forward(self, x):
-        seq_len = x.size(0)
-        return x + self.bias[:, :, :seq_len]
-
-# Add the relative positional encoding from Transformer-XL
-class RelativePositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=5000):
-        super(RelativePositionalEncoding, self).__init__()
-        self.embedding = nn.Parameter(torch.randn(max_len, d_model))
-
-    def forward(self, x):
-        seq_len = x.size(0)
-        return x + self.embedding[:seq_len]
 
 class TransformerEncoder(nn.Module):
     def __init__(self, emb_dim, hidden_dim, num_layers, num_heads, tokenizer, pos_encoding='sine'):
@@ -140,17 +110,13 @@ class TransformerEncoder(nn.Module):
             self.pos_encoder = PositionalEncoding(emb_dim)
         elif pos_encoding == 'learned':
             self.pos_encoder = PositionEmbedding(emb_dim)
-        elif pos_encoding == 'alibi':
-            self.pos_encoder = AlibiPositionalBias(num_heads)
-        elif pos_encoding == 'transformerxl':
-            self.pos_encoder = RelativePositionalEncoding(emb_dim)
         else:
             raise ValueError(f"Unsupported position encoding: {pos_encoding}")
 
-        encoder_layer = nn.TransformerEncoderLayer(d_model=hidden_dim, nhead=num_heads)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=emb_dim, nhead=num_heads)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
-        self.fc = nn.Linear(hidden_dim, self.vocab_size)
+        self.fc = nn.Linear(emb_dim, self.vocab_size)
 
     def forward(self, x_ids):
         x = self.embeddings(x_ids)
@@ -417,6 +383,20 @@ def train_model(config, tokenizer, train_dl, val_dl):
         model = LSTM(config['emb_dim'],
                      config['hidden_dim'],
                      tokenizer=tokenizer)
+    elif config['model_type'] == 'TransformerSine':
+        model = TransformerEncoder(config['emb_dim'],
+                                   config['hidden_dim'],
+                                   config['num_layers'],
+                                   config['num_heads'],
+                                   tokenizer=tokenizer,
+                                   pos_encoding='sine')
+    elif config['model_type'] == 'TransformerLearned':
+        model = TransformerEncoder(config['emb_dim'],
+                                   config['hidden_dim'],
+                                   config['num_layers'],
+                                   config['num_heads'],
+                                   tokenizer=tokenizer,
+                                   pos_encoding='learned')
 
     model.to(DEVICE)
 
@@ -451,9 +431,16 @@ def train_model(config, tokenizer, train_dl, val_dl):
 ##########
 # Run
 
-LR = tune.grid_search([1e-3, 1e-2])
-SEED = tune.grid_search([1, 2, 3])
-NUM_EPOCHS = 10
+# # light run
+# LR = tune.grid_search([1e-2])
+# SEED = tune.grid_search([1])
+# NUM_EPOCHS = 3
+# HIDDEN_DIM = 32
+
+# full run
+LR = tune.grid_search([1e-3, 1e-2, 5e-1])
+SEED = tune.grid_search([1, 2, 3, 4, 5])
+NUM_EPOCHS = 12
 HIDDEN_DIM = 32
 
 RNN_config = {
@@ -474,6 +461,28 @@ LSTM_config = {
     'seed': SEED,
 }
 
+TransformerSine_config = {
+    'model_type': 'TransformerSine',
+    'lr': LR,
+    'emb_dim': EMB_DIM,
+    'hidden_dim': HIDDEN_DIM,
+    'num_layers': 2,
+    'num_heads': 4,
+    'num_epochs': NUM_EPOCHS,
+    'seed': SEED,
+}
+
+TransformerLearned_config = {
+    'model_type': 'TransformerLearned',
+    'lr': LR,
+    'emb_dim': EMB_DIM,
+    'hidden_dim': HIDDEN_DIM,
+    'num_layers': 2,
+    'num_heads': 4,
+    'num_epochs': NUM_EPOCHS,
+    'seed': SEED,
+}
+
 RNNStack_config = {
     'model_type': 'RNNStack',
     'lr': LR,
@@ -483,11 +492,12 @@ RNNStack_config = {
     'seed': SEED,
 }
 
-
 all_configs = [
     RNN_config,
     LSTM_config,
     RNNStack_config,
+    TransformerSine_config,
+    TransformerLearned_config,
 ]
 
 def run_config(config):
@@ -543,7 +553,7 @@ def plot_experiments(all_configs, plot_confidence_bands=False):
 
     for i, config in enumerate(all_configs):
         model_type = config['model_type']
-        train_color, val_color = color_scheme[i % len(color_scheme)]
+        val_color, train_color = color_scheme[i % len(color_scheme)]
 
         all_trials = config['results']
 
@@ -592,8 +602,9 @@ def plot_experiments(all_configs, plot_confidence_bands=False):
                 ax.fill_between(epochs, train_mean - train_std, train_mean + train_std, color=train_color, alpha=0.2)
                 ax.fill_between(epochs, val_mean - val_std, val_mean + val_std, color=val_color, alpha=0.2)
 
-            ax.plot(epochs, best_train_loss if metric == 'loss' else best_train_accuracy, color=train_color, linestyle=linestyle, label=f"{model_type} - Best Train {metric.capitalize()}")
-            ax.plot(epochs, best_val_loss if metric == 'loss' else best_val_accuracy, color=val_color, linestyle='--', label=f"{model_type} - Best Val {metric.capitalize()}")
+            # plots for best_trial
+            ax.plot(epochs, best_train_loss if metric == 'loss' else best_train_accuracy, color=train_color, linestyle='--', label=f"{model_type} - Best Train {metric.capitalize()}")
+            ax.plot(epochs, best_val_loss if metric == 'loss' else best_val_accuracy, color=val_color, linestyle=linestyle, label=f"{model_type} - Best Val {metric.capitalize()}")
 
             ax.set_xlabel("Epoch")
             ax.set_ylabel(metric.capitalize())
@@ -602,5 +613,4 @@ def plot_experiments(all_configs, plot_confidence_bands=False):
     plt.tight_layout()
     plt.show()
 
-# Call the plotting function after running the configurations
 plot_experiments(all_configs, plot_confidence_bands=False)
