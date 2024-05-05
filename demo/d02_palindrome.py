@@ -221,6 +221,7 @@ model = RNNStack(
 )
 model.to(DEVICE)
 
+# skip training embeddings
 no_trains = [model.embeddings]
 for no_train in no_trains:
     for p in no_train.parameters():

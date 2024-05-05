@@ -13,6 +13,7 @@ matplotlib
 matplotlib
 datasets
 ray[tune]
+ray[data]
 
 
 # LLMs

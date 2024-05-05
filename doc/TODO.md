@@ -11,20 +11,23 @@
 
 # Tickets
 
+STACK
+- [ ] E001: Build model comparison tooling for increased training + search
+- [ ] E001: Compare LSTM etc
+- [ ] E001: Work on Sum Sequence Again, built on new code. (Use binary representations?)
+
+
 SOCIAL DEMOS
 - [X] ESOCIAL: Add new `palindrome` thing to `demo/`
 - [X] ESOCIAL: Comment `palindrome` thing well
-- [ ] ESOCIAL: Build model comparison tooling for increased training + search
-- [ ] ESOCIAL: Compare LSTM etc
-- [ ] ESOCIAL: Write it up
+- [ ] ESOCIAL: Write up palindrome
 - [ ] ESOCIAL: Move current README to a neurallambda-specific writeup
 - [ ] ESOCIAL: Tighten up current README
 
-STACK
-- [ ] E001: Work on Sum Sequence Again, built on new code. (Use binary representations?)
 
 QUEUE
 - [ ] E004: Sorting using queues
+
 
 RWKV
 - [ ] E002: After Sum Sequence + Sorting are solved, re-integrate into RWKV
@@ -174,3 +177,5 @@ RWKV
 - [X] E002: What datasets to start using? (made `awesome-reasoning` repo)
 - [X] E002: Integrate tensorboard
 - [X] E001: Add new improved Palindrome RNNStack
+- [X] E001: Add ray data (skipping, we can pass data straight in using `with_parameters`, or directly in training fn
+- [X] E001: Add ray tune

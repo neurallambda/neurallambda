@@ -4,15 +4,22 @@ Compare architectures on this task using RayTune
 
 '''
 
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"  # quiet the tokenizers warning
 
+
+import ray
+from ray import tune
 from typing import List, Dict
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from filelock import FileLock
 
 import neurallambda.stack as S
 from neurallambda.lab.common import (
@@ -24,16 +31,12 @@ from neurallambda.lab.common import (
 )
 from neurallambda.torch import GumbelSoftmax
 
-SEED = 42
-torch.manual_seed(SEED)
-random.seed(SEED)
-
 
 ##################################################
-# Palindrome
+# PARAMS
 
 DEVICE = 'cuda'
-VEC_SIZE = 256
+EMB_DIM = 256
 
 MIN_LENGTH = 8
 
@@ -46,10 +49,9 @@ VAL_MAX_SEQUENCE_LENGTH = 20
 N_STACK = 20
 INITIAL_SHARPEN = 5.0
 
-LR = 1e-2
 BATCH_SIZE = 32
 
-NUM_EPOCHS = 12
+NUM_EPOCHS = 1
 GRAD_CLIP = None
 
 # Symbols that go into palindrome
@@ -58,54 +60,8 @@ train_lang = 'a b c d e f g h i j'.split(' ')
 val_lang = 'k l m n o p q r s t'.split(' ')  # NOTE: these tokens are never trained in any example
 
 
-##########
-# DATA
-
-BOS_SYMBOL = '^'
-REFLECT_SYMBOL = '|'
-PAUSE_SYMBOL = '.'
-
-
-def palindrome(num_samples,
-               min_length,
-               max_length,
-               lang) -> Dict[str, List[str]]:
-    data = []
-    for _ in range(num_samples):
-        length = random.randint(min_length, max_length)
-        hlength = length // 2
-        seed = [random.choice(lang) for _ in range(hlength)]
-        # add pauses to inputs and outputs
-        inputs = [BOS_SYMBOL] + seed + [REFLECT_SYMBOL] + [PAUSE_SYMBOL] * hlength
-        outputs = [PAUSE_SYMBOL] * (hlength + 2) + seed[::-1]
-        # convert all symbols to str
-        inputs = list(map(str, inputs))
-        outputs = list(map(str, outputs))
-        data.append({
-            'inputs': inputs,
-            'outputs': outputs,
-        })
-    return data
-
-
-train_raw = palindrome(TRAIN_NUM_SAMPLES, MIN_LENGTH,
-                       TRAIN_MAX_SEQUENCE_LENGTH, lang=train_lang)
-train_raw = sorted(train_raw, key=lambda x: len(x['inputs']))
-# >>> train_raw[0]
-#   {'inputs': ['^', 'a', 'b', 'c', 'd', '|', '.', '.', '.', '.'],
-#   'outputs': ['.', '.', '.', '.', '.', '.', 'd', 'c', 'b', 'a']}
-
-val_raw = palindrome(VAL_NUM_SAMPLES, MIN_LENGTH,
-                     VAL_MAX_SEQUENCE_LENGTH, lang=val_lang)
-val_raw = sorted(val_raw, key=lambda x: len(x['inputs']))
-
-tokenizer, (train_dl, val_dl) = build_tokenizer_dataloader(
-    [train_raw, val_raw],
-    data_keys=['inputs', 'outputs'],
-    batch_size=BATCH_SIZE)
-
-dataloader_info(train_dl, tokenizer)
-
+##################################################
+# ARCHITECTURES
 
 ##############################
 # Transformer
@@ -171,25 +127,24 @@ class RelativePositionalEncoding(nn.Module):
         return x + self.embedding[:seq_len]
 
 class TransformerEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, num_layers, num_heads, tokenizer, pos_encoding='sine'):
+    def __init__(self, emb_dim, hidden_dim, num_layers, num_heads, tokenizer, pos_encoding='sine'):
         super(TransformerEncoder, self).__init__()
-        self.input_dim = input_dim
+        self.emb_dim = emb_dim
         self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
         self.num_layers = num_layers
         self.num_heads = num_heads
 
         self.vocab_size = tokenizer.get_vocab_size()
-        self.embeddings = nn.Embedding(self.vocab_size, input_dim)
+        self.embeddings = nn.Embedding(self.vocab_size, emb_dim)
 
         if pos_encoding == 'sine':
-            self.pos_encoder = PositionalEncoding(input_dim)
+            self.pos_encoder = PositionalEncoding(emb_dim)
         elif pos_encoding == 'learned':
-            self.pos_encoder = PositionEmbedding(input_dim)
+            self.pos_encoder = PositionEmbedding(emb_dim)
         elif pos_encoding == 'alibi':
             self.pos_encoder = AlibiPositionalBias(num_heads)
         elif pos_encoding == 'transformerxl':
-            self.pos_encoder = RelativePositionalEncoding(input_dim)
+            self.pos_encoder = RelativePositionalEncoding(emb_dim)
         else:
             raise ValueError(f"Unsupported position encoding: {pos_encoding}")
 
@@ -211,22 +166,21 @@ class TransformerEncoder(nn.Module):
 # LSTM
 
 class LSTMModel(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, tokenizer):
+    def __init__(self, emb_dim, hidden_dim, tokenizer):
         super(LSTMModel, self).__init__()
-        self.input_dim = input_dim
+        self.emb_dim = emb_dim
         self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
 
         self.vocab_size = tokenizer.get_vocab_size()
-        self.embeddings = nn.Embedding(self.vocab_size, input_dim)
+        self.embeddings = nn.Embedding(self.vocab_size, emb_dim)
 
-        self.lc1 = nn.LSTMCell(input_dim, hidden_dim)
+        self.lc1 = nn.LSTMCell(emb_dim, hidden_dim)
         self.lc2 = nn.LSTMCell(hidden_dim, hidden_dim)
         self.fc = nn.Linear(hidden_dim, self.vocab_size)
 
     def forward(self, x_ids):
         B = x_ids.size(0)
-        x = model.embeddings(x_ids)
+        x = self.embeddings(x_ids)
         # init
         h1 = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
         c1 = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
@@ -251,22 +205,22 @@ class LSTMModel(nn.Module):
 # RNN
 
 class RNNModel(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, tokenizer):
+    def __init__(self, emb_dim, hidden_dim, tokenizer):
         super(RNNModel, self).__init__()
-        self.input_dim = input_dim
+        self.emb_dim = emb_dim
         self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
+        self.emb_dim = emb_dim
 
         self.vocab_size = tokenizer.get_vocab_size()
-        self.embeddings = nn.Embedding(self.vocab_size, input_dim)
+        self.embeddings = nn.Embedding(self.vocab_size, emb_dim)
 
-        self.lc1 = nn.RNNCell(input_dim, hidden_dim)
+        self.lc1 = nn.RNNCell(emb_dim, hidden_dim)
         self.lc2 = nn.RNNCell(hidden_dim, hidden_dim)
         self.fc = nn.Linear(hidden_dim, self.vocab_size)
 
     def forward(self, x_ids):
         B = x_ids.size(0)
-        x = model.embeddings(x_ids)
+        x = self.embeddings(x_ids)
         # init
         h1 = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
         h1s = []
@@ -289,16 +243,15 @@ class RNNModel(nn.Module):
 # RNNStack
 
 class RNNStack(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, tokenizer):
+    def __init__(self, emb_dim, hidden_dim, tokenizer):
         super(RNNStack, self).__init__()
-        self.input_dim = input_dim
+        self.emb_dim = emb_dim
         self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
 
         self.vocab_size = tokenizer.get_vocab_size()
-        self.embeddings = nn.Embedding(self.vocab_size, input_dim)
+        self.embeddings = nn.Embedding(self.vocab_size, emb_dim)
 
-        self.rnn_i = nn.Linear(input_dim, hidden_dim, bias=False)
+        self.rnn_i = nn.Linear(emb_dim, hidden_dim, bias=False)
         self.rnn_h = nn.Linear(hidden_dim, hidden_dim, bias=False)
 
         ##########
@@ -323,7 +276,7 @@ class RNNStack(nn.Module):
         self.n_stack = N_STACK
         self.initial_sharpen = INITIAL_SHARPEN
         self.zero_offset = 0
-        self.stack_vec_size = input_dim
+        self.stack_vec_size = emb_dim
         self.sharp = nn.Parameter(torch.tensor([self.initial_sharpen]))
 
         self.ops = nn.Sequential(
@@ -335,10 +288,10 @@ class RNNStack(nn.Module):
         )
 
     def forward(self, x_ids, debug=False):
-        x = model.embeddings(x_ids)
+        x = self.embeddings(x_ids)
         batch_size, device, dtype = x.size(0), x.device, x.dtype
         # init
-        ss = S.initialize(self.input_dim, self.n_stack, batch_size,
+        ss = S.initialize(self.emb_dim, self.n_stack, batch_size,
                           self.zero_offset + 1e-3, device, dtype=dtype)
         h = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
         outputs = []
@@ -383,147 +336,167 @@ class RNNStack(nn.Module):
             return outputs
 
 
+
+##################################################
+# DATA
+
+BOS_SYMBOL = '^'
+REFLECT_SYMBOL = '|'
+PAUSE_SYMBOL = '.'
+
+def palindrome(num_samples,
+               min_length,
+               max_length,
+               lang) -> Dict[str, List[str]]:
+    data = []
+    for _ in range(num_samples):
+        length = random.randint(min_length, max_length)
+        hlength = length // 2
+        seed = [random.choice(lang) for _ in range(hlength)]
+        # add pauses to inputs and outputs
+        inputs = [BOS_SYMBOL] + seed + [REFLECT_SYMBOL] + [PAUSE_SYMBOL] * hlength
+        outputs = [PAUSE_SYMBOL] * (hlength + 2) + seed[::-1]
+        # convert all symbols to str
+        inputs = list(map(str, inputs))
+        outputs = list(map(str, outputs))
+        data.append({
+            'inputs': inputs,
+            'outputs': outputs,
+        })
+    return data
+
+train_raw = palindrome(TRAIN_NUM_SAMPLES, MIN_LENGTH,
+                       TRAIN_MAX_SEQUENCE_LENGTH, lang=train_lang)
+train_raw = sorted(train_raw, key=lambda x: len(x['inputs']))
+# >>> train_raw[0]
+#   {'inputs': ['^', 'a', 'b', 'c', 'd', '|', '.', '.', '.', '.'],
+#   'outputs': ['.', '.', '.', '.', '.', '.', 'd', 'c', 'b', 'a']}
+
+val_raw = palindrome(VAL_NUM_SAMPLES, MIN_LENGTH,
+                     VAL_MAX_SEQUENCE_LENGTH, lang=val_lang)
+val_raw = sorted(val_raw, key=lambda x: len(x['inputs']))
+
+tokenizer, (train_dl, val_dl) = build_tokenizer_dataloader(
+    [train_raw, val_raw],
+    data_keys=['inputs', 'outputs'],
+    batch_size=BATCH_SIZE)
+
+
+# dataloader_info(train_dl, tokenizer)
+
+
+
+
+
 ##################################################
 # Training
-
-##########
-# Setup
 
 # MyModel = LSTMModel
 # MyModel = RNNModel
 MyModel = RNNStack
 
-model = MyModel(
-    input_dim=VEC_SIZE,
-    hidden_dim=32,
-    output_dim=VEC_SIZE,
-    tokenizer=tokenizer,
-)
-model.to(DEVICE)
-
-no_trains = [model.embeddings]
-for no_train in no_trains:
-    for p in no_train.parameters():
-        p.requires_grad = False
-
-params = [x for x in model.parameters() if x.requires_grad]
-print_model_info(model)
-
-optimizer = optim.Adam(params, lr=LR, weight_decay=0)
-
-train_losses = []
-val_losses = []
-train_accuracies = []
-val_accuracies = []
-
-for epoch in range(NUM_EPOCHS):
-    train_loss, tacc, _ = run_epoch(
-        model, train_dl, optimizer, 'train', DEVICE, GRAD_CLIP,
-        check_accuracy=True)
-    train_losses.append(train_loss)
-
-    val_loss, vacc, _ = run_epoch(
-        model, val_dl, None, 'eval', DEVICE,
-        check_accuracy=True)
-    val_losses.append(val_loss)
-
-    print(f'Epoch: {epoch + 1:02} | Train Loss: {train_loss:.3f} | Val. Loss: {val_loss:.3f} | Train Acc: {tacc:.3f} | Val Acc: {vacc:.3f}')
-
-
-##################################################
-# RESULTS & VISUALIZATIONS
-
-# Plot training and validation loss
-plt.figure()
-n = np.arange(len(train_losses))
-plt.plot(n, train_losses, label='Train Loss')
-plt.plot(n, val_losses, label='Val Loss')
-plt.plot(n, train_accuracies, label='Train Acc')
-plt.plot(n, val_accuracies, label='Val Acc')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.legend()
-plt.grid()
-plt.show()
+RNNStack_config = {
+    'model_type': 'RNNStack',
+    'lr': tune.grid_search([1e-3, 1e-2]),
+    'emb_dim': EMB_DIM,
+    'hidden_dim': 32,
+    'num_epochs': 8,
+    'seed': tune.grid_search([1, 2]),
+}
 
 
 ##########
+# Setup
 
-vloss, vacc, outputs = run_epoch(model, val_dl, None, 'eval', DEVICE, GRAD_CLIP,
-                                 check_accuracy=True)
+def train_model(config, tokenizer, train_dl, val_dl):
+    seed = config['seed']
+    torch.manual_seed(seed)
+    random.seed(seed)
 
-print()
-n = 0
-for src_idss, trg_idss, output_idss in reversed(outputs):
-    for src_ids, trg_ids, output_ids in zip(src_idss, trg_idss, output_idss):
-        s = [tokenizer.decode([x]) for x in src_ids.tolist()]
-        t = [tokenizer.decode([x]) for x in trg_ids.tolist()]
-        o = [tokenizer.decode([x]) for x in output_ids.tolist()]
-        print('__________________________________________________')
-        print_grid([['src'] + s,
-                    ['out'] + o,
-                    ['trg'] + t])
-        n += 1
-        if n > 5:
-            break
-    if n > 5:
-        break
+    # ##########
+    # # Prep Data
+    # train_dl = ray.train.get_dataset_shard("train")
+    # val_dl = ray.train.get_dataset_shard("val")
+
+    ##########
+    # Prep Model
+    if config['model_type'] == 'RNNStack':
+        model = RNNStack(config['emb_dim'],
+                         config['hidden_dim'],
+                         tokenizer=tokenizer)
+
+    model.to(DEVICE)
+
+    # skip training embeddings
+    no_trains = [model.embeddings]
+    for no_train in no_trains:
+        for p in no_train.parameters():
+            p.requires_grad = False
+    # print_model_info(model)
+
+    params = [x for x in model.parameters() if x.requires_grad]
+    optimizer = optim.Adam(params, lr=config['lr'], weight_decay=0)
+
+    for epoch in range(config['num_epochs']):
+        # Training
+        tloss, tacc, _ = run_epoch(
+            model, train_dl, optimizer, 'train', DEVICE, GRAD_CLIP,
+            check_accuracy=True)
+
+        # Validation
+        vloss, vacc, _ = run_epoch(
+            model, val_dl, None, 'eval', DEVICE,
+            check_accuracy=True)
+
+        ray.train.report(dict(epoch=epoch,
+                              train_loss=tloss,
+                              train_accuracy=tacc,
+                              val_loss=vloss,
+                              val_accuracy=vacc))
 
 
-# Hand check some things
+##########
+# Run
 
-print()
+all_configs = [
+    RNNStack_config
+]
 
-inp = '^ a b c d e e e | . . . . . . .'.split(' ')
-trg = '. . . . . . . . . e e e d c b a'.split(' ')
+tuner = tune.Tuner(
+    tune.with_resources(
+        tune.with_parameters(train_model,
+                             tokenizer=tokenizer,
+                             train_dl=train_dl,
+                             val_dl=val_dl),
+        resources={"cpu": 2, "gpu": 1}),
+    param_space=RNNStack_config,
 
-inp = '^ k l m n o o o | . . . . . . .'.split(' ')
-trg = '. . . . . . . . . o o o n m l k'.split(' ')
+    # num_samples=1, bc I explicitly set random seeds
+    tune_config=tune.TuneConfig(num_samples=1),
+)
 
-inp_ids = torch.tensor(tokenizer.encode(inp, is_pretokenized=True).ids, device=DEVICE).unsqueeze(0)
-trg_ids = torch.tensor(tokenizer.encode(trg, is_pretokenized=True).ids, device=DEVICE).unsqueeze(0)
-logits, debug = model(inp_ids, debug=True)
-out_ids = logits.argmax(dim=2)[0]
-out_toks = [tokenizer.decode([x]) for x in out_ids]
-print_grid([['inp:'] + inp,
-            ['out:'] + out_toks,
-            ['trg:'] + trg])
+ray.init()
+results = tuner.fit()
 
 
-ops = debug['ops_trace']
-push, pop, nop = [x.squeeze(1) for x in torch.chunk(ops, chunks=3, dim=-1)]
 
-max_scores = logits.max(dim=2)
-print_grid([[f'{x:>.2f}' for x in max_scores.values[0].tolist()],
-            max_scores.indices[0].tolist()])
+best_trial = results.get_best_result('val_accuracy', 'max')
+print("Best trial config:", best_trial.config)
+print("Best trial accuracy:", best_trial.metrics["val_accuracy"])
 
-print(f'{F.cross_entropy(logits.flatten(0, 1), trg_ids.flatten())=}')
+results = best_trial.metrics_dataframe
 
-# Plot logits
-plt.figure(figsize=(8, 4))
-plt.subplot(1, 2, 1)
-plt.imshow(logits[0].T.detach().cpu().numpy())
-plt.title('Logits')
-plt.xlabel('Time')
-plt.ylabel('Token')
+df = results[["config/model_type", "epoch", "val_loss", "val_accuracy"]]
 
-# Plot push, pop, nop operations over time
-plt.subplot(1, 2, 2)
-time_steps = range(push.shape[1])
-plt.plot(time_steps, push[0].detach().cpu().numpy(), label='Push')
-plt.plot(time_steps, pop[0].detach().cpu().numpy(), label='Pop')
-plt.plot(time_steps, nop[0].detach().cpu().numpy(), label='Nop')
-plt.title('Operations over Time')
-plt.xlabel('Time')
-plt.ylabel('Value')
+# Pivot the DataFrame to have epochs as columns
+df_pivot = df.pivot_table(index="config/model_type", columns="epoch", values="val_loss")
+
+# Plot mean loss over time for each model architecture
+plt.figure(figsize=(10, 6))
+for model in df_pivot.index:
+    plt.plot(df_pivot.loc[model], label=model)
+plt.xlabel("Epoch")
+plt.ylabel("Mean Loss")
 plt.legend()
-
-plt.tight_layout()
+plt.title("Mean Loss Over Time for Each Model Architecture")
 plt.show()
-
-
-# # convert cross-entropy by hand
-# num_classes = logits.shape[-1]
-# trg_one_hot = F.one_hot(trg_ids, num_classes=num_classes).float()
-# loss = -torch.sum(trg_one_hot[0] * F.log_softmax(logits[0], dim=-1), dim=-1).mean()
-# print(f'{loss=}')
