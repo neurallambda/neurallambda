@@ -51,7 +51,6 @@ INITIAL_SHARPEN = 5.0
 
 BATCH_SIZE = 32
 
-NUM_EPOCHS = 1
 GRAD_CLIP = None
 
 # Symbols that go into palindrome
@@ -165,9 +164,9 @@ class TransformerEncoder(nn.Module):
 ##############################
 # LSTM
 
-class LSTMModel(nn.Module):
+class LSTM(nn.Module):
     def __init__(self, emb_dim, hidden_dim, tokenizer):
-        super(LSTMModel, self).__init__()
+        super(LSTM, self).__init__()
         self.emb_dim = emb_dim
         self.hidden_dim = hidden_dim
 
@@ -204,9 +203,9 @@ class LSTMModel(nn.Module):
 ##############################
 # RNN
 
-class RNNModel(nn.Module):
+class RNN(nn.Module):
     def __init__(self, emb_dim, hidden_dim, tokenizer):
-        super(RNNModel, self).__init__()
+        super(RNN, self).__init__()
         self.emb_dim = emb_dim
         self.hidden_dim = hidden_dim
         self.emb_dim = emb_dim
@@ -391,20 +390,6 @@ tokenizer, (train_dl, val_dl) = build_tokenizer_dataloader(
 ##################################################
 # Training
 
-# MyModel = LSTMModel
-# MyModel = RNNModel
-MyModel = RNNStack
-
-RNNStack_config = {
-    'model_type': 'RNNStack',
-    'lr': tune.grid_search([1e-3, 1e-2]),
-    'emb_dim': EMB_DIM,
-    'hidden_dim': 32,
-    'num_epochs': 8,
-    'seed': tune.grid_search([1, 2]),
-}
-
-
 ##########
 # Setup
 
@@ -424,6 +409,14 @@ def train_model(config, tokenizer, train_dl, val_dl):
         model = RNNStack(config['emb_dim'],
                          config['hidden_dim'],
                          tokenizer=tokenizer)
+    elif config['model_type'] == 'RNN':
+        model = RNN(config['emb_dim'],
+                    config['hidden_dim'],
+                    tokenizer=tokenizer)
+    elif config['model_type'] == 'LSTM':
+        model = LSTM(config['emb_dim'],
+                     config['hidden_dim'],
+                     tokenizer=tokenizer)
 
     model.to(DEVICE)
 
@@ -458,45 +451,156 @@ def train_model(config, tokenizer, train_dl, val_dl):
 ##########
 # Run
 
+LR = tune.grid_search([1e-3, 1e-2])
+SEED = tune.grid_search([1, 2, 3])
+NUM_EPOCHS = 10
+HIDDEN_DIM = 32
+
+RNN_config = {
+    'model_type': 'RNN',
+    'lr': LR,
+    'emb_dim': EMB_DIM,
+    'hidden_dim': HIDDEN_DIM,
+    'num_epochs': NUM_EPOCHS,
+    'seed': SEED,
+}
+
+LSTM_config = {
+    'model_type': 'LSTM',
+    'lr': LR,
+    'emb_dim': EMB_DIM,
+    'hidden_dim': HIDDEN_DIM,
+    'num_epochs': NUM_EPOCHS,
+    'seed': SEED,
+}
+
+RNNStack_config = {
+    'model_type': 'RNNStack',
+    'lr': LR,
+    'emb_dim': EMB_DIM,
+    'hidden_dim': HIDDEN_DIM,
+    'num_epochs': NUM_EPOCHS,
+    'seed': SEED,
+}
+
+
 all_configs = [
-    RNNStack_config
+    RNN_config,
+    LSTM_config,
+    RNNStack_config,
 ]
 
-tuner = tune.Tuner(
-    tune.with_resources(
-        tune.with_parameters(train_model,
-                             tokenizer=tokenizer,
-                             train_dl=train_dl,
-                             val_dl=val_dl),
-        resources={"cpu": 2, "gpu": 1}),
-    param_space=RNNStack_config,
+def run_config(config):
+    tuner = tune.Tuner(
+        tune.with_resources(
+            tune.with_parameters(train_model,
+                                 tokenizer=tokenizer,
+                                 train_dl=train_dl,
+                                 val_dl=val_dl),
+            resources={"cpu": 2, "gpu": 2}),
+        param_space=config,
 
-    # num_samples=1, bc I explicitly set random seeds
-    tune_config=tune.TuneConfig(num_samples=1),
-)
+        # num_samples=1, bc I explicitly set random seeds
+        tune_config=tune.TuneConfig(num_samples=1),
+    )
 
-ray.init()
-results = tuner.fit()
+    results = tuner.fit()
+    return results
 
 
+for config in all_configs:
+    config['results'] = run_config(config)
 
-best_trial = results.get_best_result('val_accuracy', 'max')
-print("Best trial config:", best_trial.config)
-print("Best trial accuracy:", best_trial.metrics["val_accuracy"])
 
-results = best_trial.metrics_dataframe
+##################################################
+# Visualization
 
-df = results[["config/model_type", "epoch", "val_loss", "val_accuracy"]]
+def plot_experiments(all_configs, plot_confidence_bands=False):
+    '''Plot train_loss, val_loss, train_accuracy, and val_accuracy for multiple
+    different experiments.
 
-# Pivot the DataFrame to have epochs as columns
-df_pivot = df.pivot_table(index="config/model_type", columns="epoch", values="val_loss")
+    This finds the run with the top val_accuracy at any epoch, and plots its metrics.
 
-# Plot mean loss over time for each model architecture
-plt.figure(figsize=(10, 6))
-for model in df_pivot.index:
-    plt.plot(df_pivot.loc[model], label=model)
-plt.xlabel("Epoch")
-plt.ylabel("Mean Loss")
-plt.legend()
-plt.title("Mean Loss Over Time for Each Model Architecture")
-plt.show()
+    Also, optionally plot confidence bands across all all runs within an experiment.
+
+    '''
+    fig, axs = plt.subplots(1, 2, figsize=(12, 4))
+    axs = axs.flatten()
+
+    color_scheme = [
+        # dark    , light
+        ('#1f77b4', '#aec7e8'),  # Blue
+        ('#ff7f0e', '#ffbb78'),  # Orange
+        ('#2ca02c', '#98df8a'),  # Green
+        ('#d62728', '#ff9896'),  # Red
+        ('#9467bd', '#c5b0d5'),  # Purple
+        ('#8c564b', '#c49c94'),  # Brown
+        ('#e377c2', '#f7b6d2'),  # Pink
+        ('#7f7f7f', '#c7c7c7'),  # Gray
+        ('#bcbd22', '#dbdb8d'),  # Olive
+        ('#17becf', '#9edae5')   # Teal
+    ]
+
+    for i, config in enumerate(all_configs):
+        model_type = config['model_type']
+        train_color, val_color = color_scheme[i % len(color_scheme)]
+
+        all_trials = config['results']
+
+        # collect metrics for confidence bands
+        all_train_loss = []
+        all_val_loss = []
+        all_train_accuracy = []
+        all_val_accuracy = []
+        all_epochs = []
+
+        # keep trial run where top val_acc was achieved (at any epoch)
+        max_val_accuracy = float('-inf')
+        best_trial_index = None
+
+        for j, trial in enumerate(all_trials):
+            trial_df = trial.metrics_dataframe
+            all_train_loss.append(trial_df['train_loss'])
+            all_val_loss.append(trial_df['val_loss'])
+            all_train_accuracy.append(trial_df['train_accuracy'])
+            all_val_accuracy.append(trial_df['val_accuracy'])
+            all_epochs.append(trial_df['epoch'])
+
+            trial_max_val_accuracy = trial_df['val_accuracy'].max()
+            if trial_max_val_accuracy > max_val_accuracy:
+                max_val_accuracy = trial_max_val_accuracy
+                best_trial_index = j
+
+        # the trial that achieved the top val_acc at any epoch
+        best_trial_df = all_trials[best_trial_index].metrics_dataframe
+        best_train_loss = best_trial_df['train_loss']
+        best_val_loss = best_trial_df['val_loss']
+        best_train_accuracy = best_trial_df['train_accuracy']
+        best_val_accuracy = best_trial_df['val_accuracy']
+
+        for metric, ax, linestyle, (train_data, val_data, epochs) in [
+            ('loss', axs[0], '-', (all_train_loss, all_val_loss, all_epochs)),
+            ('accuracy', axs[1], '-', (all_train_accuracy, all_val_accuracy, all_epochs))
+        ]:
+            epochs = epochs[0]
+            if plot_confidence_bands:
+                train_mean = np.mean([data for data in train_data], axis=0)
+                train_std = np.std([data for data in train_data], axis=0)
+                val_mean = np.mean([data for data in val_data], axis=0)
+                val_std = np.std([data for data in val_data], axis=0)
+
+                ax.fill_between(epochs, train_mean - train_std, train_mean + train_std, color=train_color, alpha=0.2)
+                ax.fill_between(epochs, val_mean - val_std, val_mean + val_std, color=val_color, alpha=0.2)
+
+            ax.plot(epochs, best_train_loss if metric == 'loss' else best_train_accuracy, color=train_color, linestyle=linestyle, label=f"{model_type} - Best Train {metric.capitalize()}")
+            ax.plot(epochs, best_val_loss if metric == 'loss' else best_val_accuracy, color=val_color, linestyle='--', label=f"{model_type} - Best Val {metric.capitalize()}")
+
+            ax.set_xlabel("Epoch")
+            ax.set_ylabel(metric.capitalize())
+            ax.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+# Call the plotting function after running the configurations
+plot_experiments(all_configs, plot_confidence_bands=False)
