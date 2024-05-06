@@ -4,12 +4,65 @@ Tests for neurallambda.torch
 
 '''
 
-from neurallambda.torch import NuLinear, Choice
+from neurallambda.torch import NuLinear, Choice, roll_without_wrap
 import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+##################################################
+# roll_without_wrap
+
+def test_roll_without_wrap():
+    # Test case 1: No shift
+    tensor = torch.tensor([[[1, 2, 3], [4, 5, 6], [7, 8, 9]]])
+    shift = 0
+    expected_output = torch.tensor([[[1, 2, 3], [4, 5, 6], [7, 8, 9]]])
+    assert torch.equal(roll_without_wrap(tensor, shift), expected_output)
+
+    # Test case 2: Positive shift
+    tensor = torch.tensor([[[1, 2, 3], [4, 5, 6], [7, 8, 9]]])
+    shift = 1
+    expected_output = torch.tensor([[[0, 0, 0], [1, 2, 3], [4, 5, 6]]])
+    assert torch.equal(roll_without_wrap(tensor, shift), expected_output)
+
+    # Test case 3: Negative shift
+    tensor = torch.tensor([[[1, 2, 3], [4, 5, 6], [7, 8, 9]]])
+    shift = -1
+    expected_output = torch.tensor([[[4, 5, 6], [7, 8, 9], [0, 0, 0]]])
+    assert torch.equal(roll_without_wrap(tensor, shift), expected_output)
+
+    # Test case 4: Shift greater than sequence length
+    tensor = torch.tensor([[[1, 2, 3], [4, 5, 6], [7, 8, 9]]])
+    shift = 4
+    expected_output = torch.tensor([[[0, 0, 0], [0, 0, 0], [0, 0, 0]]])
+    assert torch.equal(roll_without_wrap(tensor, shift), expected_output)
+
+    # Test case 5: Shift less than negative sequence length
+    tensor = torch.tensor([[[1, 2, 3], [4, 5, 6], [7, 8, 9]]])
+    shift = -4
+    expected_output = torch.tensor([[[0, 0, 0], [0, 0, 0], [0, 0, 0]]])
+    assert torch.equal(roll_without_wrap(tensor, shift), expected_output)
+
+    # Test case 6: Multiple batches
+    tensor = torch.tensor([
+        [[1, 2, 3], [4, 5, 6], [7, 8, 9]],
+        [[10, 11, 12], [13, 14, 15], [16, 17, 18]]
+    ])
+    shift = 1
+    expected_output = torch.tensor([
+        [[0, 0, 0], [1, 2, 3], [4, 5, 6]],
+        [[0, 0, 0], [10, 11, 12], [13, 14, 15]]
+    ])
+    assert torch.equal(roll_without_wrap(tensor, shift), expected_output)
+
+    # Test case 7: Custom fill value
+    tensor = torch.tensor([[[1, 2, 3], [4, 5, 6], [7, 8, 9]]])
+    shift = 1
+    fill_value = -1
+    expected_output = torch.tensor([[[-1, -1, -1], [1, 2, 3], [4, 5, 6]]])
+    assert torch.equal(roll_without_wrap(tensor, shift, fill_value), expected_output)
 
 
 ##################################################

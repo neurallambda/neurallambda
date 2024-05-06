@@ -11,19 +11,13 @@
 
 # Tickets
 
-STACK
-- [ ] E001: Build model comparison tooling for increased training + search
-- [ ] E001: Compare LSTM etc
-- [ ] E001: Work on Sum Sequence Again, built on new code. (Use binary representations?)
-
-
 SOCIAL DEMOS
-- [X] ESOCIAL: Add new `palindrome` thing to `demo/`
-- [X] ESOCIAL: Comment `palindrome` thing well
 - [ ] ESOCIAL: Write up palindrome
 - [ ] ESOCIAL: Move current README to a neurallambda-specific writeup
 - [ ] ESOCIAL: Tighten up current README
 
+STACK
+- [ ] E001: Work on Sum Sequence Again, built on new code. (Use binary representations?)
 
 QUEUE
 - [ ] E004: Sorting using queues
@@ -179,3 +173,9 @@ RWKV
 - [X] E001: Add new improved Palindrome RNNStack
 - [X] E001: Add ray data (skipping, we can pass data straight in using `with_parameters`, or directly in training fn
 - [X] E001: Add ray tune
+- [X] E001: Build model comparison tooling for increased training + search
+- [X] E001: Compare RNN, LSTM, Transformer
+- [X] ESOCIAL: Add new `palindrome` thing to `demo/`
+- [X] ESOCIAL: Comment `palindrome` thing well
+- [X] E001: Repro Armand Joulin Stack
+- [X] E001: Rerun neural stack work with Joulin Stack

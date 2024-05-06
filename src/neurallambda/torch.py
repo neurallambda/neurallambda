@@ -18,6 +18,7 @@ import math
 # Better Torch
 
 def cosine_similarity(tensor1, tensor2, dim=1, eps=1e-8):
+    ''' cosine_similarity without implicit broadcasting, and better error messages. '''
     if tensor1.shape != tensor2.shape:
         error_message = (
             f"Tensor shapes must be identical. tensor1: {green(tensor1.shape)}. tensor2: {green(tensor2.shape)}.\n" \
@@ -31,6 +32,20 @@ def cosine_similarity(tensor1, tensor2, dim=1, eps=1e-8):
         raise ValueError(error_message)
 
     return F.cosine_similarity(tensor1, tensor2, dim=dim, eps=eps)
+
+
+def roll_without_wrap(tensor, shift, fill_value=0):
+    if shift == 0:
+        return tensor
+    elif shift > 0:
+        # pad = (left, right, top, bottom, front, back)
+        pad = (0, 0, shift, 0, 0, 0)
+        padded_tensor = F.pad(tensor, pad, mode='constant', value=fill_value)
+        return padded_tensor[:, :tensor.size(1), :]
+    else:
+        pad = (0, 0, 0, -shift, 0, 0)
+        padded_tensor = F.pad(tensor, pad, mode='constant', value=fill_value)
+        return padded_tensor[:, -tensor.size(1):, :]
 
 
 ##################################################

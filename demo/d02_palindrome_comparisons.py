@@ -23,6 +23,7 @@ from filelock import FileLock
 import math
 
 import neurallambda.stack as S
+import neurallambda.stack_joulin as SJ
 from neurallambda.lab.common import (
     build_tokenizer_dataloader,
     dataloader_info,
@@ -205,6 +206,184 @@ class RNN(nn.Module):
 
 
 ##############################
+# RNNStackJoulin (Unimproved)
+
+class RNNStackJoulin(nn.Module):
+    def __init__(self, emb_dim, hidden_dim, tokenizer, k):
+        ''' k is how many top slots of stack to peek at '''
+
+        super(RNNStackJoulin, self).__init__()
+        self.emb_dim = emb_dim
+        self.hidden_dim = hidden_dim
+        self.k = k
+
+        self.vocab_size = tokenizer.get_vocab_size()
+        self.embeddings = nn.Embedding(self.vocab_size, emb_dim)
+
+        # RNN
+        self.rnn_i = nn.Linear(emb_dim, hidden_dim, bias=False)
+        self.rnn_h = nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self.rnn_stack_i = nn.Linear(emb_dim * k, hidden_dim, bias=False)
+
+        # Outputs
+        self.fc = nn.Sequential(
+            nn.Linear(hidden_dim, self.vocab_size, bias=False),
+            nn.Softmax(dim=1)
+        )
+
+        # Stack
+        self.n_stack = N_STACK
+        self.stack_vec_size = emb_dim
+
+        # I truly don't know why the paper pushes h instead of input, and why
+        # on earth they use the nonlin there.
+        self.push_proj = nn.Sequential(
+            nn.Linear(hidden_dim, emb_dim, bias=False),
+            nn.Sigmoid()
+        )
+        self.ops = nn.Sequential(
+            nn.Linear(hidden_dim, 3, bias=False),  # [hidden, push+pop+nop]
+            nn.Softmax(dim=1)
+        )
+
+    def forward(self, x_ids, debug=False):
+        x = self.embeddings(x_ids)
+        batch_size, device, dtype = x.size(0), x.device, x.dtype
+        # init
+        ss = SJ.initialize(self.emb_dim, self.n_stack, batch_size, device, dtype=dtype)
+        h = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
+        outputs = []
+        if debug:
+            ops_trace = []
+        for i in range(x.size(1)):
+            ri = self.rnn_i(F.normalize(x[:, i], dim=1))
+            rh = self.rnn_h(h)
+            # peek k-deep on stack, flatten
+            peek = ss.stack[:, :self.k].view(batch_size, self.k * self.emb_dim)
+            rs = self.rnn_stack_i(peek)
+            h = (ri + rh + rs).sigmoid()
+
+            # Stack
+            ops = self.ops(h)
+            if debug:
+                ops_trace.append(ops)
+            push, pop, nop = [o.squeeze(1)
+                              for o in torch.chunk(ops, chunks=3, dim=-1)]
+            push_val = self.push_proj(h) # why this!?
+            ss, pop_val = SJ.push_pop_nop(ss, push, pop, nop, push_val)
+
+            out = self.fc(h)
+            outputs.append(out)
+
+        outputs = torch.stack(outputs, dim=1)
+        if debug:
+            ops_trace = torch.stack(ops_trace, dim=1)
+            debug_out = {'ops_trace': ops_trace}
+            return outputs, debug_out
+        else:
+            return outputs
+
+
+##############################
+# RNNStackJoulin Improved
+
+class RNNStackJoulinImproved(nn.Module):
+    def __init__(self, emb_dim, hidden_dim, tokenizer, k):
+        ''' k is how many top slots of stack to peek at '''
+
+        super(RNNStackJoulinImproved, self).__init__()
+        self.emb_dim = emb_dim
+        self.hidden_dim = hidden_dim
+        self.k = k
+
+        self.vocab_size = tokenizer.get_vocab_size()
+        self.embeddings = nn.Embedding(self.vocab_size, emb_dim)
+
+        self.rnn_i = nn.Linear(emb_dim, hidden_dim, bias=False)
+        self.rnn_h = nn.Linear(hidden_dim, hidden_dim, bias=False)
+
+        ##########
+        # Outputs
+
+        self.fc = nn.Sequential(
+            nn.Linear(hidden_dim * 2, self.vocab_size, bias=False),
+            nn.Softmax(dim=1)
+            # GumbelSoftmax(dim=1, temperature=1.0, hard=False)
+        )
+
+        self.choose = nn.Sequential(
+            nn.Linear(hidden_dim * 2, 2, bias=False),
+            # nn.Softmax(dim=1)
+            # GumbelSoftmax(dim=1, temperature=1.0, hard=True)
+            GumbelSoftmax(dim=1, temperature=1.0, hard=False)
+        )
+
+        ##########
+        # Stack
+
+        self.n_stack = N_STACK
+        self.stack_vec_size = emb_dim
+
+        self.ops = nn.Sequential(
+            # nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim * 2, 3, bias=False),  # [hidden, push+pop+nop]
+            # nn.Softmax(dim=1)
+            # GumbelSoftmax(dim=1, temperature=1.0, hard=True)
+            GumbelSoftmax(dim=1, temperature=1.0, hard=False)
+        )
+
+    def forward(self, x_ids, debug=False):
+        x = self.embeddings(x_ids)
+        batch_size, device, dtype = x.size(0), x.device, x.dtype
+        # init
+        ss = SJ.initialize(self.emb_dim, self.n_stack, batch_size, device, dtype=dtype)
+        h = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
+        outputs = []
+        if debug:
+            ops_trace = []
+        for i in range(x.size(1)):
+            ri = self.rnn_i(F.normalize(x[:, i], dim=1))
+            rh = self.rnn_h(h)
+            h = (ri + rh).tanh()
+
+            hmod = 1 - h.relu()
+            hmod = torch.cat([hmod, hmod], dim=1)
+
+            # Stack
+            ops = self.ops(hmod)
+            if debug:
+                ops_trace.append(ops)
+            push, pop, nop = [o.squeeze(1)
+                              for o in torch.chunk(ops, chunks=3, dim=-1)]
+            ss, pop_val = SJ.push_pop_nop(ss, push, pop, nop, x[:, i])
+
+            peeks = ss.stack[:, :self.k].reshape(batch_size * self.k, 1, self.emb_dim)  # [B * k, 1, D]
+
+            # Outputs
+            semantic = self.fc(hmod)
+            # OPTIM: will this be memory hog?
+            syntactic = torch.cosine_similarity(
+                peeks,  # [B * k, 1, D]
+                self.embeddings.weight.unsqueeze(0),  # [1, V, D]
+                dim=2)  # [B * k, V]
+            syntactic = syntactic.reshape(batch_size, self.k, self.vocab_size).sum(dim=1)  # [B, V]
+
+            choice = self.choose(hmod)
+            output = torch.einsum('bc, bcv -> bv',
+                                  choice,
+                                  torch.stack([semantic, syntactic], dim=1))
+            outputs.append(output)
+
+        outputs = torch.stack(outputs, dim=1)
+        if debug:
+            ops_trace = torch.stack(ops_trace, dim=1)
+            debug_out = {'ops_trace': ops_trace}
+            return outputs, debug_out
+        else:
+            return outputs
+
+
+##############################
 # RNNStack
 
 class RNNStack(nn.Module):
@@ -257,7 +436,7 @@ class RNNStack(nn.Module):
         batch_size, device, dtype = x.size(0), x.device, x.dtype
         # init
         ss = S.initialize(self.emb_dim, self.n_stack, batch_size,
-                          self.zero_offset + 1e-3, device, dtype=dtype)
+                          self.zero_offset, device, dtype=dtype)
         h = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
         outputs = []
         if debug:
@@ -346,11 +525,7 @@ tokenizer, (train_dl, val_dl) = build_tokenizer_dataloader(
     data_keys=['inputs', 'outputs'],
     batch_size=BATCH_SIZE)
 
-
 # dataloader_info(train_dl, tokenizer)
-
-
-
 
 
 ##################################################
@@ -375,6 +550,23 @@ def train_model(config, tokenizer, train_dl, val_dl):
         model = RNNStack(config['emb_dim'],
                          config['hidden_dim'],
                          tokenizer=tokenizer)
+    elif 'RNNStackJoulinImproved' in config['model_type']:
+        # NOTE: the Joulin models use different k values, so their name is
+        # checked differently so that the plots can remain associated with K=1
+        # or K=2
+        model = RNNStackJoulinImproved(config['emb_dim'],
+                                       config['hidden_dim'],
+                                       tokenizer=tokenizer,
+                                       k=config['k'])
+
+    elif 'RNNStackJoulin' in config['model_type']:
+        # NOTE: the Joulin models use different k values, so their name is
+        # checked differently so that the plots can remain associated with K=1
+        # or K=2
+        model = RNNStackJoulin(config['emb_dim'],
+                               config['hidden_dim'],
+                               tokenizer=tokenizer,
+                               k=config['k'])
     elif config['model_type'] == 'RNN':
         model = RNN(config['emb_dim'],
                     config['hidden_dim'],
@@ -438,9 +630,9 @@ def train_model(config, tokenizer, train_dl, val_dl):
 # HIDDEN_DIM = 32
 
 # full run
-LR = tune.grid_search([1e-3, 1e-2, 5e-1])
+LR = tune.grid_search([1e-3, 1e-2])
 SEED = tune.grid_search([1, 2, 3, 4, 5])
-NUM_EPOCHS = 12
+NUM_EPOCHS = 10
 HIDDEN_DIM = 32
 
 RNN_config = {
@@ -492,10 +684,55 @@ RNNStack_config = {
     'seed': SEED,
 }
 
+RNNStackJoulinImproved_K1_config = {
+    'model_type': 'RNNStackJoulinImproved_K1',
+    'lr': LR,
+    'emb_dim': EMB_DIM,
+    'hidden_dim': HIDDEN_DIM,
+    'num_epochs': NUM_EPOCHS,
+    'seed': SEED,
+    'k': 1
+}
+
+RNNStackJoulinImproved_K2_config = {
+    'model_type': 'RNNStackJoulinImproved_K2',
+    'lr': LR,
+    'emb_dim': EMB_DIM,
+    'hidden_dim': HIDDEN_DIM,
+    'num_epochs': NUM_EPOCHS,
+    'seed': SEED,
+    'k': 2
+}
+
+RNNStackJoulin_K1_config = {
+    'model_type': 'RNNStackJoulin_K1',
+    'lr': LR,
+    'emb_dim': EMB_DIM,
+    'hidden_dim': HIDDEN_DIM,
+    'num_epochs': NUM_EPOCHS,
+    'seed': SEED,
+    'k': 1,
+}
+
+RNNStackJoulin_K2_config = {
+    'model_type': 'RNNStackJoulin_K2',
+    'lr': LR,
+    'emb_dim': EMB_DIM,
+    'hidden_dim': HIDDEN_DIM,
+    'num_epochs': NUM_EPOCHS,
+    'seed': SEED,
+    'k': 2,
+}
+
+
 all_configs = [
     RNN_config,
     LSTM_config,
     RNNStack_config,
+    RNNStackJoulin_K1_config,
+    RNNStackJoulin_K2_config,
+    RNNStackJoulinImproved_K1_config,
+    RNNStackJoulinImproved_K2_config,
     TransformerSine_config,
     TransformerLearned_config,
 ]
@@ -603,8 +840,8 @@ def plot_experiments(all_configs, plot_confidence_bands=False):
                 ax.fill_between(epochs, val_mean - val_std, val_mean + val_std, color=val_color, alpha=0.2)
 
             # plots for best_trial
-            ax.plot(epochs, best_train_loss if metric == 'loss' else best_train_accuracy, color=train_color, linestyle='--', label=f"{model_type} - Best Train {metric.capitalize()}")
-            ax.plot(epochs, best_val_loss if metric == 'loss' else best_val_accuracy, color=val_color, linestyle=linestyle, label=f"{model_type} - Best Val {metric.capitalize()}")
+            ax.plot(epochs, best_train_loss if metric == 'loss' else best_train_accuracy, color=train_color, linestyle='--', label=f"{model_type} - Train {metric.capitalize()}")
+            ax.plot(epochs, best_val_loss if metric == 'loss' else best_val_accuracy, color=val_color, linestyle=linestyle, label=f"{model_type} - Val {metric.capitalize()}")
 
             ax.set_xlabel("Epoch")
             ax.set_ylabel(metric.capitalize())
