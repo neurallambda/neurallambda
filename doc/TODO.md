@@ -2,22 +2,25 @@
 
 - Roadmap as of May 2024
   - [ ] E001: Get Neuralstack + Sum Sequence working. `[t04_addition](./experiments/)`.
-  - [ ] E002: Integrate Neuralstack with RWKV. `[t06_rwkv](./experiments/)`.
+  - [ ] E002: Integrate Neuralstack with RWKV. `[rwkv fork](https://github.com/neurallambda/RWKV-infctx-trainer)`.
   - [ ] E003: Test new transformer stacks. `[t07_transformer](./experiments/)`.
   - [ ] E004: Get Neuralqueue + Sort working
   - [ ] ESOCIAL: Social Demos: how to make this stuff more digestable + user friendly?
-  - [?] ESD: Stable Diffusion? that'd prob make it click with ppl
+  - [ ] ?? ESD: Stable Diffusion? that'd prob make it click with ppl
 
 
 # Tickets
+
+STACK
+- [ ] E001: Arithmetic: flat associativity (no parens)
+- [ ] E001: Arithmetic: parens
+- [ ] E001: Binary Arithmetic
+
 
 SOCIAL DEMOS
 - [ ] ESOCIAL: Write up palindrome
 - [ ] ESOCIAL: Move current README to a neurallambda-specific writeup
 - [ ] ESOCIAL: Tighten up current README
-
-STACK
-- [ ] E001: Work on Sum Sequence Again, built on new code. (Use binary representations?)
 
 QUEUE
 - [ ] E004: Sorting using queues
@@ -53,6 +56,7 @@ RWKV
 * Dynamic Space: Can multiple objects be added to a queue, stack, or array, in one timestep? If so, error correction would likely help.
 
 * NeuralX ("neural" is such a great prefix)
+  * [X] Neuralstack
   * [X] Neurallatch
   * [X] Neuralqueue
   * [ ] Neural List
