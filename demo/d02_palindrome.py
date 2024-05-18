@@ -3,6 +3,10 @@
 An RNN+Stack model that can learn to reverse strings of symbols, INCLUDING
 symbols it was never trained on (!)
 
+TODO:
+
+- why the noise, that loss can't reduce more?
+
 '''
 
 from typing import List, Dict
@@ -15,6 +19,8 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 import neurallambda.stack as S
+import neurallambda.queue as Q
+import neurallambda.stack_joulin as SJ
 from neurallambda.lab.common import (
     build_tokenizer_dataloader,
     dataloader_info,
@@ -23,8 +29,10 @@ from neurallambda.lab.common import (
     run_epoch,
 )
 from neurallambda.torch import GumbelSoftmax
+from neurallambda.lab.datasets import palindrome, arithmetic_expressions, binary_arithmetic
 
-SEED = 42
+
+SEED = 44
 torch.manual_seed(SEED)
 random.seed(SEED)
 
@@ -35,173 +43,197 @@ random.seed(SEED)
 DEVICE = 'cuda'
 VEC_SIZE = 256
 
-MIN_LENGTH = 8
+MIN_LENGTH = 2
 
 TRAIN_NUM_SAMPLES = 2000
-TRAIN_MAX_SEQUENCE_LENGTH = 10
+TRAIN_MAX_SEQUENCE_LENGTH = 6
 
 VAL_NUM_SAMPLES = 200
-VAL_MAX_SEQUENCE_LENGTH = 20
+VAL_MAX_SEQUENCE_LENGTH = 6
 
-N_STACK = 20
+N_STACKS = 1
+STACK_DEPTH = 12
+QUEUE_DEPTH = 12
 INITIAL_SHARPEN = 5.0
 
-LR = 1e-2
+HIDDEN_DIM = 32
+
+LR = 5e-3
 BATCH_SIZE = 32
 
-NUM_EPOCHS = 12
+NUM_EPOCHS = 24
 GRAD_CLIP = None
 
-# Symbols that go into palindrome
-train_lang = 'a b c d e f g h i j'.split(' ')
-# val_lang   = 'a b c d e f g h i j'.split(' ')
-val_lang = 'k l m n o p q r s t'.split(' ')  # NOTE: these tokens are never trained in any example
+
+# ##########
+# # Palindrome
+# #
+# # >>> train_raw[0]
+# #   {'inputs': ['^', 'a', 'b', 'c', 'd', '|', '.', '.', '.', '.'],
+# #   'outputs': ['.', '.', '.', '.', '.', '.', 'd', 'c', 'b', 'a']}
+
+# # Symbols that go into palindrome
+# train_lang = 'a b c d e f g h i j'.split(' ')
+# val_lang = 'k l m n o p q r s t'.split(' ')  # NOTE: these tokens are never trained in any example
+
+# train_raw = palindrome(TRAIN_NUM_SAMPLES, MIN_LENGTH, TRAIN_MAX_SEQUENCE_LENGTH, lang=train_lang)
+# val_raw = palindrome(VAL_NUM_SAMPLES, MIN_LENGTH, VAL_MAX_SEQUENCE_LENGTH, lang=val_lang)
 
 
 ##########
-# DATA
+# Arithmetic
 
-BOS_SYMBOL = '^'
-REFLECT_SYMBOL = '|'
-PAUSE_SYMBOL = '.'
+numbers = [0, 1, 2, 3, 4]
+modulus = 5
+operations = ['+']
+operations = ['+', '-', '*']
+# brackets = [('(', ')')]
+brackets = []
 
-
-def palindrome(num_samples,
-               min_length,
-               max_length,
-               lang) -> Dict[str, List[str]]:
-    data = []
-    for _ in range(num_samples):
-        length = random.randint(min_length, max_length)
-        hlength = length // 2
-        seed = [random.choice(lang) for _ in range(hlength)]
-        # add pauses to inputs and outputs
-        inputs = [BOS_SYMBOL] + seed + [REFLECT_SYMBOL] + [PAUSE_SYMBOL] * hlength
-        outputs = [PAUSE_SYMBOL] * (hlength + 2) + seed[::-1]
-        # convert all symbols to str
-        inputs = list(map(str, inputs))
-        outputs = list(map(str, outputs))
-        data.append({
-            'inputs': inputs,
-            'outputs': outputs,
-        })
-    return data
+train_raw = arithmetic_expressions(TRAIN_NUM_SAMPLES, MIN_LENGTH, TRAIN_MAX_SEQUENCE_LENGTH, numbers, modulus, operations, brackets)
+val_raw = arithmetic_expressions(VAL_NUM_SAMPLES, MIN_LENGTH, VAL_MAX_SEQUENCE_LENGTH, numbers, modulus, operations, brackets)
 
 
-train_raw = palindrome(TRAIN_NUM_SAMPLES, MIN_LENGTH,
-                       TRAIN_MAX_SEQUENCE_LENGTH, lang=train_lang)
+##########
+# Binary Arithmetic
+
+# op = '+'
+# # len=7   2**6  64
+# # len=8   2**7  128
+# # len=9   2**8  256
+# # len=10  2**9  512
+# # len=11  2**10 1024
+# train_raw = binary_arithmetic(TRAIN_NUM_SAMPLES, 0, 2**4, op)
+# val_raw = binary_arithmetic(VAL_NUM_SAMPLES, 0, 2**5, op)
+
+
+##########
+# Prep
+
 train_raw = sorted(train_raw, key=lambda x: len(x['inputs']))
-# >>> train_raw[0]
-#   {'inputs': ['^', 'a', 'b', 'c', 'd', '|', '.', '.', '.', '.'],
-#   'outputs': ['.', '.', '.', '.', '.', '.', 'd', 'c', 'b', 'a']}
-
-val_raw = palindrome(VAL_NUM_SAMPLES, MIN_LENGTH,
-                     VAL_MAX_SEQUENCE_LENGTH, lang=val_lang)
 val_raw = sorted(val_raw, key=lambda x: len(x['inputs']))
-
 tokenizer, (train_dl, val_dl) = build_tokenizer_dataloader(
     [train_raw, val_raw],
     data_keys=['inputs', 'outputs'],
     batch_size=BATCH_SIZE)
 
-# a handy data visualization helper, to help debug issues with data loading and
-# tokenization
-dataloader_info(train_dl, tokenizer)
+# dataloader_info(train_dl, tokenizer)
 
 
 ##############################
 # RNNStack
 
 class RNNStack(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, tokenizer):
+    def __init__(self, emb_dim, hidden_dim, tokenizer):
         super(RNNStack, self).__init__()
-        self.input_dim = input_dim
+
+        self.emb_dim = emb_dim
         self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
+        self.n_stacks = N_STACKS
+        self.stack_depth = STACK_DEPTH
 
         self.vocab_size = tokenizer.get_vocab_size()
-        self.embeddings = nn.Embedding(self.vocab_size, input_dim)
+        self.embeddings = nn.Embedding(self.vocab_size, emb_dim)
 
-        self.rnn_i = nn.Linear(input_dim, hidden_dim, bias=False)
+        self.rnn_i = nn.Linear(emb_dim + self.n_stacks * emb_dim, hidden_dim, bias=False)
         self.rnn_h = nn.Linear(hidden_dim, hidden_dim, bias=False)
 
         ##########
         # Outputs
 
-        self.fc = nn.Sequential(
-            nn.Linear(hidden_dim * 2, self.vocab_size, bias=False),
-            nn.Softmax(dim=1)
+        self.sem = nn.Sequential(
+            nn.Linear(hidden_dim, self.vocab_size, bias=False),
+            # nn.Softmax(dim=1)
             # GumbelSoftmax(dim=1, temperature=1.0, hard=False)
         )
 
-        self.choose = nn.Sequential(
-            nn.Linear(hidden_dim * 2, 2, bias=False),
-            # nn.Softmax(dim=1)
-            # GumbelSoftmax(dim=1, temperature=1.0, hard=True)
-            GumbelSoftmax(dim=1, temperature=1.0, hard=False)
-        )
+        # self.syn = nn.Sequential(
+        #     nn.Linear(emb_dim, self.vocab_size, bias=False),
+        #     # nn.Softmax(dim=1)
+        #     # GumbelSoftmax(dim=1, temperature=1.0, hard=False)
+        # )
+
+        # self.choose = nn.Sequential(
+        #     nn.Linear(hidden_dim * 2, 2, bias=False),
+        #     # nn.Softmax(dim=1)
+        #     # GumbelSoftmax(dim=1, temperature=1.0, hard=True)
+        #     GumbelSoftmax(dim=1, temperature=1.0, hard=False)
+        # )
 
         ##########
         # Stack
 
-        self.n_stack = N_STACK
-        self.initial_sharpen = INITIAL_SHARPEN
-        self.zero_offset = 0
-        self.stack_vec_size = input_dim
-        self.sharp = nn.Parameter(torch.tensor([self.initial_sharpen]))
-
-        self.ops = nn.Sequential(
-            # nn.LayerNorm(hidden_dim),
-            nn.Linear(hidden_dim * 2, 3, bias=False),  # [hidden, push+pop+nop]
-            # nn.Softmax(dim=1)
-            # GumbelSoftmax(dim=1, temperature=1.0, hard=True)
-            GumbelSoftmax(dim=1, temperature=1.0, hard=False)
-        )
+        self.stack_params = nn.ParameterList()
+        for _ in range(self.n_stacks):
+            push_val = nn.Linear(hidden_dim, emb_dim)
+            ops = nn.Sequential(
+                # nn.LayerNorm(hidden_dim),
+                nn.Linear(hidden_dim, 3, bias=False),  # [hidden, push+pop+nop]
+                # nn.Linear(emb_dim, 3, bias=False),  # [hidden, push+pop+nop]
+                nn.Softmax(dim=1)
+                # GumbelSoftmax(dim=1, temperature=1.0, hard=True)
+                # GumbelSoftmax(dim=1, temperature=1.0, hard=False)
+            )
+            self.stack_params.append(nn.ParameterList([push_val, ops]))
 
     def forward(self, x_ids, debug=False):
-        x = model.embeddings(x_ids)
-        batch_size, device, dtype = x.size(0), x.device, x.dtype
-        # init
-        ss = S.initialize(self.input_dim, self.n_stack, batch_size,
-                          self.zero_offset + 1e-3, device, dtype=dtype)
-        h = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
+        xs = self.embeddings(x_ids)
+        batch_size, device, dtype = xs.size(0), xs.device, xs.dtype
+        # stack states
+        sss = []
+        for _ in range(self.n_stacks):
+            ss = SJ.initialize(self.emb_dim, self.stack_depth, batch_size, device, dtype=dtype)
+            sss.append(ss)
+        h = torch.zeros(xs.size(0), self.hidden_dim).to(xs.device)
         outputs = []
         if debug:
-            ops_trace = []
-        for i in range(x.size(1)):
-            ri = self.rnn_i(F.normalize(x[:, i], dim=1))
+            ops_traces = []
+        for i in range(xs.size(1)):
+            x = xs[:, i]
+            peeks = []
+            for ss in sss:
+                peeks.append(SJ.read(ss))
+
+            ri = self.rnn_i(torch.cat([x] + peeks, dim=1))
             rh = self.rnn_h(h)
-            h = (ri + rh).tanh()
+            h = (ri + rh).relu()
+            # h = (ri + rh).tanh()
+            # h = (ri + rh)
 
-            hmod = 1 - h.relu()
-            hmod = torch.cat([hmod, hmod], dim=1)
-
-            # Stack
-            ops = self.ops(hmod)
+            # Update Stacks
+            nsss = []
+            ops_trace = []
+            for (ss, (push_val, ops)) in zip(sss, self.stack_params):
+                pv = push_val(h)
+                ops = ops(h)
+                if debug:
+                    ops_trace.append(ops)
+                push, pop, nop = [o.squeeze(1) for o in torch.chunk(ops, chunks=3, dim=-1)]
+                nss, pop_val = SJ.push_pop_nop(ss, push, pop, nop, pv)
+                nsss.append(nss)
             if debug:
-                ops_trace.append(ops)
-            push, pop, nop = [o.squeeze(1)
-                              for o in torch.chunk(ops, chunks=3, dim=-1)]
-            ss, pop_val = S.push_pop_nop(ss, self.sharp,
-                                         push, pop, nop, x[:, i])
+                ops_traces.append(torch.stack(ops_trace, dim=1))
 
-            # Outputs
-            semantic = self.fc(hmod)
-            # OPTIM: will this be memory hog?
-            syntactic = torch.cosine_similarity(
-                pop_val.unsqueeze(1),  # [B, 1, D]
-                self.embeddings.weight.unsqueeze(0),  # [1, V, D]
-                dim=2)  # [B, V]
-            choice = self.choose(hmod)
-            output = torch.einsum('bc, bcv -> bv',
-                                  choice,
-                                  torch.stack([semantic, syntactic], dim=1))
+            output = self.sem(h)
+
+            # # Outputs
+            # semantic = self.sem(torch.cat([x[:, i], pop_val], dim=1))
+            # # # OPTIM: will this be memory hog?
+            # # syntactic = torch.cosine_similarity(
+            # #     pop_val.unsqueeze(1),  # [B, 1, D]
+            # #     self.embeddings.weight.unsqueeze(0),  # [1, V, D]
+            # #     dim=2)  # [B, V]
+            # syntactic = self.syn(pop_val)
+            # choice = self.choose(h)
+            # output = torch.einsum('bc, bcv -> bv',
+            #                       choice,
+            #                       torch.stack([semantic, syntactic], dim=1))
             outputs.append(output)
 
         outputs = torch.stack(outputs, dim=1)
         if debug:
-            ops_trace = torch.stack(ops_trace, dim=1)
-            debug_out = {'ops_trace': ops_trace}
+            ops_traces = torch.stack(ops_traces, dim=1)  # [B, T, Stack, 3], i think
+            debug_out = {'ops_traces': ops_traces}
             return outputs, debug_out
         else:
             return outputs
@@ -213,10 +245,12 @@ class RNNStack(nn.Module):
 ##########
 # Setup
 
-model = RNNStack(
-    input_dim=VEC_SIZE,
-    hidden_dim=32,
-    output_dim=VEC_SIZE,
+
+Model = RNNStack
+
+model = Model(
+    emb_dim=VEC_SIZE,
+    hidden_dim=HIDDEN_DIM,
     tokenizer=tokenizer,
 )
 model.to(DEVICE)
@@ -242,11 +276,13 @@ for epoch in range(NUM_EPOCHS):
         model, train_dl, optimizer, 'train', DEVICE, GRAD_CLIP,
         check_accuracy=True)
     train_losses.append(train_loss)
+    train_accuracies.append(tacc)
 
     val_loss, vacc, _ = run_epoch(
         model, val_dl, None, 'eval', DEVICE,
         check_accuracy=True)
     val_losses.append(val_loss)
+    val_accuracies.append(vacc)
 
     print(f'Epoch: {epoch + 1:02} | Train Loss: {train_loss:.3f} | Val. Loss: {val_loss:.3f} | Train Acc: {tacc:.3f} | Val Acc: {vacc:.3f}')
 
@@ -291,16 +327,29 @@ for src_idss, trg_idss, output_idss in reversed(outputs):
         break
 
 
-# Hand check some things
+# # Hand check Palindrome
 
-print()
+# print()
 
-inp = '^ a b c d e e e | . . . . . . .'.split(' ')
-trg = '. . . . . . . . . e e e d c b a'.split(' ')
+# # Palindrome Training
+# inp = '^ a b c d e e e | . . . . . . .'.split(' ')
+# trg = '. . . . . . . . . e e e d c b a'.split(' ')
 
-inp = '^ k l m n o o o | . . . . . . .'.split(' ')
-trg = '. . . . . . . . . o o o n m l k'.split(' ')
+# # Palindrome Test
+# inp = '^ k l m n o o o | . . . . . . .'.split(' ')
+# trg = '. . . . . . . . . o o o n m l k'.split(' ')
 
+# # Binary Arith
+# inp = '^ 1 1 1 1 0 + 1 0 1 0 1 . . . . . .'.split(' ')
+# trg = '. . . . . . . . . . . . 1 1 0 0 1 1'.split(' ')
+
+
+# Arith
+inp = '^ 2 + 4 .'.split(' ')
+trg = '. . . . 1'.split(' ')
+
+
+model.eval()
 inp_ids = torch.tensor(tokenizer.encode(inp, is_pretokenized=True).ids, device=DEVICE).unsqueeze(0)
 trg_ids = torch.tensor(tokenizer.encode(trg, is_pretokenized=True).ids, device=DEVICE).unsqueeze(0)
 logits, debug = model(inp_ids, debug=True)
@@ -311,7 +360,8 @@ print_grid([['inp:'] + inp,
             ['trg:'] + trg])
 
 
-ops = debug['ops_trace']
+ops = debug['ops_traces']
+ops = ops[:, :, 0, :]  # select stack 0
 push, pop, nop = [x.squeeze(1) for x in torch.chunk(ops, chunks=3, dim=-1)]
 
 max_scores = logits.max(dim=2)
@@ -326,16 +376,18 @@ plt.subplot(1, 2, 1)
 plt.imshow(logits[0].T.detach().cpu().numpy())
 plt.title('Logits')
 plt.xlabel('Time')
+plt.xticks(range(inp_ids.shape[1]))
 plt.ylabel('Token')
 
 # Plot push, pop, nop operations over time
 plt.subplot(1, 2, 2)
 time_steps = range(push.shape[1])
-plt.plot(time_steps, push[0].detach().cpu().numpy(), label='Push')
-plt.plot(time_steps, pop[0].detach().cpu().numpy(), label='Pop')
+plt.plot(time_steps, push[0].detach().cpu().numpy(), label='Enqueue')
+plt.plot(time_steps, pop[0].detach().cpu().numpy(), label='Dequeue')
 plt.plot(time_steps, nop[0].detach().cpu().numpy(), label='Nop')
 plt.title('Operations over Time')
 plt.xlabel('Time')
+plt.xticks(range(inp_ids.shape[1]))
 plt.ylabel('Value')
 plt.legend()
 

@@ -23,6 +23,7 @@ from filelock import FileLock
 import math
 
 import neurallambda.stack as S
+import neurallambda.queue as Q
 import neurallambda.stack_joulin as SJ
 from neurallambda.lab.common import (
     build_tokenizer_dataloader,
@@ -32,6 +33,7 @@ from neurallambda.lab.common import (
     run_epoch,
 )
 from neurallambda.torch import GumbelSoftmax
+from neurallambda.lab.datasets import palindrome, arithmetic_expressions, binary_arithmetic
 
 
 ##################################################
@@ -49,16 +51,13 @@ VAL_NUM_SAMPLES = 200
 VAL_MAX_SEQUENCE_LENGTH = 20
 
 N_STACK = 20
+N_QUEUE = 20
 INITIAL_SHARPEN = 5.0
 
 BATCH_SIZE = 32
 
 GRAD_CLIP = None
 
-# Symbols that go into palindrome
-train_lang = 'a b c d e f g h i j'.split(' ')
-# val_lang   = 'a b c d e f g h i j'.split(' ')
-val_lang = 'k l m n o p q r s t'.split(' ')  # NOTE: these tokens are never trained in any example
 
 
 ##################################################
@@ -480,46 +479,161 @@ class RNNStack(nn.Module):
             return outputs
 
 
+##############################
+# RNNQueue
+
+class RNNQueue(nn.Module):
+    def __init__(self, emb_dim, hidden_dim, tokenizer):
+        super(RNNQueue, self).__init__()
+        self.emb_dim = emb_dim
+        self.hidden_dim = hidden_dim
+
+        self.vocab_size = tokenizer.get_vocab_size()
+        self.embeddings = nn.Embedding(self.vocab_size, emb_dim)
+
+        self.rnn_i = nn.Linear(emb_dim, hidden_dim, bias=False)
+        self.rnn_h = nn.Linear(hidden_dim, hidden_dim, bias=False)
+
+        ##########
+        # Outputs
+
+        self.fc = nn.Sequential(
+            nn.Linear(hidden_dim * 2, self.vocab_size, bias=False),
+            nn.Softmax(dim=1)
+            # GumbelSoftmax(dim=1, temperature=1.0, hard=False)
+        )
+
+        self.choose = nn.Sequential(
+            nn.Linear(hidden_dim * 2, 2, bias=False),
+            # nn.Softmax(dim=1)
+            # GumbelSoftmax(dim=1, temperature=1.0, hard=True)
+            GumbelSoftmax(dim=1, temperature=1.0, hard=False)
+        )
+
+        ##########
+        # Stack
+
+        self.n_queue = N_QUEUE
+        self.initial_sharpen = INITIAL_SHARPEN
+        self.zero_offset = 0
+        self.stack_vec_size = emb_dim
+        self.sharp_head = nn.Parameter(torch.tensor([self.initial_sharpen]))
+        self.sharp_tail = nn.Parameter(torch.tensor([self.initial_sharpen]))
+
+        self.ops = nn.Sequential(
+            # nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim * 2, 3, bias=False),  # [hidden, push+pop+nop]
+            # nn.Softmax(dim=1)
+            # GumbelSoftmax(dim=1, temperature=1.0, hard=True)
+            GumbelSoftmax(dim=1, temperature=1.0, hard=False)
+        )
+
+    def forward(self, x_ids, debug=False):
+        x = self.embeddings(x_ids)
+        batch_size, device, dtype = x.size(0), x.device, x.dtype
+        # init
+        qs = Q.initialize(self.emb_dim, self.n_queue, batch_size,
+                          self.zero_offset, device, dtype=dtype)
+        h = torch.zeros(x.size(0), self.hidden_dim).to(x.device)
+        outputs = []
+        if debug:
+            ops_trace = []
+        for i in range(x.size(1)):
+            ri = self.rnn_i(F.normalize(x[:, i], dim=1))
+            rh = self.rnn_h(h)
+            h = (ri + rh).tanh()
+
+            hmod = 1 - h.relu()
+            hmod = torch.cat([hmod, h], dim=1)
+
+            # Stack
+            ops = self.ops(hmod)
+            if debug:
+                ops_trace.append(ops)
+            enq, deq, nop = [o.squeeze(1)
+                              for o in torch.chunk(ops, chunks=3, dim=-1)]
+
+            qs, deq_val = Q.enqueue_dequeue_nop(
+                qs,
+                self.sharp_head,
+                self.sharp_tail,
+                enq,
+                deq,
+                nop,
+                x[:, i])
+
+            # Outputs
+            semantic = self.fc(hmod)
+            # OPTIM: will this be memory hog?
+            syntactic = torch.cosine_similarity(
+                deq_val.unsqueeze(1),  # [B, 1, D]
+                self.embeddings.weight.unsqueeze(0),  # [1, V, D]
+                dim=2)  # [B, V]
+            choice = self.choose(hmod)
+            output = torch.einsum('bc, bcv -> bv',
+                                  choice,
+                                  torch.stack([semantic, syntactic], dim=1))
+            outputs.append(output)
+
+        outputs = torch.stack(outputs, dim=1)
+        if debug:
+            ops_trace = torch.stack(ops_trace, dim=1)
+            debug_out = {'ops_trace': ops_trace}
+            return outputs, debug_out
+        else:
+            return outputs
+
+
+
 
 ##################################################
 # DATA
 
-BOS_SYMBOL = '^'
-REFLECT_SYMBOL = '|'
-PAUSE_SYMBOL = '.'
-
-def palindrome(num_samples,
-               min_length,
-               max_length,
-               lang) -> Dict[str, List[str]]:
-    data = []
-    for _ in range(num_samples):
-        length = random.randint(min_length, max_length)
-        hlength = length // 2
-        seed = [random.choice(lang) for _ in range(hlength)]
-        # add pauses to inputs and outputs
-        inputs = [BOS_SYMBOL] + seed + [REFLECT_SYMBOL] + [PAUSE_SYMBOL] * hlength
-        outputs = [PAUSE_SYMBOL] * (hlength + 2) + seed[::-1]
-        # convert all symbols to str
-        inputs = list(map(str, inputs))
-        outputs = list(map(str, outputs))
-        data.append({
-            'inputs': inputs,
-            'outputs': outputs,
-        })
-    return data
-
-train_raw = palindrome(TRAIN_NUM_SAMPLES, MIN_LENGTH,
-                       TRAIN_MAX_SEQUENCE_LENGTH, lang=train_lang)
-train_raw = sorted(train_raw, key=lambda x: len(x['inputs']))
+##########
+# Palindrome
+#
 # >>> train_raw[0]
 #   {'inputs': ['^', 'a', 'b', 'c', 'd', '|', '.', '.', '.', '.'],
 #   'outputs': ['.', '.', '.', '.', '.', '.', 'd', 'c', 'b', 'a']}
 
-val_raw = palindrome(VAL_NUM_SAMPLES, MIN_LENGTH,
-                     VAL_MAX_SEQUENCE_LENGTH, lang=val_lang)
-val_raw = sorted(val_raw, key=lambda x: len(x['inputs']))
+# # Symbols that go into palindrome
+# train_lang = 'a b c d e f g h i j'.split(' ')
+# val_lang = 'k l m n o p q r s t'.split(' ')  # NOTE: these tokens are never trained in any example
 
+# train_raw = palindrome(TRAIN_NUM_SAMPLES, MIN_LENGTH, TRAIN_MAX_SEQUENCE_LENGTH, lang=train_lang)
+# val_raw = palindrome(VAL_NUM_SAMPLES, MIN_LENGTH, VAL_MAX_SEQUENCE_LENGTH, lang=val_lang)
+
+
+##########
+# Arithmetic
+
+# numbers = [1, 2, 3, 4, 5]
+# modulus = 5
+# operations = ['+', '-', '*']
+# brackets = [('(', ')')]
+
+# train_raw = arithmetic_expressions(TRAIN_NUM_SAMPLES, MIN_LENGTH, TRAIN_MAX_SEQUENCE_LENGTH, numbers, modulus, operations, brackets)
+# val_raw = arithmetic_expressions(VAL_NUM_SAMPLES, MIN_LENGTH, VAL_MAX_SEQUENCE_LENGTH, numbers, modulus, operations, brackets)
+
+
+##########
+# Binary Arithmetic
+
+op = '+'
+# len=7   2**6  64
+# len=8   2**7  128
+# len=9   2**8  256
+# len=10  2**9  512
+# len=11  2**10 1024
+train_raw = binary_arithmetic(TRAIN_NUM_SAMPLES, 0, 2**4, op)
+val_raw = binary_arithmetic(VAL_NUM_SAMPLES, 0, 2**5, op)
+
+
+##########
+# Prep
+
+train_raw = sorted(train_raw, key=lambda x: len(x['inputs']))
+val_raw = sorted(val_raw, key=lambda x: len(x['inputs']))
 tokenizer, (train_dl, val_dl) = build_tokenizer_dataloader(
     [train_raw, val_raw],
     data_keys=['inputs', 'outputs'],
@@ -539,15 +653,14 @@ def train_model(config, tokenizer, train_dl, val_dl):
     torch.manual_seed(seed)
     random.seed(seed)
 
-    # ##########
-    # # Prep Data
-    # train_dl = ray.train.get_dataset_shard("train")
-    # val_dl = ray.train.get_dataset_shard("val")
-
     ##########
     # Prep Model
     if config['model_type'] == 'RNNStack':
         model = RNNStack(config['emb_dim'],
+                         config['hidden_dim'],
+                         tokenizer=tokenizer)
+    elif config['model_type'] == 'RNNQueue':
+        model = RNNQueue(config['emb_dim'],
                          config['hidden_dim'],
                          tokenizer=tokenizer)
     elif 'RNNStackJoulinImproved' in config['model_type']:
@@ -684,6 +797,15 @@ RNNStack_config = {
     'seed': SEED,
 }
 
+RNNQueue_config = {
+    'model_type': 'RNNQueue',
+    'lr': LR,
+    'emb_dim': EMB_DIM,
+    'hidden_dim': HIDDEN_DIM,
+    'num_epochs': NUM_EPOCHS,
+    'seed': SEED,
+}
+
 RNNStackJoulinImproved_K1_config = {
     'model_type': 'RNNStackJoulinImproved_K1',
     'lr': LR,
@@ -726,15 +848,18 @@ RNNStackJoulin_K2_config = {
 
 
 all_configs = [
-    RNN_config,
-    LSTM_config,
-    RNNStack_config,
-    RNNStackJoulin_K1_config,
-    RNNStackJoulin_K2_config,
-    RNNStackJoulinImproved_K1_config,
-    RNNStackJoulinImproved_K2_config,
-    TransformerSine_config,
-    TransformerLearned_config,
+    # RNN_config,
+    # LSTM_config,
+    # RNNStack_config,
+    # RNNStackJoulin_K1_config,
+    # RNNStackJoulin_K2_config,
+    # RNNStackJoulinImproved_K1_config,
+    # RNNStackJoulinImproved_K2_config,
+
+    RNNQueue_config,
+
+    # TransformerSine_config,
+    # TransformerLearned_config,
 ]
 
 def run_config(config):
