@@ -32,7 +32,7 @@ from neurallambda.torch import GumbelSoftmax
 from neurallambda.lab.datasets import palindrome, arithmetic_expressions, binary_arithmetic
 
 
-SEED = 44
+SEED = 42
 torch.manual_seed(SEED)
 random.seed(SEED)
 
@@ -51,17 +51,16 @@ TRAIN_MAX_SEQUENCE_LENGTH = 6
 VAL_NUM_SAMPLES = 200
 VAL_MAX_SEQUENCE_LENGTH = 6
 
-N_STACKS = 1
+N_STACKS = 2
 STACK_DEPTH = 12
 QUEUE_DEPTH = 12
-INITIAL_SHARPEN = 5.0
 
 HIDDEN_DIM = 32
 
 LR = 5e-3
 BATCH_SIZE = 32
 
-NUM_EPOCHS = 24
+NUM_EPOCHS = 12
 GRAD_CLIP = None
 
 
@@ -83,12 +82,14 @@ GRAD_CLIP = None
 ##########
 # Arithmetic
 
-numbers = [0, 1, 2, 3, 4]
+numbers = [1, 2, 3, 4]
 modulus = 5
+
 operations = ['+']
-operations = ['+', '-', '*']
-# brackets = [('(', ')')]
 brackets = []
+
+# operations = ['+', '-', '*']
+# brackets = [('(', ')')]
 
 train_raw = arithmetic_expressions(TRAIN_NUM_SAMPLES, MIN_LENGTH, TRAIN_MAX_SEQUENCE_LENGTH, numbers, modulus, operations, brackets)
 val_raw = arithmetic_expressions(VAL_NUM_SAMPLES, MIN_LENGTH, VAL_MAX_SEQUENCE_LENGTH, numbers, modulus, operations, brackets)
@@ -142,7 +143,7 @@ class RNNStack(nn.Module):
         # Outputs
 
         self.sem = nn.Sequential(
-            nn.Linear(hidden_dim, self.vocab_size, bias=False),
+            nn.Linear(hidden_dim * 2, self.vocab_size, bias=False),
             # nn.Softmax(dim=1)
             # GumbelSoftmax(dim=1, temperature=1.0, hard=False)
         )
@@ -165,10 +166,10 @@ class RNNStack(nn.Module):
 
         self.stack_params = nn.ParameterList()
         for _ in range(self.n_stacks):
-            push_val = nn.Linear(hidden_dim, emb_dim)
+            push_val = nn.Linear(hidden_dim * 2, emb_dim)
             ops = nn.Sequential(
                 # nn.LayerNorm(hidden_dim),
-                nn.Linear(hidden_dim, 3, bias=False),  # [hidden, push+pop+nop]
+                nn.Linear(hidden_dim * 2, 3, bias=False),  # [hidden, push+pop+nop]
                 # nn.Linear(emb_dim, 3, bias=False),  # [hidden, push+pop+nop]
                 nn.Softmax(dim=1)
                 # GumbelSoftmax(dim=1, temperature=1.0, hard=True)
@@ -196,16 +197,18 @@ class RNNStack(nn.Module):
 
             ri = self.rnn_i(torch.cat([x] + peeks, dim=1))
             rh = self.rnn_h(h)
-            h = (ri + rh).relu()
-            # h = (ri + rh).tanh()
-            # h = (ri + rh)
+            # h = (ri + rh).relu()  # only relu works
+            h1 = (ri+rh).relu()
+            h2 = (ri-rh).relu()  # for some reason this works great
+            h = h1
+            hh = torch.cat([h1, h2], dim=1)
 
             # Update Stacks
             nsss = []
             ops_trace = []
             for (ss, (push_val, ops)) in zip(sss, self.stack_params):
-                pv = push_val(h)
-                ops = ops(h)
+                pv = push_val(hh)
+                ops = ops(hh)
                 if debug:
                     ops_trace.append(ops)
                 push, pop, nop = [o.squeeze(1) for o in torch.chunk(ops, chunks=3, dim=-1)]
@@ -214,20 +217,8 @@ class RNNStack(nn.Module):
             if debug:
                 ops_traces.append(torch.stack(ops_trace, dim=1))
 
-            output = self.sem(h)
+            output = self.sem(hh)
 
-            # # Outputs
-            # semantic = self.sem(torch.cat([x[:, i], pop_val], dim=1))
-            # # # OPTIM: will this be memory hog?
-            # # syntactic = torch.cosine_similarity(
-            # #     pop_val.unsqueeze(1),  # [B, 1, D]
-            # #     self.embeddings.weight.unsqueeze(0),  # [1, V, D]
-            # #     dim=2)  # [B, V]
-            # syntactic = self.syn(pop_val)
-            # choice = self.choose(h)
-            # output = torch.einsum('bc, bcv -> bv',
-            #                       choice,
-            #                       torch.stack([semantic, syntactic], dim=1))
             outputs.append(output)
 
         outputs = torch.stack(outputs, dim=1)
