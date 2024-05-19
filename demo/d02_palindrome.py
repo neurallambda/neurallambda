@@ -136,6 +136,8 @@ class RNNStack(nn.Module):
         self.vocab_size = tokenizer.get_vocab_size()
         self.embeddings = nn.Embedding(self.vocab_size, emb_dim)
 
+        self.embeddings2 = nn.Embedding(self.vocab_size, emb_dim)
+
         self.rnn_i = nn.Linear(emb_dim + self.n_stacks * emb_dim, hidden_dim, bias=False)
         self.rnn_h = nn.Linear(hidden_dim, hidden_dim, bias=False)
 
@@ -143,9 +145,15 @@ class RNNStack(nn.Module):
         # Outputs
 
         self.sem = nn.Sequential(
-            nn.Linear(hidden_dim * 2, self.vocab_size, bias=False),
-            # nn.Softmax(dim=1)
-            # GumbelSoftmax(dim=1, temperature=1.0, hard=False)
+            # nn.Linear(hidden_dim * 2, self.emb_dim, bias=False),
+
+            nn.Linear(hidden_dim * 2, 512, bias=False),
+            nn.ReLU(),
+            nn.Linear(512, self.emb_dim, bias=False),
+
+            # nn.Linear(hidden_dim * 2, self.vocab_size, bias=False),
+
+            # NO SOFTMAX, goes to cross_entropy which expects unnormalized logits
         )
 
         # self.syn = nn.Sequential(
@@ -179,6 +187,8 @@ class RNNStack(nn.Module):
 
     def forward(self, x_ids, debug=False):
         xs = self.embeddings(x_ids)
+        xs = F.normalize(xs, dim=1)
+
         batch_size, device, dtype = xs.size(0), xs.device, xs.dtype
         # stack states
         sss = []
@@ -199,6 +209,7 @@ class RNNStack(nn.Module):
             rh = self.rnn_h(h)
             # h = (ri + rh).relu()  # only relu works
             h1 = (ri+rh).relu()
+            # h2 = (ri+rh).relu()
             h2 = (ri-rh).relu()  # for some reason this works great
             h = h1
             hh = torch.cat([h1, h2], dim=1)
@@ -217,7 +228,10 @@ class RNNStack(nn.Module):
             if debug:
                 ops_traces.append(torch.stack(ops_trace, dim=1))
 
+            # SELECT OFF EMBEDDINGS, HOW TO GET LOSS FN RIGHT?
+
             output = self.sem(hh)
+            output = F.normalize(output, dim=1)
 
             outputs.append(output)
 
@@ -247,6 +261,7 @@ model = Model(
 model.to(DEVICE)
 
 # skip training embeddings
+print('skipping training embeddings')
 no_trains = [model.embeddings]
 for no_train in no_trains:
     for p in no_train.parameters():
@@ -265,13 +280,13 @@ val_accuracies = []
 for epoch in range(NUM_EPOCHS):
     train_loss, tacc, _ = run_epoch(
         model, train_dl, optimizer, 'train', DEVICE, GRAD_CLIP,
-        check_accuracy=True)
+        check_accuracy=True, loss_fn='cosine_distance')
     train_losses.append(train_loss)
     train_accuracies.append(tacc)
 
     val_loss, vacc, _ = run_epoch(
         model, val_dl, None, 'eval', DEVICE,
-        check_accuracy=True)
+        check_accuracy=True, loss_fn='cosine_distance')
     val_losses.append(val_loss)
     val_accuracies.append(vacc)
 
@@ -298,7 +313,7 @@ plt.show()
 ##########
 
 vloss, vacc, outputs = run_epoch(model, val_dl, None, 'eval', DEVICE, GRAD_CLIP,
-                                 check_accuracy=True)
+                                 check_accuracy=True, loss_fn='cosine_distance')
 
 print()
 n = 0
@@ -359,7 +374,7 @@ max_scores = logits.max(dim=2)
 print_grid([[f'{x:>.2f}' for x in max_scores.values[0].tolist()],
             max_scores.indices[0].tolist()])
 
-print(f'{F.cross_entropy(logits.flatten(0, 1), trg_ids.flatten())=}')
+# print(f'{F.cosine_distance(logits.flatten(0, 1), trg_ids.flatten())=}')
 
 # Plot logits
 plt.figure(figsize=(8, 4))

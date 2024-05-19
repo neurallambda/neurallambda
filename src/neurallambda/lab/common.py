@@ -180,10 +180,18 @@ def build_tokenizer_dataloader(
 # TRAINING
 
 def run_epoch(model, dl, optimizer, mode, device, clip=None,
-              check_accuracy=False):
+              check_accuracy=False, loss_fn='nllloss'):
     ''' Run an epoch over a DataLoader, and optionally perform greedy sampling
-    to check accuracy. '''
+    to check accuracy.
+
+    Args:
+      if loss_fn == 'cosine_distance', model must return probabilities (after sigmoid activation)
+      if loss_fn == 'cross_entropy', model must return unnormalized logits (ie final output comes from Linear layer)
+      if loss_fn == 'nllloss', model must return logprobs, ie `F.log_softmax(..., dim=-1)`
+    '''
     assert mode in ['eval', 'train'], "mode must be either 'eval' or 'train'"
+    assert loss_fn in ['cosine_distance', 'nllloss', 'cross_entropy'], "loss_fn must be 'cosine_distance', 'nllloss', or 'cross_entropy'"
+
     if mode == 'train':
         model.train()
     else:
@@ -201,9 +209,26 @@ def run_epoch(model, dl, optimizer, mode, device, clip=None,
             src_ids = src_ids.to(device)  # [batch, seq, vec_size]
             trg_ids = trg_ids.to(device)
             output = model(src_ids)  # [batch, seq, vec_size]
-            loss = F.cross_entropy(output.flatten(0, 1),
-                                   trg_ids.flatten(),
-                                   reduction='mean')
+
+            if loss_fn == 'cosine_distance':
+                # trgs = torch.stack([model.embeddings(x) for x in trg_ids], dim=1)
+                trgs = model.embeddings(trg_ids)
+                sim = torch.cosine_similarity(
+                    output.flatten(0, 1),
+                    trgs.flatten(0, 1), dim=1)
+                loss = (1-sim).mean()
+
+            elif loss_fn == 'cross_entropy':
+                loss = F.cross_entropy(output.flatten(0, 1),
+                                       trg_ids.flatten(),
+                                       reduction='mean')
+
+            elif loss_fn == 'nllloss':
+                # log_probs = F.log_softmax(output, dim=-1)
+                loss = F.nll_loss(output.flatten(0, 1),
+                                  trg_ids.flatten(),
+                                  reduction='mean')
+
             epoch_loss += loss.item()
 
             if mode == 'train':
@@ -215,7 +240,12 @@ def run_epoch(model, dl, optimizer, mode, device, clip=None,
 
             if check_accuracy:
                 with torch.no_grad():
-                    output_ids = output.argmax(dim=2)
+                    if loss_fn == 'cosine_distance':
+                        output_ids = torch.cosine_similarity(model.embeddings.weight.unsqueeze(0).unsqueeze(0), # [1, 1, VOCAB, EMB_DIM]
+                                                             output.unsqueeze(2),  # [BATCH, TIME, 1, EMB_DIM]
+                                                             dim=3).argmax(dim=2)
+                    else:
+                        output_ids = output.argmax(dim=2)
                     outputs.append((src_ids, trg_ids, output_ids))
                     n += trg_ids.shape[0] * trg_ids.shape[1]  # total count
                     n_correct += (output_ids == trg_ids).sum()
