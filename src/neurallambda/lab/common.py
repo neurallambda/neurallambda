@@ -6,14 +6,37 @@ from datasets import Dataset
 from functools import partial
 from tokenizers import Tokenizer
 from torch.utils.data import DataLoader
-from typing import List, Dict
+from typing import List, Dict, Any
 import tokenizers
 
 
 ##################################################
 # DATA
 
-def print_grid(data):
+def print_grid(data: List[List[Any]]) -> None:
+    """
+    Prints a grid of data with evenly spaced columns.
+
+    Args:
+        data (List[List[Any]]): A 2D list containing the data to be printed.
+            Each sublist represents a row of the grid.
+
+    Returns:
+        None
+
+    Example:
+        data = [
+            [1, "Apple", 3.14],
+            [2, "Banana", 2.71],
+            [3, "Orange", 1.41]
+        ]
+        print_grid(data)
+
+    Output:
+        1  Apple   3.14
+        2  Banana  2.71
+        3  Orange  1.41
+    """
     # maximum width for each column
     column_widths = [max(len(str(item)) for item in column)
                      for column in zip(*data)]
@@ -58,6 +81,7 @@ def collate_fn(tokenizer, pad_token, batch):
                  for sample in batch]
     output_ids = [tokenizer.encode(sample['outputs'], is_pretokenized=True).ids
                   for sample in batch]
+    accuracy_mask = [x['accuracy_mask'] for x in batch]
 
     # Get the maximum sequence length in the batch
     max_length = max(len(ids) for ids in input_ids + output_ids)
@@ -69,12 +93,17 @@ def collate_fn(tokenizer, pad_token, batch):
     output_ids = [F.pad(torch.tensor(ids), (max_length - len(ids), 0),
                         value=tokenizer.token_to_id(pad_token))
                   for ids in output_ids]
+    accuracy_mask = [F.pad(torch.tensor(x, dtype=torch.bool), (max_length - len(x), 0),
+                           value=False)
+                     for x in accuracy_mask]
+
 
     # Stack the padded sequences into tensors
     input_ids = torch.stack(input_ids)
     output_ids = torch.stack(output_ids)
+    accuracy_mask = torch.stack(accuracy_mask)
 
-    return input_ids, output_ids
+    return input_ids, output_ids, accuracy_mask
 
 
 def dataloader_info(dataloader, tokenizer):
@@ -135,26 +164,36 @@ def dataloader_info(dataloader, tokenizer):
 
 def build_tokenizer_dataloader(
         raw_datasets: List[  # multiple datasets
-            List[Dict[str, List[str]]]  # a single dataset
+            List[Dict[str, List[str]]]  # a single dataset, eg [{inputs:..., outputs:...}]
         ],
-        batch_size,
         unk_token='[UNK]',
         pad_token='[PAD]',
         data_keys: List[str] = None,
 ):
-    ''' Dataset has pretokenization applied, ie it's split into a list of str
-    tokens (it has not been tokenized into ints yet). '''
+    '''Dataset has pretokenization applied, ie it's split into a list of str
+    tokens (it has not been tokenized into ints yet).
+
+    This helper is highly specific to toy problems, where we eliminate
+    tokenization issues by pretokenizing, IE, for an input sequence of
+    "abc|cba", we need to have already pretokenized it into:
+
+    ['a', 'b', 'c', '|', 'c', 'b', 'a']
+
+    Returns:
+      DataLoader creator fn, that accepts a batch_size
+
+    '''
     for data in raw_datasets:
         assert isinstance(data, list)
         assert isinstance(data[0], dict)
         assert 'inputs' in data[0]
         assert 'outputs' in data[0]
+        assert 'accuracy_mask' in data[0]
 
     # the keys to pay attention to from the dataset
     if data_keys is None:
-        keys = raw_datasets[0].keys()
-    else:
-        keys = data_keys
+        data_keys = list(raw_datasets[0][0].keys())  # first data split, first row
+        data_keys = list(filter(lambda x: x not in {'accuracy_mask'}, data_keys))
 
     # Convert to HF Dataset
     hf_datasets = [Dataset.from_list(x) for x in raw_datasets]
@@ -165,22 +204,25 @@ def build_tokenizer_dataloader(
     tokenizer = Tokenizer(tokenizers.models.WordLevel(vocab={},
                                                       unk_token=unk_token))
     print('training tokenizer')
-    tokenizer.train_from_iterator(iterator(hf_datasets, keys, special_tokens))
+    tokenizer.train_from_iterator(iterator(hf_datasets, data_keys, special_tokens))
     tokenizer.add_special_tokens([unk_token, pad_token])
-    dataloaders = [
-        DataLoader(x, batch_size=batch_size,
-                   collate_fn=partial(collate_fn, tokenizer, pad_token))
-        for x in hf_datasets
-    ]
 
-    return tokenizer, dataloaders
+    def create_dataloaders(batch_size: int) -> List[DataLoader]:
+        dataloaders = [
+            DataLoader(x, batch_size=batch_size,
+                       collate_fn=partial(collate_fn, tokenizer, pad_token))
+            for x in hf_datasets
+        ]
+        return dataloaders
+
+    return tokenizer, create_dataloaders
 
 
 ##################################################
 # TRAINING
 
-def run_epoch(model, dl, optimizer, mode, device, clip=None,
-              check_accuracy=False, loss_fn='nllloss'):
+def run_epoch(model, dl, optimizer, mode, device, loss_fn, clip=None,
+              check_accuracy=False, regularization_fn=None):
     ''' Run an epoch over a DataLoader, and optionally perform greedy sampling
     to check accuracy.
 
@@ -191,6 +233,7 @@ def run_epoch(model, dl, optimizer, mode, device, clip=None,
     '''
     assert mode in ['eval', 'train'], "mode must be either 'eval' or 'train'"
     assert loss_fn in ['cosine_distance', 'nllloss', 'cross_entropy'], "loss_fn must be 'cosine_distance', 'nllloss', or 'cross_entropy'"
+    assert clip is None or isinstance(clip, float)
 
     if mode == 'train':
         model.train()
@@ -205,7 +248,7 @@ def run_epoch(model, dl, optimizer, mode, device, clip=None,
         outputs = []
 
     with torch.set_grad_enabled(mode == 'train'):
-        for i, (src_ids, trg_ids) in enumerate(dl):
+        for i, (src_ids, trg_ids, acc_mask) in enumerate(dl):
             src_ids = src_ids.to(device)  # [batch, seq, vec_size]
             trg_ids = trg_ids.to(device)
             output = model(src_ids)  # [batch, seq, vec_size]
@@ -216,7 +259,7 @@ def run_epoch(model, dl, optimizer, mode, device, clip=None,
                 sim = torch.cosine_similarity(
                     output.flatten(0, 1),
                     trgs.flatten(0, 1), dim=1)
-                loss = (1-sim).mean()
+                loss = (1 - sim).mean()
 
             elif loss_fn == 'cross_entropy':
                 loss = F.cross_entropy(output.flatten(0, 1),
@@ -229,29 +272,122 @@ def run_epoch(model, dl, optimizer, mode, device, clip=None,
                                   trg_ids.flatten(),
                                   reduction='mean')
 
+            if regularization_fn is not None:
+                loss += regularization_fn(model, output)
+
             epoch_loss += loss.item()
 
             if mode == 'train':
                 optimizer.zero_grad()
                 loss.backward()
-                if clip is not None:
+                if isinstance(clip, float):  # grad_clip
                     torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
                 optimizer.step()
 
             if check_accuracy:
                 with torch.no_grad():
                     if loss_fn == 'cosine_distance':
+                        # find the embedding closest to the output, consider
+                        # that the output_id
                         output_ids = torch.cosine_similarity(model.embeddings.weight.unsqueeze(0).unsqueeze(0), # [1, 1, VOCAB, EMB_DIM]
                                                              output.unsqueeze(2),  # [BATCH, TIME, 1, EMB_DIM]
                                                              dim=3).argmax(dim=2)
                     else:
                         output_ids = output.argmax(dim=2)
-                    outputs.append((src_ids, trg_ids, output_ids))
-                    n += trg_ids.shape[0] * trg_ids.shape[1]  # total count
-                    n_correct += (output_ids == trg_ids).sum()
+                    outputs.append((src_ids, trg_ids, acc_mask, output_ids))
+                    n += trg_ids[acc_mask].numel()  # total count
+                    n_correct += (output_ids[acc_mask] == trg_ids[acc_mask]).sum()
 
     if check_accuracy:
         acc = n_correct / n
         return epoch_loss / len(dl), acc.item(), outputs
     else:
         return epoch_loss / len(dl)
+
+
+
+# def run_epoch(model, dl, optimizer, mode, device, clip=None,
+#               check_accuracy=False, loss_fn='nllloss', debug=False):
+#     ''' Run an epoch over a DataLoader, and optionally perform greedy sampling
+#     to check accuracy.
+
+#     Args:
+#       if loss_fn == 'cosine_distance', model must return probabilities (after sigmoid activation)
+#       if loss_fn == 'cross_entropy', model must return unnormalized logits (ie final output comes from Linear layer)
+#       if loss_fn == 'nllloss', model must return logprobs, ie `F.log_softmax(..., dim=-1)`
+#     '''
+#     assert mode in ['eval', 'train'], "mode must be either 'eval' or 'train'"
+#     assert loss_fn in ['cosine_distance', 'nllloss', 'cross_entropy'], "loss_fn must be 'cosine_distance', 'nllloss', or 'cross_entropy'"
+
+#     if mode == 'train':
+#         model.train()
+#     else:
+#         model.eval()
+
+#     epoch_loss = 0
+
+#     if check_accuracy:
+#         n_correct = 0
+#         n = 0
+#         outputs = []
+
+#     with torch.set_grad_enabled(mode == 'train'):
+#         for i, (src_ids, trg_ids, acc_mask) in enumerate(dl):
+#             src_ids = src_ids.to(device)  # [batch, seq, vec_size]
+#             trg_ids = trg_ids.to(device)
+#             output = model(src_ids)  # [batch, seq, vec_size]
+
+#             if loss_fn == 'cosine_distance':
+#                 # trgs = torch.stack([model.embeddings(x) for x in trg_ids], dim=1)
+#                 trgs = model.embeddings(trg_ids)
+#                 sim = torch.cosine_similarity(
+#                     output.flatten(0, 1),
+#                     trgs.flatten(0, 1), dim=1)
+#                 loss = (1-sim).mean()
+
+#             elif loss_fn == 'cross_entropy':
+#                 loss = F.cross_entropy(output.flatten(0, 1),
+#                                        trg_ids.flatten(),
+#                                        reduction='mean')
+
+#             elif loss_fn == 'nllloss':
+#                 # log_probs = F.log_softmax(output, dim=-1)
+#                 loss = F.nll_loss(output.flatten(0, 1),
+#                                   trg_ids.flatten(),
+#                                   reduction='mean')
+
+#             epoch_loss += loss.item()
+
+#             if mode == 'train':
+#                 optimizer.zero_grad()
+#                 loss.backward()
+
+#                 if debug and i==0:
+#                     print(f"Loss: {loss.item()}")
+#                     for name, param in model.named_parameters():
+#                         if param.grad is not None:
+#                             print(f"Layer: {name}, Largest Gradient: {param.grad.abs().max().item()}")
+
+#                 if clip is not None:
+#                     torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
+#                 optimizer.step()
+
+#             if check_accuracy:
+#                 with torch.no_grad():
+#                     if loss_fn == 'cosine_distance':
+#                         # find the embedding closest to the output, consider
+#                         # that the output_id
+#                         output_ids = torch.cosine_similarity(model.embeddings.weight.unsqueeze(0).unsqueeze(0), # [1, 1, VOCAB, EMB_DIM]
+#                                                              output.unsqueeze(2),  # [BATCH, TIME, 1, EMB_DIM]
+#                                                              dim=3).argmax(dim=2)
+#                     else:
+#                         output_ids = output.argmax(dim=2)
+#                     outputs.append((src_ids, trg_ids, acc_mask, output_ids))
+#                     n += trg_ids[acc_mask].numel()  # total count
+#                     n_correct += (output_ids[acc_mask] == trg_ids[acc_mask]).sum()
+
+#     if check_accuracy:
+#         acc = n_correct / n
+#         return epoch_loss / len(dl), acc.item(), outputs
+#     else:
+#         return epoch_loss / len(dl)

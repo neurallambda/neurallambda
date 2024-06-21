@@ -19,3 +19,7 @@ lib/
 
 # Haskell
 dist-newstyle/
+
+# Experiments
+experiment/runs
+mnist_data/

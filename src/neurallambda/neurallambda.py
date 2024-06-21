@@ -20,6 +20,94 @@ import math
 
 
 ##################################################
+# Permutation
+
+def swap(x, swap1, swap2):
+    ''' swap1 and swap2 are softmax vectors (think onehot) of rows of x that will
+    be swapped. '''
+    # Combine swap1 and swap2 into a single matrix
+    P = torch.einsum('bx,by->bxy', swap1, swap2)
+    P = P + P.transpose(1, 2)  # swap both directions
+    # identity matrix to keep non-swapped data
+    Id = torch.diag_embed(torch.ones_like(swap1) - swap1 - swap2)
+    x_swapped = torch.einsum('bij,bjd->bid', P + Id, x)
+    return x_swapped
+
+
+def permute_one(xs, from_prob, to_prob):
+    '''insert the item in a sequence at `from_prob` to `to_prob`.
+
+    CAVEAT: if moving forward, the item will be placed *after* the element at
+    to_prob, and if moving an item backward, it will be placed at the mentioned
+    index, ie, before the thing that's currently at the to-index. This allows
+    to move items from the very start of the list to the very end of the list,
+    and vice versa.
+
+    args:
+      xs: [batch, sequence, embedding dim]
+      from_prob, to_prob: [batch, sequence]
+
+    '''
+    B, S = xs.size(0), xs.size(1)
+
+    fcs2 = torch.cumsum(to_prob, dim=1)
+    fcs1 = ((fcs2 - 1) * -1)
+
+    tcs2 = torch.cumsum(from_prob, dim=1)
+    tcs1 = ((tcs2 - 1) * -1)
+
+    # left block
+    lb = torch.diag_embed(fcs1 * tcs1)
+
+    # mid block
+    mb = (
+        # shift down for case where moving ix backward. If it's actually moving
+        # ix forward, this should become all 0s.
+        F.pad(torch.diag_embed(fcs2 * tcs1), [0, 0, 1, 0], value=0)[:, :-1] +
+
+        # shift I up and to the right for case where moving ix forward. If it's
+        # actually moving ix backward, this should become all 0s.
+        F.pad(torch.diag_embed(F.pad(fcs1, [1, 0], value=0)[:, :S] *
+                               F.pad(tcs2, [1, 0], value=0)[:, :S]), [0, 0, 0, 1])[:, 1:]
+    )
+
+    # value that's moved
+    val = torch.einsum('bs, bt -> bst', to_prob, from_prob)
+
+    # right block
+    rb = torch.diag_embed(F.pad(tcs2, [1, 0], value=0)[:, :S] *
+                          F.pad(fcs2, [1, 0], value=0)[:, :S])
+    perm = (lb + mb + val + rb)
+
+    return torch.einsum('bst, btd -> bsd', perm, xs)
+
+
+# @@@@@@@@@@
+
+# B = 2
+# S = 10
+# D = 3
+
+# xs = torch.arange(B * S, dtype=torch.float).reshape(B, S).unsqueeze(2).repeat(1, 1, D)
+
+# from_prob = torch.zeros((B, S)).float()
+# from_prob[:, 8] = 0.1
+# from_prob[:, 9] = 0.9
+
+# to_prob = torch.zeros((B, S)).float()
+# to_prob[:, 1] = 0.1
+# to_prob[:, 2] = 0.9
+
+
+# print()
+# print('permute one')
+# ys = permute_one(xs, from_prob, to_prob)
+# print(ys)
+
+# @@@@@@@@@@
+
+
+##################################################
 # Misc
 
 def address_similarity(address, addresses):
@@ -106,7 +194,7 @@ def kv_insert(state_k, state_v, k, x, eps=1e-8):
 ##########
 
 tag_names = [
-    'NULL',
+    'UNRECOGNIZED',
 
     # Lambda
     'App',
@@ -121,6 +209,7 @@ tag_names = [
     'ArithOp',
     'TrueLit',
     'FalseLit',
+    'NullLit',
 
     # Not Lambda, Not Base
     'Cons',
@@ -131,7 +220,7 @@ tag_names = [
 
 ]
 
-literal_tags = {'IntLit', 'TrueLit', 'FalseLit', 'ArithOp', 'DefnName'}
+literal_tags = {'IntLit', 'TrueLit', 'FalseLit', 'NullLit', 'ArithOp', 'DefnName'}
 nullary_tags = {'Empty'}
 unary_tags   = {'Var', 'ArithOp', 'Car', 'Cdr'}
 binary_tags  = {'App', 'Fn', 'Defn', 'Cons'}
@@ -144,14 +233,16 @@ binary_tags  = {'App', 'Fn', 'Defn', 'Cons'}
 ##########
 # Builders
 
-def build_empty_neurallambda(batch_size, n_addresses, vec_size, zero_vec_bias, device):
-    addresses = torch.randn((batch_size, n_addresses, vec_size)).to(device)
+def build_empty_neurallambda(batch_size, n_addresses, vec_size, zero_vec_bias, device, addresses=None):
+    if addresses is None:
+        addresses = torch.randn((batch_size, n_addresses, vec_size)).to(device)
     tags  = torch.zeros((batch_size, n_addresses, vec_size), device=device) + zero_vec_bias
     col1 = torch.zeros((batch_size, n_addresses, vec_size), device=device) + zero_vec_bias
     col2 = torch.zeros((batch_size, n_addresses, vec_size), device=device) + zero_vec_bias
     return Neurallambda(addresses, tags, col1, col2, zero_vec_bias, device)
 
-def build_neurallambdas(mem: Dict[M.Address, Any], batch_size, n_addresses, vec_size, zero_vec_bias, device):
+
+def build_neurallambdas(mem: Dict[M.Address, Any], batch_size, n_addresses, vec_size, zero_vec_bias, device, addresses=None):
     '''Given dictionary of memory `mem`, build a Neurallambda
 
     Args:
@@ -168,7 +259,7 @@ def build_neurallambdas(mem: Dict[M.Address, Any], batch_size, n_addresses, vec_
         zeros, cos_sim with it is undefined.
 
     '''
-    nl = build_empty_neurallambda(batch_size, n_addresses, vec_size, zero_vec_bias, device)
+    nl = build_empty_neurallambda(batch_size, n_addresses, vec_size, zero_vec_bias, device, addresses)
     blocks = sorted(mem.items(), key=lambda item: item[0].i)
     for addr, block in blocks:
         nl.tags[:, addr.i] = nl.tag_to_vec[block[0]]
@@ -199,6 +290,7 @@ def build_neurallambdas(mem: Dict[M.Address, Any], batch_size, n_addresses, vec_
             nl.col1[:, addr.i] = nl.project_int(arithop_to_int[val])
 
     return nl
+
 
 def string_to_neurallambda(s: str, batch_size, n_addresses, vec_size, zero_vec_bias, device):
     ''' This is probably mostly for demonstration and testing purposes. '''
@@ -286,7 +378,7 @@ class Neurallambda:
 
         # a dense vector embedding for each tag
         self.tag_to_vec = {
-            tag: torch.randn((self.vec_size,)).to(self.device) if tag != 'NULL' else self.zero_vec
+            tag: torch.randn((self.vec_size,)).to(self.device) if tag != 'UNRECOGNIZED' else self.zero_vec
             for tag in tag_names
         }
 
@@ -294,6 +386,8 @@ class Neurallambda:
         self.app_tag_vec  = self.tag_to_vec['App']
         self.fn_tag_vec   = self.tag_to_vec['Fn']
         self.defn_tag_vec = self.tag_to_vec['Defn']
+        self.cons_tag_vec = self.tag_to_vec['Cons']
+
 
         # Base types
         self.base_types_vecs = torch.stack([
@@ -303,6 +397,7 @@ class Neurallambda:
             self.tag_to_vec['ArithOp'],
             self.tag_to_vec['TrueLit'],
             self.tag_to_vec['FalseLit'],
+            self.tag_to_vec['NullLit'],
         ])
 
     ##########
@@ -386,11 +481,11 @@ def read_col(nl, tag, vec, addresses):
     elif tag == 'Empty':
         return zero_vec
 
-    # NULL
+    # UNRECOGNIZED
     z = nl.zero_vec if nl.zero_vec.ndim == 1 else nl.zero_vec[0] # single batch
     c = cosine_similarity(vec, z, dim=0)
     if c  > 0.5:
-        return ('NULL', )
+        return ('UNRECOGNIZED', )
 
     # Address
     return M.Address(nl.vec_to_address(vec, addresses))
@@ -407,7 +502,7 @@ def neurallambda_to_mem(nl, addresses, tags, col1, col2, n_ixs) -> Dict[M.Addres
             ai = M.Address(i)
             t = nl.vec_to_tag(tags[i])
 
-            if t == 'NULL':
+            if t == 'UNRECOGNIZED':
                 recon_mem[ai] = (t,)
                 continue
 

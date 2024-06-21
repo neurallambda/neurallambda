@@ -142,7 +142,7 @@ def pop_or_null_op(ss: StackState,
 ####################
 #
 
-def initialize(vec_size, n_stack, batch_size, device, dtype=torch.float32):
+def initialize(vec_size, n_stack, batch_size, device, dtype=torch.float32) -> StackState:
     '''Initialize the stack for a particular run. '''
 
     # TODO: this zero_offset is likely introducing strong noise when

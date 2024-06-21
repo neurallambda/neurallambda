@@ -3,6 +3,7 @@
 Genetic Algorithm for Pytorch Models
 
 TODO:
+* Move this to `./experiments`
 * mutation rate is agressive, randn-per-affected param
 * similarity should only account for named params
 
@@ -270,7 +271,8 @@ def mse_similarity(model1: nn.Module, model2: nn.Module) -> float:
 
     return torch.sqrt(distance).item()
 
-similarity = cosine_distance_similarity
+# similarity = cosine_distance_similarity
+similarity = mse_similarity
 
 class UnionFind:
     def __init__(self, size: int):
@@ -493,6 +495,21 @@ def evolve_population(population: List[Tuple[nn.Module, float]],
     return new_population, niche_indices, dists
 
 
+def apply_adam_optimizer(model, train_loader, device, learning_rate, n_batches):
+    model.train()
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+
+    for i, (data, target) in enumerate(train_loader):
+        if i >= n_batches:
+            break
+        data, target = data.to(device), target.to(device)
+        optimizer.zero_grad()
+        output = model(data)
+        loss = criterion(output, target)
+        loss.backward()
+        optimizer.step()
+
 ##################################################
 # MNIST
 
@@ -508,13 +525,13 @@ class FFNN(nn.Module):
     def __init__(self):
         super(FFNN, self).__init__()
         self.fc1 = nn.Linear(28 * 28, 64)
-        # self.fc2 = nn.Linear(64, 64)
+        self.fc2 = nn.Linear(64, 64)
         self.fc3 = nn.Linear(64, 10)
 
     def forward(self, x):
         x = x.view(x.size(0), -1)
         y = self.fc1(x).relu()
-        # y = self.fc2(y).relu()
+        y = self.fc2(y).relu()
         y = self.fc3(y)
         return y
 
@@ -545,21 +562,23 @@ def visualize_data(loader, num_images=6):
 
 
 # Genetic Algorithm parameters
-population_size = 100
+population_size = 40
 generations = 100
 mutation_rate = 0.01
-MUTATION_AMOUNT = 0.1  # multiplies randn
+MUTATION_AMOUNT = 1.0  # multiplies randn
 mutation_rate_max = 0.1
 mutation_rate_min = 0.001
 crossover_rate = 0.7
 param_names = ["fc1.weight", "fc1.bias",
-               # "fc2.weight", "fc2.bias",
+               "fc2.weight", "fc2.bias",
                "fc3.weight", "fc3.bias"]
 k_points = 2
 retain_top_k = 3
-sigma_share = 0.5
+sigma_share = 140
+top_sigma = 200
+delta_sigma = 0.1
 
-N_BATCHES = 4  # don't train on entire DataLoader, just n_batches per eval
+N_BATCHES = 2  # don't train on entire DataLoader, just n_batches per eval
 
 # Initialize population
 population = []
@@ -578,10 +597,10 @@ accs = []
 num_niches = []
 
 # START_BLOCK_1
-with torch.no_grad():
-    for gen in tqdm(range(generations)):
-        print(f"Generation {gen+1}")
+for gen in tqdm(range(generations)):
+    print(f"Generation {gen+1}")
 
+    with torch.no_grad():
         population = evaluate_population_fitness(population, trainloader, N_BATCHES, DEVICE)
 
         best_model, best_fitness = max(population, key=lambda x: x[1])
@@ -600,11 +619,18 @@ with torch.no_grad():
         ni = len(set(niche_indices))
         num_niches.append(ni)
         if ni < 6:
-            sigma_share -= (1 - sigma_share) * 0.02
+            sigma_share -= (top_sigma - sigma_share) * delta_sigma
         elif ni > population_size/4:
-            sigma_share += (1 - sigma_share) * 0.02
+            sigma_share += (top_sigma - sigma_share) * delta_sigma
 
         print(f'mean dist: {dists.mean():>.2f}, std dist: {dists.std():>.2f}, ni: {ni}, sigma: {sigma_share:>.3f}, mutation_rate:{mutation_rate:>.3f}')
+
+    # Backpropogation2
+    if gen % 10 == 0:
+        for i, (model,_) in enumerate(sorted(population, key=lambda x: x[1], reverse=True)):
+            if i > 5:
+                break
+            apply_adam_optimizer(model, trainloader, DEVICE, learning_rate=0.001, n_batches=10)
 
 population = evaluate_population_fitness(population, trainloader, N_BATCHES, DEVICE)
 best_model, best_fitness = max(population, key=lambda x: x[1])
