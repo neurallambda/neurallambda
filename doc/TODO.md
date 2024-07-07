@@ -22,6 +22,7 @@ SOCIAL DEMOS
 - [ ] ESOCIAL: Move current README to a neurallambda-specific writeup
 - [ ] ESOCIAL: Tighten up current README
 
+
 QUEUE
 - [ ] E004: Sorting using queues
 

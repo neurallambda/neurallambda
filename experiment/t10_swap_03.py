@@ -22,9 +22,15 @@ TODO: [ ] simpler problem (like find sorted prefix)
 TODO: [ ] sprinkle dropout throughout
 TODO: [ ] optimize for loop in Hrrformer
 
-'''
 
-CURRENTLY USING ALIBI AND SINUSOID (but not on v) Also alibi isn't different on different heads
+CURRENTLY USING ALIBI together with SINUSOID (but not on v) Also alibi isn't different on different heads
+
+TODO: refactor/cleanup?
+TODO: fix alibi
+TODO: fix RoPE
+TODO: concat position encodings, instead of adding?
+
+'''
 
 
 import os
@@ -39,6 +45,7 @@ import math
 import warnings
 
 import neurallambda.model.transformer01 as Transformer2D
+import neurallambda.model.transformer_binding_attention as TransformerBind
 import neurallambda.model.transformer3d as Transformer
 import neurallambda.lab.common as Common
 import neurallambda.lab.datasets as Data
@@ -311,7 +318,6 @@ class MultiHeadAttention3D(nn.Module):
                 # attention_weights = torch.einsum('bhqkl -> bhlqk', attention_weights)  # 0.918
                 # attention_weights = torch.einsum('bhqkl -> bhlkq', attention_weights)  # 0.963
 
-
             case 'sigmoid':
                 attention_weights = scores.sigmoid()
             case 'tanh':
@@ -368,22 +374,27 @@ class DecoderLayer3D(nn.Module):
 def bind(x, y):
     return ifft(fft(x) * fft(y)).real
 
+
 def approx_transpose(x):
     ''' actual transpose is numerically unstable '''
     x = torch.flip(x, dims=[-1])
     return torch.roll(x, 1, dims=-1)
 
+
 def unbind(x, y):
     ''' y gets inverted '''
     return bind(x, approx_transpose(y))
+
 
 def hrr_project(x):
     f = fft(x).abs()
     p = ifft(fft(x) / f).real()
     return torch.nan_to_num(p)
 
+
 def up(x):
     return torch.roll(x, shifts=(1,), dims=(-1,))
+
 
 def down(x):
     return torch.roll(x, shifts=(-1,), dims=(-1,))
@@ -416,6 +427,7 @@ def down(x):
 
 # BRK
 # # @@@@@@@@@@
+
 
 class HRRAttention(nn.Module):
     def __init__(self, emb_dim, num_heads, use_wq=True, use_wk=True, use_wv=True, use_wout=True):
@@ -525,8 +537,7 @@ val_lang = lang
 
 MIN_LENGTH = 3
 TRAIN_MAX_SEQUENCE_LENGTH = 10
-VAL_MAX_SEQUENCE_LENGTH = 20
-
+VAL_MAX_SEQUENCE_LENGTH = 10
 
 
 # # @@@@@@@@@@
@@ -640,7 +651,328 @@ def permute_one(xs, from_prob, to_prob):
 
 
 ##################################################
+# LSTM
 
+class LSTMModel(nn.Module):
+    def __init__(self, tokenizer, emb_dim, hidden_dim, num_layers, dropout=0.1):
+        super(LSTMModel, self).__init__()
+        self.tokenizer = tokenizer
+        self.vocab_size = tokenizer.get_vocab_size()
+        self.emb_dim = emb_dim
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+
+        self.embeddings = nn.Embedding(self.vocab_size, emb_dim)
+        self.lstm = nn.LSTM(emb_dim, hidden_dim, num_layers, batch_first=True, dropout=dropout)
+        self.dropout = nn.Dropout(dropout)
+
+        if LOSS_FN in {'cross_entropy', 'cross_entropy_select_from_inputs'}:
+            self.fc_out = nn.Linear(hidden_dim, self.vocab_size)
+        elif LOSS_FN == 'cosine_distance':
+            self.fc_out = nn.Linear(hidden_dim, emb_dim)
+
+    def forward(self, xs_ids):
+        B, S = xs_ids.shape
+        device = xs_ids.device
+
+        xs = self.embeddings(xs_ids) * math.sqrt(self.emb_dim)
+        xs = self.dropout(xs)
+
+        lstm_out, _ = self.lstm(xs)
+        lstm_out = self.dropout(lstm_out)
+
+        if LOSS_FN == 'cosine_distance':
+            output = self.fc_out(lstm_out)
+            assert output.size(0) == xs_ids.size(0)
+            assert output.size(1) == xs_ids.size(1)
+            return output
+        elif LOSS_FN == 'cross_entropy':
+            logits = self.fc_out(lstm_out)
+            assert logits.size(0) == xs_ids.size(0)
+            assert logits.size(1) == xs_ids.size(1)
+            assert logits.size(2) == self.vocab_size
+            return logits
+
+
+##########
+
+
+class FullLSTM(nn.Module):
+    ''' Transductive LLM, records and stacks each output, so, same sequence length as input. '''
+    def __init__(self, input_size, hidden_size, dropout):
+        super(FullLSTM, self).__init__()
+        self.lstm_cell = nn.LSTMCell(input_size, hidden_size)
+        self.dropout = nn.Dropout(dropout)
+        self.layer_norm = nn.LayerNorm(hidden_size)
+
+    def forward(self, x):
+        batch_size, seq_len, _ = x.size()
+        h, c = torch.zeros(batch_size, self.lstm_cell.hidden_size).to(x.device), torch.zeros(batch_size, self.lstm_cell.hidden_size).to(x.device)
+        outputs = []
+
+        for t in range(seq_len):
+            h, c = self.lstm_cell(x[:, t, :], (h, c))
+            outputs.append(h)
+
+        output = torch.stack(outputs, dim=1)
+        # output = self.layer_norm(output)
+        return output
+
+
+class LSTMModel(nn.Module):
+    def __init__(self, tokenizer, emb_dim, hidden_dim, num_layers, num_heads=8, dropout=0.1):
+        super(LSTMModel, self).__init__()
+        self.tokenizer = tokenizer
+        self.vocab_size = tokenizer.get_vocab_size()
+        self.emb_dim = emb_dim
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.num_heads = num_heads
+
+        self.embeddings = nn.Embedding(self.vocab_size, emb_dim)
+
+        self.max_symbols = 100
+        self.symbol_embeddings = torch.randn(self.max_symbols, emb_dim)
+
+
+        ##########
+
+        # Transformer
+        self.initial_decoder = Transformer2D.DecoderLayer(emb_dim, num_heads, hidden_dim, dropout)
+        self.final_decoder = Transformer2D.DecoderLayer(emb_dim, num_heads, hidden_dim, dropout)
+
+        # # MultiheadAttention
+        # self.initial_decoder = Transformer2D.MultiHeadAttention(emb_dim, num_heads, use_wq=True, use_wk=True, use_wv=True, use_wout=True)
+        # self.final_decoder = Transformer2D.MultiHeadAttention(emb_dim, num_heads, use_wq=True, use_wk=True, use_wv=True, use_wout=True)
+
+        self.lstm_layers = nn.ModuleList([
+            nn.ModuleList([FullLSTM(emb_dim, emb_dim, dropout), nn.LayerNorm(emb_dim)])
+            for i in range(num_layers)
+        ])
+
+
+        self.fc_out = nn.Linear(emb_dim, self.vocab_size)
+        self.dropout = nn.Dropout(dropout)
+        self.layer_norm = nn.LayerNorm(emb_dim)
+
+    def forward(self, xs_ids, mask=None):
+        B, S = xs_ids.shape
+        device = xs_ids.device
+        self.symbol_embeddings = self.symbol_embeddings.to(device)
+
+        v = self.symbol_embeddings[:S].unsqueeze(0).expand(B, -1, -1)
+
+        # Embedding
+        xs = self.embeddings(xs_ids) * math.sqrt(self.emb_dim)
+        xs = self.dropout(xs)
+
+        # Generate ALiBi bias
+        m = alibi_slope(self.num_heads, device)
+        alibi_bias = (m * relative_positions(S, device)).unsqueeze(0).expand(B, -1, -1, -1)  # [B, NUM_HEAD, S, S]
+
+        # Initial Decoder layer
+        xs = self.initial_decoder(xs, xs, v, mask=mask, attn_nonlin='softmax', alibi_bias=alibi_bias)
+
+        # LSTM layers processing full sequences
+        for lstm_layer, norm in self.lstm_layers:
+            # xs = lstm_layer(xs) + xs  # add residual
+            xs = lstm_layer(xs)
+            xs = norm(xs)
+
+        # Final Decoder layer
+        xs = self.final_decoder(xs, xs, xs, mask=mask, attn_nonlin='softmax', alibi_bias=alibi_bias)
+
+        # Final output
+        logits = self.fc_out(xs)
+
+        assert logits.size(0) == xs_ids.size(0)
+        assert logits.size(1) == xs_ids.size(1)
+        assert logits.size(2) == self.vocab_size
+
+        return logits
+
+
+
+##################################################
+
+
+class LSTMSwapModel(nn.Module):
+    '''
+
+    uses a differentiable `permute_one` function to swap
+    `permute_one` takes 2 args referring to swap locations, each of which is calculated by a separate Net
+
+    '''
+    def __init__(self, tokenizer, emb_dim, hidden_dim, num_layers, num_heads=8, dropout=0.1):
+        super(LSTMSwapModel, self).__init__()
+        self.tokenizer = tokenizer
+        self.vocab_size = tokenizer.get_vocab_size()
+        self.emb_dim = emb_dim
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.num_heads = num_heads
+
+        self.embeddings = nn.Embedding(self.vocab_size, emb_dim)
+
+        self.max_symbols = 100
+        self.symbol_embeddings = torch.randn(self.max_symbols, emb_dim)
+
+        ##########
+
+        # Net 1
+        self.trans_i1 = Transformer2D.DecoderLayer(emb_dim, num_heads, hidden_dim, dropout)
+        self.lstm1 = nn.ModuleList([nn.ModuleList([FullLSTM(emb_dim, emb_dim, dropout), nn.LayerNorm(emb_dim)]) for i in range(num_layers)])
+        self.trans_o1 = Transformer2D.DecoderLayer(emb_dim, num_heads, hidden_dim, dropout)
+        self.o1 = nn.Linear(emb_dim, 1)
+
+        # Net 2
+        self.trans_i2 = Transformer2D.DecoderLayer(emb_dim, num_heads, hidden_dim, dropout)
+        self.lstm2 = nn.ModuleList([nn.ModuleList([FullLSTM(emb_dim, emb_dim, dropout), nn.LayerNorm(emb_dim)]) for i in range(num_layers)])
+        self.trans_o2 = Transformer2D.DecoderLayer(emb_dim, num_heads, hidden_dim, dropout)
+        self.o2 = nn.Linear(emb_dim, 1)
+
+        self.out = nn.Linear(emb_dim, self.vocab_size)
+
+    def forward(self, xs_ids, mask=None):
+        B, S = xs_ids.shape
+        device = xs_ids.device
+        self.symbol_embeddings = self.symbol_embeddings.to(device)
+        v = self.symbol_embeddings[:S].unsqueeze(0).expand(B, -1, -1)
+
+        # Generate ALiBi bias
+        m = alibi_slope(self.num_heads, device)
+        alibi_bias = (m * relative_positions(S, device)).unsqueeze(0).expand(B, -1, -1, -1)  # [B, NUM_HEAD, S, S]
+
+        # Embedding
+        xs = self.embeddings(xs_ids) * math.sqrt(self.emb_dim)
+
+        # Net 1
+        n1 = self.trans_i1(xs, xs, xs, mask=mask, attn_nonlin='softmax', alibi_bias=alibi_bias)
+        for layer, norm in self.lstm1:
+            # n1 = layer(n1) + n1  # add residual
+            n1 = layer(n1)
+            n1 = norm(n1)
+        n1 = self.trans_o1(n1, n1, n1, mask=mask, attn_nonlin='softmax', alibi_bias=alibi_bias)
+        n1 = self.o1(n1)
+
+        # Net 2
+        n2 = self.trans_i1(xs, xs, xs, mask=mask, attn_nonlin='softmax', alibi_bias=alibi_bias)
+        for layer, norm in self.lstm2:
+            # n2 = layer(n2) + n2  # add residual
+            n2 = layer(n2)
+            n2 = norm(n2)
+        n2 = self.trans_o2(n2, n2, n2, mask=mask, attn_nonlin='softmax', alibi_bias=alibi_bias)
+        n2 = self.o2(n2)
+
+        # swap1 = torch.softmax(n1, dim=1)  # [B, S]
+        # swap2 = torch.softmax(n2, dim=1)
+
+        # swap1 = F.gumbel_softmax(n1, dim=1, hard=False)
+        # swap2 = F.gumbel_softmax(n2, dim=1, hard=False)
+
+        swap1 = F.gumbel_softmax(n1, dim=1, hard=True)
+        swap2 = F.gumbel_softmax(n2, dim=1, hard=True)
+
+        ys = permute_one(xs, swap1.squeeze(2), swap2.squeeze(2))
+        logits = self.out(ys)
+
+        assert logits.size(0) == xs_ids.size(0)
+        assert logits.size(1) == xs_ids.size(1)
+        assert logits.size(2) == self.vocab_size
+
+        return logits
+
+
+##################################################
+
+
+class BindTransformer(nn.Module):
+    '''
+
+    Use 'Binding Attention'
+
+    '''
+    def __init__(self, tokenizer, emb_dim, hidden_dim, num_layers, num_heads=8, dropout=0.1):
+        super(BindTransformer, self).__init__()
+        self.tokenizer = tokenizer
+        self.vocab_size = tokenizer.get_vocab_size()
+        self.emb_dim = emb_dim
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.num_heads = num_heads
+
+        self.embeddings = nn.Embedding(self.vocab_size, emb_dim)
+
+        self.max_symbols = 100
+        self.symbol_embeddings = torch.randn(self.max_symbols, emb_dim)
+
+        use_wq = True
+        use_wk = True
+        use_wv = True
+        use_wout = True
+        self.layers = nn.ModuleList([
+            TransformerBind.DecoderLayer(emb_dim, num_heads, dim_feedforward=hidden_dim, dropout=dropout,
+                                         use_wq=use_wq, use_wk=use_wk, use_wv=use_wv, use_wout=use_wout)
+            for _ in range(num_layers)])
+
+        self.out = nn.Linear(emb_dim, self.vocab_size)
+
+    def forward(self, xs_ids, mask=None):
+        B, S = xs_ids.shape
+        device = xs_ids.device
+
+        self.symbol_embeddings = self.symbol_embeddings.to(device)
+        sym = self.symbol_embeddings[:S].unsqueeze(0).expand(B, -1, -1)
+
+        # # Generate ALiBi bias
+        # m = alibi_slope(self.num_heads, device)
+        # alibi_bias = (m * relative_positions(S, device)).unsqueeze(0).expand(B, -1, -1, -1)  # [B, NUM_HEAD, S, S]
+
+        alibi_bias = None  # i don't think BindAttn needs it
+
+        attn = 'softmax'
+
+        # Embedding
+        xs = self.embeddings(xs_ids) * math.sqrt(self.emb_dim)
+
+        # Noise experiment
+        # if model.training:
+        #     xs = xs + torch.randn_like(xs) * 1e-0
+
+        for i in range(self.num_layers):
+            layer = self.layers[i]
+            q = xs
+            k = xs
+            v = xs
+            xs = layer(q, k, v, mask=None, attn_nonlin=attn, alibi_bias=alibi_bias)
+
+        logits = self.out(xs)
+
+        assert logits.size(0) == xs_ids.size(0)
+        assert logits.size(1) == xs_ids.size(1)
+        assert logits.size(2) == self.vocab_size
+
+        return logits
+
+
+##################################################
+
+
+def relative_positions(seq_len: int, device) -> torch.tensor:
+    ''' for ALiBi '''
+    x = torch.arange(seq_len, device=device)[None, :]
+    y = torch.arange(seq_len, device=device)[:, None]
+    return x - y
+
+
+def alibi_slope(num_heads, device):
+    ''' for ALiBi '''
+    x = (2 ** 8) ** (1 / num_heads)
+    return (
+        torch.tensor([1 / x ** (i + 1) for i in range(num_heads)], device=device)
+        .unsqueeze(-1)
+        .unsqueeze(-1)
+    )
 
 class ControlModel(nn.Module):
     def __init__(self, tokenizer, emb_dim, num_heads, num_layers, dim_feedforward, num_recurrence, attn_nonlin, dropout=0.1, model_type='transformer'):
@@ -656,7 +988,9 @@ class ControlModel(nn.Module):
         self.model_type = model_type
         assert model_type in {'transformer',
                               'abstractor_all', 'abstractor_first', 'abstractor_last',
-                              'sorter'}
+                              'sorter',
+                              'lstm', 'lstm_swap',
+                              'bind_transformer'}
 
         self.embeddings = nn.Embedding(self.vocab_size, emb_dim)
         self.pos_encoding = Transformer.positional_encoding(emb_dim, max_len=20)
@@ -756,6 +1090,14 @@ class ControlModel(nn.Module):
             #     # nn.Linear(16, 2)
             # )
 
+        elif model_type == 'lstm':
+            self.lstm_model = LSTMModel(tokenizer, emb_dim, dim_feedforward, num_layers, num_heads, dropout)
+
+        elif model_type == 'lstm_swap':
+            self.lstm_swap_model = LSTMSwapModel(tokenizer, emb_dim, dim_feedforward, num_layers, num_heads, dropout)
+
+        elif model_type == 'bind_transformer':
+            self.bind_transformer_model = BindTransformer(tokenizer, emb_dim, dim_feedforward, num_layers, num_heads, dropout)
 
         if LOSS_FN in {'cross_entropy', 'cross_entropy_select_from_inputs'}:
             self.fc_out = nn.Linear(emb_dim, self.vocab_size, bias=False)
@@ -765,6 +1107,17 @@ class ControlModel(nn.Module):
         self.dropout = nn.Dropout(0.1)
 
     def forward(self, xs_ids):
+
+        if self.model_type == 'lstm':
+            return self.lstm_model(xs_ids)
+
+        if self.model_type == 'lstm_swap':
+            return self.lstm_swap_model(xs_ids)
+
+        if self.model_type == 'bind_transformer':
+            return self.bind_transformer_model(xs_ids)
+
+
         B, S = xs_ids.shape
         device = xs_ids.device
         if self.model_type in {'sorter', 'abstractor_all', 'abstractor_first', 'abstractor_last'}:
@@ -793,8 +1146,19 @@ class ControlModel(nn.Module):
 
         ##########
         # ALIBI
-        m = 0.5
-        alibi_bias = -torch.arange(1, S + 1).unsqueeze(0).to(device) * 0.2
+
+        alibi_bias_2 = -torch.arange(1, S + 1).to(device) * 0.2
+        alibi_bias_2 = alibi_bias_2.unsqueeze(0).unsqueeze(0).unsqueeze(0).expand(B, self.num_heads, S, -1)
+        # alibi_bias_2 = alibi_bias_2.unsqueeze(0).unsqueeze(0).unsqueeze(0).expand(B, self.num_heads, -1, S)
+
+
+        m = alibi_slope(self.num_heads, device)
+        # m = 0.1
+        alibi_bias = (m * relative_positions(S, device)).unsqueeze(0).expand(B, -1, -1, -1)  # [B, NUM_HEAD, S, S]
+
+
+        alibi_bias = alibi_bias + alibi_bias_2
+
 
         for i in range(self.num_recurrence):
 
@@ -874,13 +1238,13 @@ class ControlModel(nn.Module):
                         l = xs
                         v = xs
 
-                    # Sorter Positions
-                    # if j in {0, 1}:
-                    if True: # True:
-                        q = q + pos
-                        k = k + pos
-                        l = l + pos
-                        v = v # + pos
+                    # # Sorter Positions
+                    # # if j in {0, 1}:
+                    # if True: # True:
+                    #     q = q + pos
+                    #     k = k + pos
+                    #     l = l + pos
+                    #     v = v # + pos
 
                 if self.model_type == 'sorter' and j == 0:
                 # if self.model_type == 'sorter' and j == self.num_recurrence - 1:
@@ -893,10 +1257,11 @@ class ControlModel(nn.Module):
                 if isinstance(layer, DecoderLayer3D):
                     xs = layer(q, k, l, v, mask=None, attn_nonlin=attn)
                 else:
-                    xs = layer(q, k, v, mask=None, attn_nonlin=attn, alibi_bias = alibi_bias)
+                    xs = layer(q, k, v, mask=None, attn_nonlin=attn, alibi_bias=alibi_bias)
 
                     # xs2 = layer2(q, k, v, mask=None, attn_nonlin=attn)
 
+            # if False:
             if self.model_type == 'sorter':
                 swap_ixs = self.probs(xs)
 
@@ -979,11 +1344,20 @@ architectures = [
     # {"name": "Transformer",
     #  "init_params": {"model_type": "transformer", "num_heads": 4, "num_layers": 3, "dim_feedforward": 128, 'num_recurrence': 1, 'attn_nonlin': 'softmax'}},
 
-    {"name": "Neurallambda",
-     "init_params": {"model_type": "sorter", "num_heads": 4, "num_layers": 3, "dim_feedforward": 128, 'num_recurrence': 1, 'attn_nonlin': 'softmax'}},
+    # {"name": "Neurallambda",
+    #  "init_params": {"model_type": "sorter", "num_heads": 4, "num_layers": 3, "dim_feedforward": 128, 'num_recurrence': 1, 'attn_nonlin': 'softmax'}},
 
     # {"name": "Abstractor_First",
     #  "init_params": {"model_type": "abstractor_first", "num_heads": 4, "num_layers": 3, "dim_feedforward": 128, 'num_recurrence': 1, 'attn_nonlin': 'softmax'}},
+
+    # {"name": "LSTM",
+    #  "init_params": {"model_type": "lstm", "num_heads": 4, "num_layers": 3, "dim_feedforward": 128, 'num_recurrence': 1, 'attn_nonlin': 'softmax'}},
+
+    # {"name": "LSTMSwap",
+    #  "init_params": {"model_type": "lstm_swap", "num_heads": 4, "num_layers": 3, "dim_feedforward": 128, 'num_recurrence': 1, 'attn_nonlin': 'softmax'}},
+
+    {"name": "BindTransformer",
+     "init_params": {"model_type": "bind_transformer", "num_heads": 4, "num_layers": 3, "dim_feedforward": 128, 'num_recurrence': 1, 'attn_nonlin': 'softmax'}},
 
 ]
 
@@ -1050,7 +1424,7 @@ for train_size in train_sizes:
 i = 0
 for (src_ids, trg_ids, acc_mask) in val_dl:
     src_ids = src_ids.to(DEVICE)  # [batch, seq, vec_size]
-    trg_ids = trg_ids.to( DEVICE)
+    trg_ids = trg_ids.to(DEVICE)
     output = model(src_ids)  # [batch, seq, vec_size]
     if LOSS_FN == 'cosine_distance':
         # find the embedding closest to the output, consider

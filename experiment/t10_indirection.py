@@ -1,14 +1,8 @@
 '''
 
-
+sorting an AST
 
 '''
-
-
-### Neurallambda
-
-repeat t10_swap with comparisons requiring ordered sets
-
 
 import torch
 import torch.nn as nn
@@ -64,18 +58,18 @@ digits = '0 1 2 3 4 5 6 7 8 9'.split(' ')
 PROBLEM = 'sort'
 
 TRAIN_N_DATA = 1000
-TRAIN_MIN_SEQ_LEN = 2
-TRAIN_MAX_SEQ_LEN = 3
+TRAIN_MIN_SEQ_LEN = 4
+TRAIN_MAX_SEQ_LEN = 8
 
 TEST_N_DATA = 200
-TEST_MIN_SEQ_LEN = 2
-TEST_MAX_SEQ_LEN = 5
+TEST_MIN_SEQ_LEN = 8
+TEST_MAX_SEQ_LEN = 12
 
 EMB_DIM = 256
 NUM_HEADS = 4
 DIM_FEEDFORWARD = 64
 NUM_LAYERS = 2  # number of unique sequential transformer layers
-NUM_RECURRENCE = 2  # number of times that same block of transformers is repeated for a single forward pass
+NUM_RECURRENCE = 4  # number of times that same block of transformers is repeated for a single forward pass
 DEVICE = 'cuda'
 LR = 1e-3
 NUM_EPOCHS = 40
@@ -540,6 +534,42 @@ def run_epoch(model, dl, optimizer, mode, device, clip=None,
 ##################################################
 # Baselines
 
+
+def relative_positions(seq_len: int, device) -> torch.tensor:
+    ''' for ALiBi '''
+    x = torch.arange(seq_len, device=device)[None, :]
+    y = torch.arange(seq_len, device=device)[:, None]
+    return x - y
+
+
+def alibi_slope(num_heads, device):
+    ''' for ALiBi '''
+    x = (2 ** 8) ** (1 / num_heads)
+    return (
+        torch.tensor([1 / x ** (i + 1) for i in range(num_heads)], device=device)
+        .unsqueeze(-1)
+        .unsqueeze(-1)
+    )
+
+class FullLSTM(nn.Module):
+    def __init__(self, input_size, hidden_size, dropout):
+        super(FullLSTM, self).__init__()
+        self.lstm_cell = nn.LSTMCell(input_size, hidden_size)
+        self.dropout = nn.Dropout(dropout)
+        self.layer_norm = nn.LayerNorm(hidden_size)
+
+    def forward(self, x):
+        batch_size, seq_len, _ = x.size()
+        h, c = torch.zeros(batch_size, self.lstm_cell.hidden_size).to(x.device), torch.zeros(batch_size, self.lstm_cell.hidden_size).to(x.device)
+        outputs = []
+
+        for t in range(seq_len):
+            h, c = self.lstm_cell(x[:, t, :], (h, c))
+            outputs.append(h)
+
+        output = torch.stack(outputs, dim=1)
+        return self.layer_norm(output)
+
 class ControlModel(nn.Module):
     def __init__(self, tokenizer, emb_dim, num_heads, num_layers, dim_feedforward, num_recurrence, attn_nonlin, dropout=0.1, model_type='transformer'):
         super(ControlModel, self).__init__()
@@ -593,6 +623,11 @@ class ControlModel(nn.Module):
             use_wv = True
             use_wout = True
 
+            self.lstm = nn.Sequential(
+                FullLSTM(input_size=emb_dim, hidden_size=emb_dim, dropout=0.0),
+                # FullLSTM(input_size=emb_dim, hidden_size=emb_dim, dropout=0.0)
+            )
+
             self.layers = nn.ModuleList([
                 Transformer.DecoderLayer(emb_dim, num_heads, dim_feedforward=dim_feedforward, dropout=dropout,
                                          use_wq=use_wq, use_wk=use_wk, use_wv=use_wv, use_wout=use_wout)
@@ -628,6 +663,22 @@ class ControlModel(nn.Module):
         # pos3 = torch.cat([addresses] * 3, dim=1) * 1e-2
         xs = embs
 
+
+        # ALiBi
+
+        # alibi_bias_2 = -torch.arange(1, S + 1).to(device) * 0.2
+        # alibi_bias_2 = alibi_bias_2.unsqueeze(0).unsqueeze(0).unsqueeze(0).expand(B, self.num_heads, S, -1)
+        # # alibi_bias_2 = alibi_bias_2.unsqueeze(0).unsqueeze(0).unsqueeze(0).expand(B, self.num_heads, -1, S)
+
+
+        m = alibi_slope(self.num_heads, device)
+        # m = 0.1
+        alibi_bias = (m * relative_positions(S, device)).unsqueeze(0).expand(B, -1, -1, -1)  # [B, NUM_HEAD, S, S]
+        alibi_bias = alibi_bias.repeat_interleave(3, dim=-2).repeat_interleave(3, dim=-1)
+
+        # alibi_bias = alibi_bias + alibi_bias_2
+
+
         for i in range(self.num_recurrence):
             in_xs = xs  # save for use in sorter
             for j, layer in enumerate(self.layers):
@@ -658,6 +709,11 @@ class ControlModel(nn.Module):
                     else:
                         v = xs
                 elif self.model_type == 'sorter':
+
+                    # do lstm in the middle
+                    if j == 1:
+                        xs = self.lstm(xs)
+
                     q = xs
                     k = xs
                     if j == 0:
@@ -673,10 +729,11 @@ class ControlModel(nn.Module):
                     k = k + pos3
                     v = v + pos3
 
-                xs = layer(q, k, v, mask=None, attn_nonlin=self.attn_nonlin)
+                xs = layer(q, k, v, mask=None, attn_nonlin=self.attn_nonlin, alibi_bias=alibi_bias)
 
 
-            if self.model_type == 'sorter':
+            # if self.model_type == 'sorter':
+            if False:
 
                 swap_ixs = self.swap(xs)
 
