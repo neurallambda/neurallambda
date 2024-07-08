@@ -183,10 +183,12 @@ class Qwen2AttentionWithLogging(nn.Module):
             kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
 
-        # # # RoPE (normal location, pre cache)
+        # # $$$$$$$$$$
+        # # RoPE (normal location, pre cache)
         # # query_states, key_states = Q.apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
         # query_states = apply_rotary_pos_emb(query_states, cos, sin, position_ids)
         # key_states  = apply_rotary_pos_emb(key_states, cos, sin, position_ids)
+        # # $$$$$$$$$$
 
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
@@ -200,6 +202,7 @@ class Qwen2AttentionWithLogging(nn.Module):
         log_k = key_states.transpose(1, 2).view(bsz, q_len, self.num_key_value_heads * self.head_dim)
         self.log_q_k(attention_mask, hidden_states, log_q, log_k)
 
+        # $$$$$$$$$$
         # RoPE (post cache)
         #
         # in order to rotate post cache, we need longer position ids. we're not
@@ -212,6 +215,8 @@ class Qwen2AttentionWithLogging(nn.Module):
             key_position_ids = position_ids
         query_states = apply_rotary_pos_emb(query_states, cos, sin, position_ids)
         key_states  = apply_rotary_pos_emb(key_states, cos, sin, key_position_ids)
+        # $$$$$$$$$$
+
 
         # repeat k/v heads if n_kv_heads < n_heads
         key_states   = Q.repeat_kv(key_states, self.num_key_value_groups)

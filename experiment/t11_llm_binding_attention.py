@@ -47,6 +47,7 @@ pre and post kv_cache shape of keys during inference:
 
 '''
 
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -81,8 +82,6 @@ random.seed(SEED)
 
 DEVICE = 'cuda'
 BATCH_SIZE = 32
-
-USE_VANILLA_TRANSFORMER = False
 
 TRAIN_LSTMS = False
 USE_TRAINED_LSTM = True
@@ -171,130 +170,6 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
 ##################################################
 #
 
-# class FullLSTMQK(nn.Module):
-#     '''Transductive LLM, records and stacks each output, so, same sequence length as input.
-
-#     This QK variant is intended to match the input-output pattern of
-#     hidden_state -> QK in grouped query attention. '''
-#     def __init__(self, input_dim, num_q_heads, num_k_heads, dropout_p):
-#         super(FullLSTMQK, self).__init__()
-#         self.input_dim = input_dim
-#         self.num_q_heads = num_q_heads
-#         self.num_k_heads = num_k_heads
-#         self.dropout_p = dropout_p
-
-#         # inputs-hidden_states: torch.Tensor,  # [B, S, D]
-#         # query_states: torch.Tensor,  # [B, NUM_HEADS, S, D // NUM_HEADS]
-#         # key_states: torch.Tensor,  # [B, NUM_KV_HEADS, S, D // NUM_HEADS] (Group Query Attention)
-
-#         # self.norm = nn.LayerNorm(input_dim)
-#         # in_h = 64
-#         # self.in_h = nn.Linear(input_dim, input_dim)
-#         # self.in_h = nn.Sequential(nn.Linear(input_dim, in_h), nn.ReLU(), nn.Linear(in_h, input_dim))
-
-#         # One Cell
-#         self.lstm_q = nn.LSTMCell(input_dim, input_dim)
-#         self.lstm_k = nn.LSTMCell(input_dim, input_dim)
-
-#         # # Two Cell
-#         # self.lstm_q1 = nn.LSTMCell(input_dim, input_dim)
-#         # self.lstm_q2 = nn.LSTMCell(input_dim, input_dim)
-#         # self.lstm_k1 = nn.LSTMCell(input_dim, input_dim)
-#         # self.lstm_k2 = nn.LSTMCell(input_dim, input_dim)
-
-#         # # Linear
-#         # self.out_q = nn.Linear(input_dim, input_dim)
-#         # self.out_k = nn.Linear(input_dim, input_dim // num_q_heads * num_k_heads)
-
-#         # More Complex
-#         out_h = 64
-#         self.out_q = nn.Sequential(nn.Linear(input_dim, out_h), nn.ReLU(), nn.Linear(out_h, input_dim))
-#         self.out_k = nn.Sequential(nn.Linear(input_dim, out_h), nn.ReLU(), nn.Linear(out_h, input_dim // num_q_heads * num_k_heads))
-
-#         self.dropout = nn.Dropout(dropout_p)
-
-
-#     def forward(self, x, backpack):
-#         B, S, _ = x.size()
-#         dtype = x.dtype
-
-#         # (Pdb) backpack['hq'].shape
-#         # torch.Size([1, 1536])
-
-#         # Assertions
-#         backpack_is_occupied = backpack['hq'] is not None
-#         if backpack_is_occupied:
-#             assert (
-#                 backpack['hq'] is not None and
-#                 backpack['cq'] is not None and
-#                 backpack['hk'] is not None and
-#                 backpack['ck'] is not None
-#             )
-#         else:
-#             assert (
-#                 backpack['hq'] is None and
-#                 backpack['cq'] is None and
-#                 backpack['hk'] is None and
-#                 backpack['ck'] is None
-#             )
-
-#         # Init Hidden State
-#         if backpack_is_occupied:
-#             hq = backpack['hq']
-#             cq = backpack['cq']
-#             hk = backpack['hk']
-#             ck = backpack['ck']
-#         else:
-#             hq = torch.zeros(B, self.input_dim, dtype=dtype).to(x.device)
-#             cq = torch.zeros(B, self.input_dim, dtype=dtype).to(x.device)
-#             hk = torch.zeros(B, self.input_dim, dtype=dtype).to(x.device)
-#             ck = torch.zeros(B, self.input_dim, dtype=dtype).to(x.device)
-
-#         # Run LSTM
-#         out_q = []
-#         out_k = []
-
-#         # x = self.norm(x)
-#         # x = self.in_h(x)
-#         for t in range(S):
-
-#             # ONE CELL
-#             # Q
-#             hq, cq = self.lstm_q(x[:, t, :], (hq, cq))
-#             out_q.append(hq)
-
-#             # K
-#             hk, ck = self.lstm_k(x[:, t, :], (hk, ck))
-#             out_k.append(hk)
-
-#             # # TWO CELL
-#             # # Q
-#             # hq, cq = self.lstm_q1(x[:, t, :], (hq, cq))
-#             # hq, cq = self.lstm_q2(x[:, t, :], (hq, cq))
-#             # out_q.append(hq)
-
-#             # # K
-#             # hk, ck = self.lstm_k1(x[:, t, :], (hk, ck))
-#             # hk, ck = self.lstm_k2(x[:, t, :], (hk, ck))
-#             # out_k.append(hk)
-
-
-#         out_q = self.out_q(torch.stack(out_q, dim=1))
-#         out_k = self.out_k(torch.stack(out_k, dim=1))
-#         backpack = {
-#                 'hq': hq,
-#                 'cq': cq,
-#                 'hk': hk,
-#                 'ck': ck,
-#             }
-#         return (
-#             out_q.view(B, self.num_q_heads, S, self.input_dim // self.num_q_heads),
-#             out_k.view(B, self.num_k_heads, S, self.input_dim // self.num_q_heads),  # //nq looks weird but is right
-#             backpack
-#         )
-
-
-
 class FullLSTMQK(nn.Module):
     '''Transductive LLM, records and stacks each output, so, same sequence length as input.
 
@@ -307,8 +182,33 @@ class FullLSTMQK(nn.Module):
         self.k_dim = k_dim
         self.dropout_p = dropout_p
 
-        self.out_q = nn.Linear(input_dim, q_dim, bias=True)
-        self.out_k = nn.Linear(input_dim, k_dim, bias=True)
+        # inputs-hidden_states: torch.Tensor,  # [B, S, D]
+        # query_states: torch.Tensor,  # [B, NUM_HEADS, S, D // NUM_HEADS]
+        # key_states: torch.Tensor,  # [B, NUM_KV_HEADS, S, D // NUM_HEADS] (Group Query Attention)
+
+        # self.norm = nn.LayerNorm(input_dim)
+        # in_h = 64
+        # self.in_h = nn.Linear(input_dim, input_dim)
+        # self.in_h = nn.Sequential(nn.Linear(input_dim, in_h), nn.ReLU(), nn.Linear(in_h, input_dim))
+
+        # One Cell
+        self.lstm_q = nn.LSTMCell(input_dim, input_dim)
+        self.lstm_k = nn.LSTMCell(input_dim, input_dim)
+
+        # # Two Cell
+        # self.lstm_q1 = nn.LSTMCell(input_dim, input_dim)
+        # self.lstm_q2 = nn.LSTMCell(input_dim, input_dim)
+        # self.lstm_k1 = nn.LSTMCell(input_dim, input_dim)
+        # self.lstm_k2 = nn.LSTMCell(input_dim, input_dim)
+
+        # # Linear
+        # self.out_q = nn.Linear(input_dim, input_dim)
+        # self.out_k = nn.Linear(input_dim, input_dim // num_q_heads * num_k_heads)
+
+        # More Complex
+        out_h = 64
+        self.out_q = nn.Sequential(nn.Linear(input_dim, out_h), nn.ReLU(), nn.Linear(out_h, q_dim))
+        self.out_k = nn.Sequential(nn.Linear(input_dim, out_h), nn.ReLU(), nn.Linear(out_h, k_dim))
 
         self.dropout = nn.Dropout(dropout_p)
 
@@ -320,31 +220,107 @@ class FullLSTMQK(nn.Module):
         # (Pdb) backpack['hq'].shape
         # torch.Size([1, 1536])
 
-        # # Assertions
-        # backpack_is_occupied = backpack['hq'] is not None
-        # if backpack_is_occupied:
-        #     assert (
-        #         backpack['hq'] is not None and
-        #         backpack['cq'] is not None and
-        #         backpack['hk'] is not None and
-        #         backpack['ck'] is not None
-        #     )
-        # else:
-        #     assert (
-        #         backpack['hq'] is None and
-        #         backpack['cq'] is None and
-        #         backpack['hk'] is None and
-        #         backpack['ck'] is None
-        #     )
+        # Assertions
+        backpack_is_occupied = backpack['hq'] is not None
+        if backpack_is_occupied:
+            assert (
+                backpack['hq'] is not None and
+                backpack['cq'] is not None and
+                backpack['hk'] is not None and
+                backpack['ck'] is not None
+            )
+        else:
+            assert (
+                backpack['hq'] is None and
+                backpack['cq'] is None and
+                backpack['hk'] is None and
+                backpack['ck'] is None
+            )
 
-        out_q = self.out_q(x)
-        out_k = self.out_k(x)
-        backpack = {}
+        # Init Hidden State
+        if backpack_is_occupied:
+            hq = backpack['hq']
+            cq = backpack['cq']
+            hk = backpack['hk']
+            ck = backpack['ck']
+        else:
+            hq = torch.zeros(B, self.input_dim, dtype=dtype).to(x.device)
+            cq = torch.zeros(B, self.input_dim, dtype=dtype).to(x.device)
+            hk = torch.zeros(B, self.input_dim, dtype=dtype).to(x.device)
+            ck = torch.zeros(B, self.input_dim, dtype=dtype).to(x.device)
+
+        # Run LSTM
+        out_q = []
+        out_k = []
+
+        # x = self.norm(x)
+        # x = self.in_h(x)
+        for t in range(S):
+
+            # ONE CELL
+            # Q
+            hq, cq = self.lstm_q(x[:, t, :], (hq, cq))
+            # hq = hq + x[:, t, :]  # residual
+            out_q.append(hq)
+
+            # K
+            hk, ck = self.lstm_k(x[:, t, :], (hk, ck))
+            # hk = hk + x[:, t, :]  # residual
+            out_k.append(hk)
+
+            # # TWO CELL
+            # # Q
+            # hq, cq = self.lstm_q1(x[:, t, :], (hq, cq))
+            # hq, cq = self.lstm_q2(x[:, t, :], (hq, cq))
+            # out_q.append(hq)
+
+            # # K
+            # hk, ck = self.lstm_k1(x[:, t, :], (hk, ck))
+            # hk, ck = self.lstm_k2(x[:, t, :], (hk, ck))
+            # out_k.append(hk)
+
+
+        out_q = self.out_q(torch.stack(out_q, dim=1))
+        out_k = self.out_k(torch.stack(out_k, dim=1))
+        backpack = {
+                'hq': hq,
+                'cq': cq,
+                'hk': hk,
+                'ck': ck,
+            }
         return (
             out_q,
             out_k,
             backpack
         )
+
+# class FullLSTMQK(nn.Module):
+#     ''' linear only version to debug some issues '''
+#     def __init__(self, input_dim, q_dim, k_dim, dropout_p):
+#         super(FullLSTMQK, self).__init__()
+#         self.input_dim = input_dim
+#         self.q_dim = q_dim
+#         self.k_dim = k_dim
+#         self.dropout_p = dropout_p
+
+#         self.out_q = nn.Linear(input_dim, q_dim, bias=True)
+#         self.out_k = nn.Linear(input_dim, k_dim, bias=True)
+
+#         self.dropout = nn.Dropout(dropout_p)
+
+
+#     def forward(self, x, backpack):
+#         B, S, _ = x.size()
+#         dtype = x.dtype
+
+#         out_q = self.out_q(x)
+#         out_k = self.out_k(x)
+#         backpack = {}
+#         return (
+#             out_q,
+#             out_k,
+#             backpack
+#         )
 
 
 
@@ -423,7 +399,6 @@ class MyAttention(nn.Module):
         if past_key_value is not None:
             kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)  # pass value just for dtype/device
-
 
         if self.should_use_lstm:
             if len(past_key_value) <= self.layer_idx:
@@ -504,8 +479,8 @@ class MyAttention(nn.Module):
             config = qwen2_attention.config
             layer_idx = qwen2_attention.layer_idx
 
-            # lstm_to_use = set(range(0, 28))
-            # lstm_to_use = set(range(2, 28))
+            lstm_to_use = set(range(0, 28))
+            # lstm_to_use = set(range(5, 28))
             # lstm_to_use = set(range(22, 28))
             # lstm_to_use = {}
             if USE_TRAINED_LSTM and layer_idx in lstm_to_use:
@@ -561,9 +536,6 @@ class MyAttention(nn.Module):
                     # custom_attn.qk_proj.out_k[0].bias[:] = torch.randn_like(custom_attn.qk_proj.out_k[0].bias) * 10
                     # custom_attn.qk_proj.out_k[2].weight[:] = torch.randn_like(custom_attn.qk_proj.out_k[2].weight) * 10
                     # custom_attn.qk_proj.out_k[2].bias[:] = torch.randn_like(custom_attn.qk_proj.out_k[2].bias) * 10
-
-
-
 
             else:
                 # use original QK, not LSTM
@@ -1206,8 +1178,11 @@ if TRAIN_LSTMS:
 
 def train_lstm(trace_outs, num_epochs, orig_attn):
     percent_train = 0.8
-    lr = 2e-3
-    wd = 1e-2
+    # lr = 5e-4
+    # lr = 2e-3
+    # lr = 1e-2
+    lr = 2e-2
+    wd = 0.0 # 5e-3
     dropout_p = 0.0
 
     input_dim = trace_outs['hidden_states'][0].shape[2]
@@ -1223,6 +1198,7 @@ def train_lstm(trace_outs, num_epochs, orig_attn):
     }
     lstm = FullLSTMQK(**lstm_config)
 
+    # debugging with non-lstm linear layers
     if False:
         print('Copying Original Attn')
         with torch.no_grad():
@@ -1298,8 +1274,6 @@ def train_lstm(trace_outs, num_epochs, orig_attn):
             # torch.Size([32, 2, 73, 128])
 
             B, S, _ = h.shape
-            # aq = a.cuda().unsqueeze(1).unsqueeze(3).expand(-1, q.size(1), -1, q.size(3))  # applied on each head
-            # ak = a.cuda().unsqueeze(1).unsqueeze(3).expand(-1, k.size(1), -1, k.size(3))  # applied on each head
             h = h.cuda()
             q = q.cuda()  # [32, 12, 73, 128]
             k = k.cuda()  # [32, 2, 73, 128]
@@ -1343,14 +1317,6 @@ def train_lstm(trace_outs, num_epochs, orig_attn):
                 F.mse_loss(k, out_k)
             ) / B / S
 
-            # ##########
-            # # use (properly?) attn mask
-            # loss = (
-            #     F.mse_loss(q[aq], out_q[aq]) +
-            #     F.mse_loss(k[ak], out_k[ak])
-            # ) / B / S
-
-
             batch_losses.append(loss.item())
             loss.backward()
             optimizer.step()
@@ -1359,48 +1325,35 @@ def train_lstm(trace_outs, num_epochs, orig_attn):
         train_loss = sum(batch_losses) / len(batch_losses)
         train_losses.append(train_loss)
 
-        # # VALIDATION
-        # lstm.eval()
-        # batch_val_losses = []
-        # with torch.no_grad():
-        #     for a, h, q, k in val_data:
-        #         B, S, _ = h.shape
-        #         aq = a.cuda().unsqueeze(1).unsqueeze(3).expand(-1, q.size(1), -1, q.size(3))  # applied on each head
-        #         ak = a.cuda().unsqueeze(1).unsqueeze(3).expand(-1, k.size(1), -1, k.size(3))  # applied on each head
-        #         h = h.cuda()
-        #         q = q.cuda()
-        #         k = k.cuda()
-        #         out_q, out_k, _ = lstm(h, empty_backpack)
+        # VALIDATION
+        lstm.eval()
+        batch_val_losses = []
+        with torch.no_grad():
+            for a, h, q, k in val_data:
+                B, S, _ = h.shape
+                # aq = a.cuda().unsqueeze(1).unsqueeze(3).expand(-1, q.size(1), -1, q.size(3))  # applied on each head
+                # ak = a.cuda().unsqueeze(1).unsqueeze(3).expand(-1, k.size(1), -1, k.size(3))  # applied on each head
+                h = h.cuda()
+                q = q.cuda()
+                k = k.cuda()
+                out_q, out_k, _ = lstm(h, empty_backpack)
 
-        #         # no attn mask
-        #         val_loss = (
-        #             F.mse_loss(q, out_q) +
-        #             F.mse_loss(k, out_k)
-        #         ) / B / S
+                # no attn mask
+                val_loss = (
+                    F.mse_loss(q, out_q) +
+                    F.mse_loss(k, out_k)
+                ) / B / S
 
-        #         # # use (properly?) attn mask
-        #         # val_loss = (
-        #         #     F.mse_loss(q[aq], out_q[aq]) +
-        #         #     F.mse_loss(k[ak], out_k[ak])
-        #         # ) / B / S
+                batch_val_losses.append(val_loss.item())
 
-        #         batch_val_losses.append(val_loss.item())
+                current_val_loss = sum(batch_val_losses) / len(batch_val_losses)
+                val_losses.append(current_val_loss)
 
-        #         current_val_loss = sum(batch_val_losses) / len(batch_val_losses)
-        #         val_losses.append(current_val_loss)
+        print(f"Epoch {epoch+1}/{num_epochs} completed. train: {train_losses[-1]:.5f}, val: {val_losses[-1]:.5f}")
 
-        # print(f"Epoch {epoch+1}/{num_epochs} completed. train: {train_losses[-1]:.3f}, val: {val_losses[-1]:.3f}")
-
-        # # track best model
-        # if current_val_loss < best_val_loss:
-        #     best_val_loss = current_val_loss
-        #     best_epoch = epoch
-        #     best_model_state = {k: v.detach().cpu() for k, v in lstm.state_dict().items()}
-
-
-        print(f"Epoch {epoch+1}/{num_epochs} completed. train: {train_losses[-1]:.3f}    WARN: not doing validation")
-        if train_loss < best_val_loss:
-            best_val_loss = train_loss
+        # track best model
+        if current_val_loss < best_val_loss:
+            best_val_loss = current_val_loss
             best_epoch = epoch
             best_model_state = {k: v.detach().cpu() for k, v in lstm.state_dict().items()}
 
@@ -1432,9 +1385,9 @@ if TRAIN_LSTMS:
     all_layers = trace_outs.keys()
     for layer_idx in tqdm(all_layers):
         if layer_idx <= 1:
-            num_epochs = 100  # early layers appear to need more
+            num_epochs = 50  # early layers appear to need more
         else:
-            num_epochs = 50
+            num_epochs = 20
         orig_attn = model.model.layers[layer_idx].self_attn
         train_lstm(trace_outs[layer_idx], num_epochs, orig_attn)
 
@@ -1502,13 +1455,12 @@ already_loaded = True
 
 model = cpu_model.to('cuda')
 
-if not USE_VANILLA_TRANSFORMER:
-    for layer_idx, layer in enumerate(model.model.layers):
-        custom_attn = MyAttention.from_qwen2_attention(layer.self_attn, randomize_lstm=False)
-        layer.self_attn = custom_attn
+for layer_idx, layer in enumerate(model.model.layers):
+    custom_attn = MyAttention.from_qwen2_attention(layer.self_attn, randomize_lstm=False)
+    layer.self_attn = custom_attn
 
 # Hand test model
-if True:
+if False:
     # prompt = """Once upon a"""
 
 #     prompt = f"""Below is a fill-in-the-blank problem. Choose the correct option to complete the sentence.
@@ -1543,128 +1495,9 @@ The correct answer is: '''
     print()
     print(prompt + response)
 
+    BRK
+
 # END_BLOCK_3
-
-BRK
-
-##########
-# Train
-
-# chargoddard/winogrande-train-10k splits = {train, train_4k, train_2k, fewshot}
-dataset = load_dataset("chargoddard/winogrande-train-10k", split="train")  #
-processed_dataset = Data.prepare_dataset(dataset)
-
-# Split the dataset into train and validation sets
-# train_size = int(0.8 * len(processed_dataset))
-# val_size = len(processed_dataset) - train_size
-
-num_epochs = 20
-train_size = 1000
-val_size = 100
-
-remainder_size = len(processed_dataset) - train_size - val_size
-train_dataset, val_dataset, remainder_dataset = random_split(processed_dataset, [train_size, val_size, remainder_size])
-
-# Create dataloaders for train and validation sets
-train_dataloader = Data.create_dataloader(train_dataset, tokenizer, batch_size=BATCH_SIZE)
-val_dataloader = Data.create_dataloader(val_dataset, tokenizer, batch_size=BATCH_SIZE)
-remainder_dataloader = Data.create_dataloader(remainder_dataset, tokenizer, batch_size=BATCH_SIZE)
-
-# debug_dataloader(train_dataloader, tokenizer, 3)
-
-# Setup
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
-
-# Set up optimizer and learning rate scheduler
-optimizer = AdamW(model.parameters(), lr=1e-3, wd=0.0)
-
-num_training_steps = num_epochs * len(train_dataloader)
-
-# Training loop
-val_losses = []
-train_losses = []
-for epoch in range(num_epochs):
-
-    # TRAINING
-    model.train()
-    batch_losses = []
-    for batch in tqdm(train_dataloader):
-        prompt_ids = batch['prompt_ids'].to(device)
-        prompt_attention_mask = batch['prompt_attention_mask'].to(device)
-        answer_ids = batch['answer_ids'].to(device)
-        answer_attention_mask = batch['answer_attention_mask'].to(device)
-        input_ids = torch.cat([prompt_ids, answer_ids], dim=1)
-        answer_mask = torch.cat([torch.zeros_like(prompt_ids), torch.ones_like(answer_ids)], dim=1)
-        attention_mask = torch.cat([prompt_attention_mask, answer_attention_mask], dim=1)
-        loss_mask = (answer_mask * attention_mask).bool()
-
-        outputs = model(input_ids, return_dict=True)
-        logits = outputs.logits
-
-        # Loss
-        #   custom calculation that takes into account masking
-
-        # Shift so that tokens < n predict n
-        shift_logits = logits[loss_mask][..., :-1, :].contiguous()
-        shift_labels = input_ids[loss_mask][..., 1:].contiguous()
-        # flatten
-        shift_logits = shift_logits.view(-1, model.config.vocab_size)
-        shift_labels = shift_labels.view(-1)
-        shift_labels = shift_labels.to(shift_logits.device)
-        loss = F.cross_entropy(shift_logits, shift_labels)
-
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
-
-        batch_losses.append(loss.item())
-        print(f'step loss: {loss.item():.3f}')
-
-    train_losses.append(sum(batch_losses) / len(batch_losses))
-
-    # VALIDATION
-    model.eval()
-    with torch.no_grad():
-        batch_val_losses = []
-        for batch in val_dataloader:
-            prompt_ids = batch['prompt_ids'].to(device)
-            prompt_attention_mask = batch['prompt_attention_mask'].to(device)
-            answer_ids = batch['answer_ids'].to(device)
-            answer_attention_mask = batch['answer_attention_mask'].to(device)
-            input_ids = torch.cat([prompt_ids, answer_ids], dim=1)
-            answer_mask = torch.cat([torch.zeros_like(prompt_ids), torch.ones_like(answer_ids)], dim=1)
-            attention_mask = torch.cat([prompt_attention_mask, answer_attention_mask], dim=1)
-            loss_mask = (answer_mask * attention_mask).bool()
-            outputs = model(input_ids, return_dict=True)
-            logits = outputs.logits
-
-            # Loss
-            #   custom calculation that takes into account masking
-
-            # Shift so that tokens < n predict n
-            shift_logits = logits[loss_mask][..., :-1, :].contiguous()
-            shift_labels = input_ids[loss_mask][..., 1:].contiguous()
-            # flatten
-            shift_logits = shift_logits.view(-1, model.config.vocab_size)
-            shift_labels = shift_labels.view(-1)
-            shift_labels = shift_labels.to(shift_logits.device)
-            loss = F.cross_entropy(shift_logits, shift_labels)
-
-            batch_val_losses.append(loss)
-        val_losses.append(sum(batch_val_losses) / len(batch_val_losses))
-
-    print(f"Epoch {epoch+1}/{num_epochs} completed. Train: {train_losses[-1]:.4f}, Val: {val_losses[-1]:.4f}")
-
-# # Save the fine-tuned model
-# model.save_pretrained("./t11_llm_binding_attention")
-# tokenizer.save_pretrained("./t11_llm_binding_attention")
-
-
-##################################################
-
-# START_BLOCK_1
-
 
 def calculate_accuracy(model, dataloader, tokenizer, device):
     model.eval()
@@ -1676,16 +1509,10 @@ def calculate_accuracy(model, dataloader, tokenizer, device):
             prompt_ids = batch['prompt_ids'].to(device)
             prompt_attention_mask = batch['prompt_attention_mask'].to(device)
             answer_ids = batch['answer_ids'].to(device)
-            answer_attention_mask = batch['answer_attention_mask'].to(device)
 
             batch_size = prompt_ids.shape[0]
             total_answers += batch_size
 
-            # Concatenate prompt and answer
-            input_ids = torch.cat([prompt_ids, answer_ids], dim=1)
-            attention_mask = torch.cat([prompt_attention_mask, answer_attention_mask], dim=1)
-
-            # Generate predictions
             outputs = model.generate(
                 input_ids=prompt_ids,
                 attention_mask=prompt_attention_mask,
@@ -1712,16 +1539,171 @@ def calculate_accuracy(model, dataloader, tokenizer, device):
     accuracy = total_correct / total_answers
     return accuracy
 
+
+##########
+# Train
+
+# chargoddard/winogrande-train-10k splits = {train, train_4k, train_2k, fewshot}
+dataset = load_dataset("chargoddard/winogrande-train-10k", split="train")  #
+processed_dataset = Data.prepare_dataset(dataset)
+
+# Split the dataset into train and validation sets
+# train_size = int(0.8 * len(processed_dataset))
+# val_size = len(processed_dataset) - train_size
+
+num_epochs = 5
+train_size = 1000
+val_size = 100
+LR = 1e-4
+WD = 0.0
+
+remainder_size = len(processed_dataset) - train_size - val_size
+train_dataset, val_dataset, remainder_dataset = random_split(processed_dataset, [train_size, val_size, remainder_size])
+
+# Create dataloaders for train and validation sets
+train_dataloader = Data.create_dataloader(train_dataset, tokenizer, batch_size=BATCH_SIZE)
+val_dataloader = Data.create_dataloader(val_dataset, tokenizer, batch_size=BATCH_SIZE)
+remainder_dataloader = Data.create_dataloader(remainder_dataset, tokenizer, batch_size=BATCH_SIZE)
+
+# debug_dataloader(train_dataloader, tokenizer, 3)
+
+# Setup
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
+
+
+###########
+# Params
+
+print('training ALL params')
+params = model.parameters()
+
+# print('training LSTM params only')
+# params = [x[1] for x in model.named_parameters() if 'lstm' in x[0]]
+
+
+##########
+# Go
+
+# Set up optimizer and learning rate scheduler
+optimizer = AdamW(params, lr=LR, weight_decay=WD)
+
+num_training_steps = num_epochs * len(train_dataloader)
+
+# Training loop
+val_losses = []
+train_losses = []
+
+for epoch in range(num_epochs):
+
+    # TRAINING
+    model.train()
+    batch_losses = []
+    for batch in tqdm(train_dataloader):
+        prompt_ids = batch['prompt_ids'].to(device)
+        prompt_attention_mask = batch['prompt_attention_mask'].to(device)
+        answer_ids = batch['answer_ids'].to(device)
+        # answer_attention_mask = batch['answer_attention_mask'].to(device)
+        answer_attention_mask = torch.ones_like(answer_ids)  # NOTE: avoid possible is_padding_right warning
+        input_ids = torch.cat([prompt_ids, answer_ids], dim=1)
+        attention_mask = torch.cat([prompt_attention_mask, answer_attention_mask], dim=1)
+
+        labels = torch.cat([torch.full_like(prompt_ids, -100), answer_ids], dim=1)  # tokens outside vocab are ignored in loss, ignore prompt ids
+        # labels = input_ids
+        outputs = model(input_ids, labels=input_ids, attention_mask=attention_mask, return_dict=True)
+        logits = outputs.logits
+
+        loss = outputs.loss
+
+        # ##########
+        # # Loss
+        # #   custom calculation that takes into account masking
+
+        # answer_mask = torch.cat([torch.zeros_like(prompt_ids), torch.ones_like(answer_ids)], dim=1)
+        # loss_mask = (answer_mask * attention_mask).bool()
+
+        # # Shift so that tokens < n predict n
+        # shift_logits = logits[loss_mask][..., :-1, :].contiguous()
+        # shift_labels = input_ids[loss_mask][..., 1:].contiguous()
+        # # flatten
+        # shift_logits = shift_logits.view(-1, model.config.vocab_size)
+        # shift_labels = shift_labels.view(-1)
+        # shift_labels = shift_labels.to(shift_logits.device)
+        # loss = F.cross_entropy(shift_logits, shift_labels)
+
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+        batch_losses.append(loss.item())
+        print(f'step loss: {loss.item():.3f}')
+
+
+    train_losses.append(sum(batch_losses) / len(batch_losses))
+
+    # VALIDATION
+    model.eval()
+    with torch.no_grad():
+        batch_val_losses = []
+        for batch in val_dataloader:
+            prompt_ids = batch['prompt_ids'].to(device)
+            prompt_attention_mask = batch['prompt_attention_mask'].to(device)
+            answer_ids = batch['answer_ids'].to(device)
+            # answer_attention_mask = batch['answer_attention_mask'].to(device)
+            answer_attention_mask = torch.ones_like(answer_ids)  # NOTE: avoid possible is_padding_right warning
+            input_ids = torch.cat([prompt_ids, answer_ids], dim=1)
+            attention_mask = torch.cat([prompt_attention_mask, answer_attention_mask], dim=1)
+
+            # labels = input_ids
+            labels = torch.cat([torch.full_like(prompt_ids, -100), answer_ids], dim=1)  # tokens outside vocab are ignored in loss, ignore prompt ids
+            outputs = model(input_ids, labels=input_ids, attention_mask=attention_mask, return_dict=True)
+            logits = outputs.logits
+            loss = outputs.loss
+
+            # outputs = model(input_ids, labels=input_ids, return_dict=True)
+            # logits = outputs.logits
+            # loss = outputs.loss
+
+            # ##########
+            # # Loss
+            # #   custom calculation that takes into account masking
+            # answer_mask = torch.cat([torch.zeros_like(prompt_ids), torch.ones_like(answer_ids)], dim=1)
+            # loss_mask = (answer_mask * attention_mask).bool()
+
+            # # Shift so that tokens < n predict n
+            # shift_logits = logits[loss_mask][..., :-1, :].contiguous()
+            # shift_labels = input_ids[loss_mask][..., 1:].contiguous()
+            # # flatten
+            # shift_logits = shift_logits.view(-1, model.config.vocab_size)
+            # shift_labels = shift_labels.view(-1)
+            # shift_labels = shift_labels.to(shift_logits.device)
+            # loss = F.cross_entropy(shift_logits, shift_labels)
+
+            batch_val_losses.append(loss)
+        val_losses.append(sum(batch_val_losses) / len(batch_val_losses))
+
+    print(f"Epoch {epoch+1}/{num_epochs} completed. Train: {train_losses[-1]:.4f}, Val: {val_losses[-1]:.4f}")
+
+# # Save the fine-tuned model
+# model.save_pretrained("./t11_llm_binding_attention")
+# tokenizer.save_pretrained("./t11_llm_binding_attention")
+
+
+##################################################
+
+# START_BLOCK_1
+
+eval_dataloader = train_dataloader
+# eval_dataloader = val_dataloader
+
 print("Calculating accuracy on validation set...")
-val_accuracy = calculate_accuracy(model, val_dataloader, tokenizer, device)
+val_accuracy = calculate_accuracy(model, eval_dataloader, tokenizer, device)
 print(f"Validation Accuracy: {val_accuracy:.4f}")
-
-
 
 num_samples = 3
 sample_count = 0
 with torch.no_grad():
-    for batch in val_dataloader:
+    for batch in eval_dataloader:
         if sample_count >= num_samples:
             break
         print('=' * 50)
@@ -1746,16 +1728,16 @@ with torch.no_grad():
 
             print(f"Sample {sample_count + 1}:")
 
-            # Decode and print the prompt
+            # prompt
             prompt = tokenizer.decode(prompt_ids[i][prompt_ids[i] != tokenizer.pad_token_id], skip_special_tokens=True)
             print(f"Prompt: {prompt}")
 
-            # Decode and print the expected answer
-            expected_answer = tokenizer.decode(answer_ids[i][answer_ids[i] != tokenizer.pad_token_id], skip_special_tokens=False)
+            # expected answer
+            expected_answer = tokenizer.decode(answer_ids[i], skip_special_tokens=False)  # [answer_ids[i] != tokenizer.pad_token_id]
             print(f"Expected: {expected_answer}")
 
-            # Decode and print the generated answer
-            generated_answer = tokenizer.decode(generated_ids[i][prompt_ids.shape[1]:], skip_special_tokens=False)
+            # generated answer
+            generated_answer = tokenizer.decode(generated_ids[i][prompt_ids.shape[1]:], skip_special_tokens=False)  # slice off orig prompt ids
             print(f"Generated: {generated_answer}")
 
             print('-' * 50)
@@ -1763,17 +1745,17 @@ with torch.no_grad():
 
 # END_BLOCK_1
 
-plt.figure(figsize=(10, 6))
-plt.plot(train_losses, label='Training Loss')
-plt.plot(val_losses, label='Validation Loss')
+# plt.figure(figsize=(10, 6))
+# plt.plot(train_losses, label='Training Loss')
+# plt.plot(val_losses, label='Validation Loss')
 
-plt.xlabel('Epochs')
-plt.ylabel('Loss')
-plt.title('Training and Validation Loss Over Epochs')
+# plt.xlabel('Epochs')
+# plt.ylabel('Loss')
+# plt.title('Training and Validation Loss Over Epochs')
 
-plt.grid(True)
-plt.legend()
-plt.show()
+# plt.grid(True)
+# plt.legend()
+# plt.show()
 
 
 # for batch in remainder_dataloader:
@@ -1793,3 +1775,17 @@ plt.show()
 
 
 # debug_dataloader(dataloader, tokenizer, 3)
+
+
+# # $$$$$$$$$$
+# # Debug Data + Attention Mask
+# p  = batch['prompt_ids']
+# a  = batch['answer_ids']
+# pm = batch['prompt_attention_mask']
+# am = batch['answer_attention_mask']
+# for i in range(3):
+#     print('----------')
+#     tok = torch.cat([p[i], a[i]], dim=0)
+#     print(tokenizer.decode(tok, skip_special_tokens=False))
+#     attention_mask = torch.cat([pm[i], am[i]], dim=0)
+#     print(attention_mask)
