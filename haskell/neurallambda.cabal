@@ -58,7 +58,7 @@ library
     import:           warnings
 
     -- Modules exported by the library.
-    exposed-modules:  MyLib
+    exposed-modules:
 
     -- Modules included in this library but not exported.
     -- other-modules:
@@ -68,7 +68,8 @@ library
 
     -- Other library packages from which modules are imported.
     build-depends:
-        base ^>=4.17.2.1,
+        base >=4.19.0.0,
+        text,
         random,
 
     -- Directories containing source files.
@@ -92,8 +93,9 @@ executable neurallambda
 
     -- Other library packages from which modules are imported.
     build-depends:
-        base ^>=4.17.2.1,
+        base ^>=4.19.0.0,
         random,
+        text,
         neurallambda
 
     -- Directories containing source files.
@@ -126,5 +128,5 @@ test-suite neurallambda-test
 
     -- Test dependencies.
     build-depends:
-        base ^>=4.17.2.1,
+        base ^>=4.19.0.0,
         neurallambda

@@ -57,7 +57,9 @@ def print_model_info(model):
         info.append((name,
                      param_count,
                      f'{list(param.shape)}',
-                     f'grad:{param.requires_grad}'))
+                     f'grad:{param.requires_grad}',
+                     f'device:{param.device}'),
+                    )
     print_grid(info)
     print(f'Total Parameters: {total_params:,}')
 

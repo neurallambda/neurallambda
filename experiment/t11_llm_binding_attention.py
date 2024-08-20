@@ -1059,7 +1059,7 @@ class Qwen2ForCausalLM(Q.Qwen2PreTrainedModel):
 ####################################################################################################
 ####################################################################################################
 ####################################################################################################
-# Train LSTMs
+# Train LSTMs, each individually
 
 if TRAIN_LSTMS:
     ##################################################
@@ -1182,7 +1182,7 @@ def train_lstm(trace_outs, num_epochs, orig_attn):
     # lr = 2e-3
     # lr = 1e-2
     lr = 2e-2
-    wd = 0.0 # 5e-3
+    wd = 0.0  # 5e-3
     dropout_p = 0.0
 
     input_dim = trace_outs['hidden_states'][0].shape[2]
@@ -1610,6 +1610,8 @@ for epoch in range(num_epochs):
 
         labels = torch.cat([torch.full_like(prompt_ids, -100), answer_ids], dim=1)  # tokens outside vocab are ignored in loss, ignore prompt ids
         # labels = input_ids
+
+        TODO: not actually using labels, dbl check
         outputs = model(input_ids, labels=input_ids, attention_mask=attention_mask, return_dict=True)
         logits = outputs.logits
 
