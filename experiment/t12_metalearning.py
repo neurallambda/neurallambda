@@ -67,6 +67,7 @@ torch.manual_seed(152)
 #     print(f"Dot product of original and rotated: {torch.dot(v2, rv2):.6f}")
 #     BRK
 
+
 ##################################################
 # Spherical Interpolation Data
 
