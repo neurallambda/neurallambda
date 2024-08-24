@@ -127,7 +127,10 @@ class Autoencoder(nn.Module):
 
     def decode(self, encoded, pool_indices, last_conv_shape, skip_connections=None, shapes=None):
         decoded = F.linear(encoded, self.linear_weights.t(), self.linear_bias_decoder)
-        decoded = decoded.view(-1, *last_conv_shape)
+
+        # note: `*last_conv_shape` doesn't work with fx.Proxy, so, unpack by hand
+        print('LAST_CONV_SHAPE:', last_conv_shape)
+        decoded = decoded.view(-1, last_conv_shape[0], last_conv_shape[1], last_conv_shape[2])
 
         for i, (conv_weight, conv_bias, use_pool, indices) in enumerate(zip(
             reversed(self.conv_weights),
@@ -197,15 +200,15 @@ def run_epoch(model, dataloader, optimizer, device, mask_ratio, train=True):
     return avg_loss
 
 
-def visualize_reconstructions(model, dataloader, num_images=10):
-    model.eval()
+def visualize_reconstructions(vmodel, vmodel_params, dataloader, num_images=10):
+    vmodel.eval()
     with torch.no_grad():
         # Get a batch of images
         images, _, _ = next(iter(dataloader))
         images = images.to(device).float().unsqueeze(1)  # add channel dim
 
         # Get reconstructions
-        reconstructions = model(images)
+        reconstructions = vmodel(images, **vmodel_params)
 
         # Plot original and reconstructed images
         fig, axes = plt.subplots(2, num_images, figsize=(20, 4))
@@ -229,7 +232,7 @@ def visualize_reconstructions(model, dataloader, num_images=10):
 ##########
 # Go
 
-if True:
+if False:
     batch_size = 64
     num_epochs = 20
     lr = 2e-3

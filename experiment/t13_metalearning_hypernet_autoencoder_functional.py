@@ -1,11 +1,15 @@
 '''
 
+DEPRECATED: the torch.fx work can derive this, in `t13_metalearning_hypernet_flatten`
+
 A functional (not `nn.Module`) version of t13_metalearning_hypernet_autoencoder.py
 
 NOTE: this file is DOWNSTREAM of the original nn.Module version, so, for sake of syncing changes, upgrades should probably happen there first
 
 
 '''
+
+deprecated
 
 import torch
 import torch.nn as nn
