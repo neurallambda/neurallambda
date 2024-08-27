@@ -2,7 +2,18 @@
 
 can a simple MLP output weight updates that help it in-context?
 
-steps:
+RESULTS:
+
+- the previous version (t13_metalearning_hypernet.py) did NOT have bugs
+- with skip layers, it was learning too well for all tasks, so metalearning couldn't demonstrate its lift
+- then, with skip layers off, this was too deep for metalearning's lr=1e-2 to really demonstrate online learning
+- I will go forward with this hard-coded AE, instead of the torch.fx derived AE, for the time being
+- next step is to use a hyper net to generate the AE's params
+
+PROVENANCE:
+- t13_metalearning_hypernet.py  :  that file was struggling to prove a lift from metalearning, but i suspect bugs, so i'm simplifying here.
+
+STEPS:
 1. pretrain autoencoder  (t13_metalearning_hypernet_autoencoder_functional)
 2. metalearner (t13_metalearning_hypernet_metalearner)
 3. hypernetwork (this module ties everything together)
@@ -56,14 +67,19 @@ try:
     importlib.reload(Flatten)
     print('RELOADING MODULE')
 except NameError:
-    import t13_metalearning_hypernet_autoencoder as AE
+    # import t13_metalearning_hypernet_autoencoder as AE
+    import t13_metalearning_hypernet_autoencoder_functional_02 as AE
     import t13_metalearning_hypernet_flatten as Flatten
+
+
+# cudnn gives a warning, nondeterminism, and fails non-gracefully, but alleges speed improvements if used
+torch.backends.cudnn.enabled = False
 
 SEED = 152
 torch.manual_seed(SEED)
 random.seed(SEED)
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 
 
 ##################################################
@@ -85,7 +101,7 @@ def assert_no_global_mutation(model, forward_pass_fn, x):
     forward_pass_fn(x)
 
     for name, param in model.ae_params.items():
-        assert torch.allclose(param, initial_state[name], atol=1e-6), f"Parameter {name} was mutated during the inner loop"
+        assert torch.allclose(param, initial_state[name], atol=1e-12), f"Parameter {name} was mutated during the inner loop"
 
     print("Assertion passed: No global mutation occurred during the inner loop.")
 
@@ -112,7 +128,7 @@ def assert_outer_loop_backprop(model, forward_pass_fn, loss_fn, x):
     # Check if gradients exist for all parameters in ae_params
     for name, param in model.ae_params.items():
         assert param.grad is not None, f"No gradient for parameter {name}"
-        assert torch.any(param.grad != 0), f"Zero gradient for parameter {name}"
+        assert torch.any(param.grad.abs() < 1e-4), f"Zero gradient for parameter {name}"
 
     print("Assertion passed: Outer loop can backpropagate to all original parameters.")
 
@@ -130,110 +146,136 @@ def metalearning_checks(model, x):
 ##################################################
 
 class Thing(nn.Module):
-    def __init__(self, in_channels, img_size, bottleneck_size, kernel_size, pool_size, layer_config, actfn='swish', padding_size=1):
+    def __init__(self, in_channels, img_size, bottleneck_size, kernel_size, pool_size, padding_size=1):
         super().__init__()
-        self.ae = AE.Autoencoder(
+        self.ae_metadata, self.ae_params = AE.ae_init(
             in_channels=in_channels,
             img_size=img_size,
             bottleneck_size=bottleneck_size,
             kernel_size=kernel_size,
             pool_size=pool_size,
-            layer_config=layer_config,
-            use_skip_connections=False,
+            padding_size=padding_size,
+            device=device,
         )
+        self.lr_inner = 1e-1 * 5
 
-        self.ae_params = nn.ParameterDict(Flatten.build_params_dict(self.ae))  # ParamDict so outerloop sees the params
-
-        # Create control-inverted version of `ae`. It is also "batchified",
-        # meaning that the params passed in have been copied on a per row
-        # basis.
-        # self.ae = Flatten.transform_control_inversion(self.ae, use_batchify=True)  # overwrite original module
-        self.ae = Flatten.transform_control_inversion(self.ae, use_batchify=False)  # overwrite original module
-
-        self.lr_inner = 1e-2
-
-    # def forward(self, x):
-    #     B = x.shape[0]
-
-    #     # Mask the images
-    #     mask_ratio = 0.2
-    #     if self.training:
-    #         mask = torch.rand(x.shape, device=x.device) < mask_ratio
-    #         mx = x.clone()
-    #         with torch.no_grad():
-    #             mx[mask] = 1  # 1=white
-    #     else:
-    #         mx = x
-
-    #     # Metalearning
-    #     if True:
-    #         with torch.enable_grad():
-    #             params_copy = self.ae_params
-    #             params_copy = {k: v.unsqueeze(0).repeat(B, *[1] * v.ndim) for k, v in params_copy.items()}
-    #             # params_copy = {k: v + 0 for k, v in params_copy.items()}
-
-    #             keys, parameters = zip(*params_copy.items())
-    #             output = self.ae(mx, **params_copy)
-
-    #             loss = F.mse_loss(output, x)
-
-    #             grads = torch.autograd.grad(loss, parameters, create_graph=True)
-
-    #             new_params = {}
-    #             for k, p, g in zip(keys, parameters, grads):
-    #                 new_params[k] = p - g * self.lr_inner
-    #     else:
-    #         new_params = self.ae_params
-
-    #     # Predict from metalearning-improved params
-    #     final_output = self.ae(mx, **new_params)
-    #     return final_output
-
-
-    # AN ATTEMPT TO ITERATE OVER BATCHES DIRECTLY INSTEAD OF USE_BATCHIFY
     def forward(self, x):
         B = x.shape[0]
-        outputs = []
 
-        for i in range(B):
-            xi = x[i].unsqueeze(0)  # Add batch dimension of 1
+        # Mask the images
+        mask_ratio = 0.2
+        if self.training:
+            mask = torch.rand(x.shape, device=x.device) < mask_ratio
+            mx = x.clone()
+            with torch.no_grad():
+                mx[mask] = 1  # 1=white
+        else:
+            mx = x
 
-            # Mask the images
-            mask_ratio = 0.2
-            if self.training:
-                mask = torch.rand(xi.shape, device=xi.device) < mask_ratio
-                mxi = xi.clone()
-                with torch.no_grad():
-                    mxi[mask] = 1  # 1=white
-            else:
-                mxi = xi
+        # Metalearning
+        if True:
+            with torch.enable_grad():
+                params_copy = self.ae_params
+                # params_copy = {k: v.unsqueeze(0).repeat(B, *[1] * v.ndim) for k, v in params_copy.items()}
+                # params_copy = {k: v + 0 for k, v in params_copy.items()}
 
-            if True:
-                # Metalearning
-                with torch.enable_grad():
-                    params_copy = self.ae_params
-                    params_copy = {k: v + 0 for k, v in params_copy.items()}
+                keys, parameters = zip(*params_copy.items())
+                output = AE.ae_forward(mx, self.ae_metadata, **params_copy)
 
-                    keys, parameters = zip(*params_copy.items())
-                    output = self.ae(mxi, **params_copy)
+                loss = F.mse_loss(output, x)
 
-                    loss = F.mse_loss(output, xi)
+                grads = torch.autograd.grad(loss, parameters, create_graph=True)
 
-                    grads = torch.autograd.grad(loss, parameters, create_graph=True)
+                new_params = {}
+                for k, p, g in zip(keys, parameters, grads):
+                    new_params[k] = p - g * self.lr_inner
+        else:
+            new_params = self.ae_params
 
-                    new_params = {}
-                    for k, p, g in zip(keys, parameters, grads):
-                        assert g.abs().sum() > 0, f'key={k} has low grad'
-                        new_params[k] = p - g * self.lr_inner
-            else:
-                new_params = self.ae_params
+        # Predict from metalearning-improved params
+        final_output = AE.ae_forward(mx, self.ae_metadata, **new_params)
+        return final_output
 
-            # Predict from metalearning-improved params
-            final_output = self.ae(mxi, **new_params)
-            outputs.append(final_output)
 
-        # Stack all outputs
-        return torch.cat(outputs, dim=0)
+    # # AN ATTEMPT TO ITERATE OVER BATCHES DIRECTLY INSTEAD OF USE_BATCHIFY
+    # def forward(self, x):
+    #     B = x.shape[0]
+    #     outputs = []
+
+    #     for i in range(B):
+    #         xi = x[i].unsqueeze(0)  # Add batch dimension of 1
+
+    #         # Mask the images
+    #         mask_ratio = 0.2
+    #         if self.training:
+    #             mask = torch.rand(xi.shape, device=xi.device) < mask_ratio
+    #             mxi = xi.clone()
+    #             with torch.no_grad():
+    #                 mxi[mask] = 1  # 1=white
+    #         else:
+    #             mxi = xi
+
+    #         if True:
+    #             # Metalearning
+    #             with torch.enable_grad():
+    #                 params_copy = self.ae_params
+    #                 # breakpoint()
+    #                 params_copy = {k: v + 0 for k, v in params_copy.items()}
+
+    #                 keys, parameters = zip(*params_copy.items())
+    #                 output = AE.ae_forward(mxi, self.ae_metadata, **params_copy)
+    #                 loss = F.mse_loss(output, xi)
+
+    #                 grads = torch.autograd.grad(loss, parameters, create_graph=True)
+
+    #                 new_params = {}
+    #                 for k, p, g in zip(keys, parameters, grads):
+    #                     assert g.abs().sum() > 0, f'key={k} has low grad'
+    #                     new_params[k] = p - g * self.lr_inner
+
+
+    #                 # round 2
+    #                 params_copy = new_params
+    #                 # breakpoint()
+    #                 params_copy = {k: v + 0 for k, v in params_copy.items()}
+
+    #                 keys, parameters = zip(*params_copy.items())
+    #                 output = AE.ae_forward(mxi, self.ae_metadata, **params_copy)
+    #                 loss = F.mse_loss(output, xi)
+
+    #                 grads = torch.autograd.grad(loss, parameters, create_graph=True)
+
+    #                 new_params = {}
+    #                 for k, p, g in zip(keys, parameters, grads):
+    #                     assert g.abs().sum() > 0, f'key={k} has low grad'
+    #                     new_params[k] = p - g * self.lr_inner
+
+    #                 # round 3
+    #                 params_copy = new_params
+    #                 # breakpoint()
+    #                 params_copy = {k: v + 0 for k, v in params_copy.items()}
+
+    #                 keys, parameters = zip(*params_copy.items())
+    #                 output = AE.ae_forward(mxi, self.ae_metadata, **params_copy)
+    #                 loss = F.mse_loss(output, xi)
+
+    #                 grads = torch.autograd.grad(loss, parameters, create_graph=True)
+
+    #                 new_params = {}
+    #                 for k, p, g in zip(keys, parameters, grads):
+    #                     assert g.abs().sum() > 0, f'key={k} has low grad'
+    #                     new_params[k] = p - g * self.lr_inner
+
+
+    #         else:
+    #             new_params = self.ae_params
+
+    #         # Predict from metalearning-improved params
+    #         final_output = AE.ae_forward(mxi, self.ae_metadata, **new_params)
+    #         outputs.append(final_output)
+
+    #     # Stack all outputs
+    #     return torch.cat(outputs, dim=0)
 
 
 def run_epoch(model, dataloader, optimizer, device, train=True):
@@ -280,43 +322,12 @@ bottleneck_size = 32
 kernel_size = 3
 pool_size = 2
 
-# layer_config = [  # 965 params
-#     (4, True),
-#     (4, True),
-#     (4, True),
-#     (4, True),
-#     (4, True),
-#     (4, False),
-# ]
-
-
-# LEARNS TOO WELL WITHOUT METALEARNING
-layer_config = [  # 3.3k params
-    (8, True),
-    (8, True),
-    (8, True),
-    (8, True),
-    (8, True),
-    (8, False),
-]
-
-# layer_config = [  # 932 params, also learns too well
-#     (5, True),
-#     (4, True),
-#     (4, True),
-#     (4, True),
-#     (4, True),
-#     (4, False),
-# ]
-
-
 model = Thing(
     in_channels=in_channels,
     img_size=img_dim,
     bottleneck_size=bottleneck_size,
     kernel_size=kernel_size,
     pool_size=pool_size,
-    layer_config=layer_config
 )
 
 model.to(device)
@@ -363,4 +374,4 @@ for epoch in range(num_epochs):
 
 # Visualize reconstructions
 print("Visualizing reconstructions on validation set...")
-AE.visualize_reconstructions(model.ae, model.ae_params, val_dl)
+AE.visualize_reconstructions(model.ae_metadata, model.ae_params, val_dl)

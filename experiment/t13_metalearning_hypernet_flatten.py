@@ -14,149 +14,13 @@ from functools import wraps
 
 from typing import Tuple, Dict, Any
 
-TEST = False
+TEST = True
 
 ##################################################
-# Original version (non-batchified)
-
-# def create_placeholder(graph, name):
-#     return graph.create_node('placeholder', name.replace(".", "_"))
-
-# def replace_node_with_function(graph, node, func, args, kwargs):
-#     with graph.inserting_after(node):
-#         new_node = graph.create_node('call_function', func, args=args, kwargs=kwargs)
-#         node.replace_all_uses_with(new_node)
-#         graph.erase_node(node)
-
-# def get_module_params(target_module, param_nodes, prefix=''):
-#     params = {}
-#     for name, param in target_module.named_parameters():
-#         full_name = f"{prefix}.{name}" if prefix else name
-#         params[name] = param_nodes[full_name]
-#     return params
-
-# def transform_linear(graph, node, target, param_nodes):
-#     params = get_module_params(target, param_nodes, node.target)
-#     replace_node_with_function(graph, node, F.linear, (node.args[0], params['weight'], params['bias']), {})
-
-# def transform_layer_norm(graph, node, target, param_nodes):
-#     params = get_module_params(target, param_nodes, node.target)
-#     args = (node.args[0], target.normalized_shape)
-#     kwargs = {'weight': params['weight'], 'bias': params['bias'], 'eps': target.eps}
-#     replace_node_with_function(graph, node, F.layer_norm, args, kwargs)
-
-# def transform_embedding(graph, node, target, param_nodes):
-#     params = get_module_params(target, param_nodes, node.target)
-#     args = (node.args[0], params['weight'])
-#     kwargs = {'padding_idx': target.padding_idx}
-#     replace_node_with_function(graph, node, F.embedding, args, kwargs)
-
-# def transform_conv(graph, node, target, param_nodes, conv_func):
-#     params = get_module_params(target, param_nodes, node.target)
-#     args = (node.args[0], params['weight'])
-#     kwargs = {
-#         'bias': params['bias'],
-#         'stride': target.stride,
-#         'padding': target.padding,
-#         'dilation': target.dilation,
-#         'groups': target.groups
-#     }
-#     replace_node_with_function(graph, node, conv_func, args, kwargs)
-
-# layer_transforms = {
-#     nn.Linear: transform_linear,
-#     nn.LayerNorm: transform_layer_norm,
-#     nn.Embedding: transform_embedding,
-#     nn.Conv1d: lambda graph, node, target, param_nodes: transform_conv(graph, node, target, param_nodes, F.conv1d),
-#     nn.Conv2d: lambda graph, node, target, param_nodes: transform_conv(graph, node, target, param_nodes, F.conv2d),
-#     nn.Conv3d: lambda graph, node, target, param_nodes: transform_conv(graph, node, target, param_nodes, F.conv3d),
-# }
-
-# def get_attr_or_module(module, target):
-#     atoms = target.split('.')
-#     attr = module
-#     for atom in atoms:
-#         if not hasattr(attr, atom):
-#             raise AttributeError(f"Attribute {atom} not found")
-#         attr = getattr(attr, atom)
-#     return attr
+# Control Inversion
 
 
-# def transform_control_inversion(module: nn.Module) -> nn.Module:
-#     '''Transform a module so that it no longer tracks its own parameter state, but
-#     instead these must be passed in as kwargs.
-
-#     Currently handles:
-#     - Parameter, ParameterList, ParameterDict
-#     - Module, ModuleList, ModuleDict
-#     - Conv1d, Conv2d, Conv3d
-#     - Linear
-#     - Embedding
-#     - LayerNorm
-
-#     Missing support for:
-#     - RNN, RNNCell, LSTM, LSTMCell, GRU, GRUCell: These do not have helper functions in `torch.nn.functional`, so would have to be implemented by hand
-#     - BatchNorm1d, BatchNorm2d, BatchNorm3d
-#     - InstanceNorm1d, InstanceNorm2d, InstanceNorm3d
-#     - TransformerEncoderLayer, TransformerDecoderLayer
-#     - MultiheadAttention
-#     - LPPool1d, LPPool2d (when trainable=True)
-#     - AdaptiveLogSoftmaxWithLoss
-
-#     '''
-#     traced = fx.symbolic_trace(module)
-#     graph = traced.graph
-
-#     # Find the parameter-containing nodes and store their information
-#     param_layers = []
-#     for node in graph.nodes:
-#         if node.op == 'call_module':
-#             target_module = get_attr_or_module(traced, node.target)
-#             if isinstance(target_module, tuple(layer_transforms.keys())):
-#                 param_layers.append((node, target_module, type(target_module)))
-#         elif node.op == 'get_attr':
-#             target_attr = get_attr_or_module(traced, node.target)
-#             if isinstance(target_attr, (nn.Parameter, nn.ParameterList, nn.ParameterDict)):
-#                 param_layers.append((node, target_attr, type(target_attr)))
-
-#     # Create new input nodes for parameters at the beginning of the graph
-#     param_nodes = {}
-#     input_placeholder = next(node for node in reversed(graph.nodes) if node.op == 'placeholder')  # last arg to input after
-#     with graph.inserting_after(input_placeholder):
-#         for name, param in traced.named_parameters():
-#             param_nodes[name] = create_placeholder(graph, name)
-
-#     # Modify the layer calls to use external parameters
-#     for node, target, layer_type in param_layers:
-#         if layer_type in layer_transforms:
-#             layer_transforms[layer_type](graph, node, target, param_nodes)
-#         elif layer_type in (nn.Parameter, nn.ParameterList, nn.ParameterDict):
-#             if layer_type == nn.Parameter:
-#                 node.replace_all_uses_with(param_nodes[node.target])
-#                 graph.erase_node(node)
-#             else:
-#                 for user in list(node.users):  # Create a copy of users to avoid modification during iteration
-#                     if user.op == 'call_function' and user.target in (operator.getitem, dict.__getitem__):
-#                         idx_or_key = user.args[1]
-#                         new_node = param_nodes[f'{node.target}.{idx_or_key}']
-#                         user.replace_all_uses_with(new_node)
-#                         graph.erase_node(user)
-#                 graph.erase_node(node)
-
-#     graph.lint()
-#     return fx.GraphModule(traced, graph)
-
-
-
-
-##################################################
-##################################################
-##################################################
-#
-# Batchify version
-
-
-####################
+###########
 # "Batchified" versions of the `torch.nn.functional` api
 #
 # NOTE: these currently loop over the batch dim, and still use the `F` api. Ideally, they'd be implemented more efficiently.
@@ -170,12 +34,20 @@ def batch_embedding(input, weight, padding_idx=None):
         outputs.append(output)
     return torch.stack(outputs)
 
+# def batch_linear(input, weight, bias=None):
+#     batch_size = input.shape[0]
+#     outputs = []
+#     for i in range(batch_size):
+#         output = F.linear(input[i], weight[i], bias[i] if bias is not None else None)
+#         outputs.append(output)
+#     return torch.stack(outputs)
+
 def batch_linear(input, weight, bias=None):
     batch_size = input.shape[0]
     outputs = []
     for i in range(batch_size):
-        output = F.linear(input[i], weight[i], bias[i] if bias is not None else None)
-        outputs.append(output)
+        output = F.linear(input[i].unsqueeze(0), weight[i], bias[i] if bias is not None else None)
+        outputs.append(output.squeeze(0))
     return torch.stack(outputs)
 
 def batch_conv1d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
@@ -188,7 +60,6 @@ def batch_conv1d(input, weight, bias=None, stride=1, padding=0, dilation=1, grou
     return torch.stack(outputs)
 
 def batch_conv2d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
-    print(f'STRIDE: {target.stride}')
     batch_size = input.shape[0]
     outputs = []
     for i in range(batch_size):
@@ -196,6 +67,7 @@ def batch_conv2d(input, weight, bias=None, stride=1, padding=0, dilation=1, grou
                           stride=stride, padding=padding, dilation=dilation, groups=groups)
         outputs.append(output.squeeze(0))
     return torch.stack(outputs)
+
 
 def batch_conv3d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
     batch_size = input.shape[0]
@@ -213,6 +85,18 @@ def batch_layer_norm(input, normalized_shape, weight, bias, eps=1e-5):
         output = F.layer_norm(input[i], normalized_shape, weight[i], bias[i], eps)
         outputs.append(output)
     return torch.stack(outputs)
+
+
+
+def batch_conv_transpose2d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
+    batch_size = input.shape[0]
+    outputs = []
+    for i in range(batch_size):
+        output = F.conv_transpose2d(input[i].unsqueeze(0), weight[i], bias[i] if bias is not None else None,
+                          stride=stride, padding=padding, dilation=dilation, groups=groups)
+        outputs.append(output.squeeze(0))
+    return torch.stack(outputs)
+
 
 ####################
 #
@@ -253,7 +137,6 @@ def transform_embedding(graph, node, target, param_nodes, use_batchify):
     replace_node_with_function(graph, node, func, args, kwargs)
 
 def transform_conv(graph, node, target, param_nodes, conv_func, batch_conv_func, use_batchify):
-    breakpoint()
     params = get_module_params(target, param_nodes, node.target)
     args = (node.args[0], params['weight'])
     kwargs = {
@@ -266,6 +149,86 @@ def transform_conv(graph, node, target, param_nodes, conv_func, batch_conv_func,
     func = batch_conv_func if use_batchify else conv_func
     replace_node_with_function(graph, node, func, args, kwargs)
 
+
+##########
+
+def transform_functional_conv2d(graph, node, param_nodes, use_batchify):
+    args = list(node.args)
+    kwargs = dict(node.kwargs)
+
+    # Replace weight with placeholder if it's a parameter
+    if isinstance(args[1], fx.Node) and args[1].op == 'get_attr':
+        args[1] = param_nodes.get(args[1].target, args[1])
+
+    # Replace bias with placeholder if it's a parameter
+    if len(args) > 2 and isinstance(args[2], fx.Node) and args[2].op == 'get_attr':
+        args[2] = param_nodes.get(args[2].target, args[2])
+
+    func = batch_conv2d if use_batchify else F.conv2d
+    replace_node_with_function(graph, node, func, tuple(args), kwargs)
+
+def transform_functional_conv_transpose2d(graph, node, param_nodes, use_batchify):
+    args = list(node.args)
+    kwargs = dict(node.kwargs)
+
+    # Replace weight with placeholder if it's a parameter
+    if isinstance(args[1], fx.Node) and args[1].op == 'get_attr':
+        args[1] = param_nodes.get(args[1].target, args[1])
+
+    # Replace bias with placeholder if it's a parameter
+    if len(args) > 2 and isinstance(args[2], fx.Node) and args[2].op == 'get_attr':
+        args[2] = param_nodes.get(args[2].target, args[2])
+
+    func = batch_conv_transpose2d if use_batchify else F.conv_transpose2d
+    replace_node_with_function(graph, node, func, tuple(args), kwargs)
+
+
+def transform_functional_linear(graph, node, param_nodes, use_batchify):
+    args = list(node.args)
+    kwargs = dict(node.kwargs)
+
+    # Replace weight with placeholder if it's a parameter
+    if isinstance(args[1], fx.Node) and args[1].op == 'get_attr':
+        args[1] = param_nodes.get(args[1].target, args[1])
+
+    # Replace bias with placeholder if it's a parameter
+    if len(args) > 2 and isinstance(args[2], fx.Node) and args[2].op == 'get_attr':
+        args[2] = param_nodes.get(args[2].target, args[2])
+
+    func = batch_linear if use_batchify else F.linear
+    replace_node_with_function(graph, node, func, tuple(args), kwargs)
+
+def transform_transpose(graph, node, param_nodes, use_batchify):
+    args = list(node.args)
+    kwargs = dict(node.kwargs)
+
+    # Replace weight with placeholder if it's a parameter
+    if isinstance(args[1], fx.Node) and args[1].op == 'get_attr':
+        args[1] = param_nodes.get(args[1].target, args[1])
+
+    func = lambda x, d0, d1: torch.transpose(x, d0, d1)
+    replace_node_with_function(graph, node, func, tuple(args), kwargs)
+
+
+
+def batch_transpose(x, dim0, dim1):
+    return torch.stack([torch.transpose(xi, dim0, dim1) for xi in x])
+
+def transform_transpose(graph, node, param_nodes, use_batchify):
+    args = node.args
+    kwargs = node.kwargs
+
+    # No need to check for weights or use different versions for batching
+    func = batch_transpose if use_batchify else lambda x, d0, d1: torch.transpose(x, d0, d1)
+    replace_node_with_function(graph, node, func, args, kwargs)
+
+
+
+
+##########
+
+
+# targets the `torch.nn` API
 def get_layer_transforms(use_batchify):
     return {
         nn.Linear: lambda graph, node, target, param_nodes: transform_linear(graph, node, target, param_nodes, use_batchify),
@@ -274,6 +237,15 @@ def get_layer_transforms(use_batchify):
         nn.Conv1d: lambda graph, node, target, param_nodes: transform_conv(graph, node, target, param_nodes, F.conv1d, batch_conv1d, use_batchify),
         nn.Conv2d: lambda graph, node, target, param_nodes: transform_conv(graph, node, target, param_nodes, F.conv2d, batch_conv2d, use_batchify),
         nn.Conv3d: lambda graph, node, target, param_nodes: transform_conv(graph, node, target, param_nodes, F.conv3d, batch_conv3d, use_batchify),
+    }
+
+# targets the `torch.nn.functional` API
+def get_functional_transforms(use_batchify):
+    return {
+        F.conv2d: lambda graph, node, param_nodes: transform_functional_conv2d(graph, node, param_nodes, use_batchify),
+        F.conv_transpose2d: lambda graph, node, param_nodes: transform_functional_conv_transpose2d(graph, node, param_nodes, use_batchify),
+        F.linear: lambda graph, node, param_nodes: transform_functional_linear(graph, node, param_nodes, use_batchify),
+        torch.transpose: lambda graph, node, param_nodes: transform_transpose(graph, node, param_nodes, use_batchify),
     }
 
 def get_attr_or_module(module, target):
@@ -315,6 +287,7 @@ def transform_control_inversion(module: nn.Module, use_batchify: bool = False) -
     graph = traced.graph
 
     layer_transforms = get_layer_transforms(use_batchify)
+    functional_transforms = get_functional_transforms(use_batchify)
 
     # Find the parameter-containing nodes and store their information
     param_layers = []
@@ -351,6 +324,13 @@ def transform_control_inversion(module: nn.Module, use_batchify: bool = False) -
                         user.replace_all_uses_with(new_node)
                         graph.erase_node(user)
                 graph.erase_node(node)
+
+    # TODO: the underlying transforms try to be batchify aware, but they shouldn't, they should only be relevant in a batchified world
+    if use_batchify:
+        # Handle functional calls
+        for node in graph.nodes:
+            if node.op == 'call_function' and node.target in functional_transforms:
+                functional_transforms[node.target](graph, node, param_nodes)
 
     graph.lint()
     return fx.GraphModule(traced, graph)
@@ -544,14 +524,14 @@ def vectorize(flattened_params: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, 
     return torch.cat(vectors), shapes
 
 
-def unvectorize(vector: torch.Tensor, shapes: Dict[str, torch.Size]) -> Dict[str, torch.Tensor]:
-    ''' Inflate a large vector into weights that match `shapes` using torch.split. '''
-    unflattened = {}
-    split_sizes = [torch.prod(torch.tensor(shape)).item() for shape in shapes.values()]
-    chunks = torch.split(vector, split_sizes)
-    for (name, shape), chunk in zip(shapes.items(), chunks):
-        unflattened[name] = chunk.view(shape)
-    return unflattened
+# def unvectorize(vector: torch.Tensor, shapes: Dict[str, torch.Size]) -> Dict[str, torch.Tensor]:
+#     ''' Inflate a large vector into weights that match `shapes` using torch.split. '''
+#     unflattened = {}
+#     split_sizes = [torch.prod(torch.tensor(shape)).item() for shape in shapes.values()]
+#     chunks = torch.split(vector, split_sizes)
+#     for (name, shape), chunk in zip(shapes.items(), chunks):
+#         unflattened[name] = chunk.view(shape)
+#     return unflattened
 
 
 def numel(params_dict: dict) -> int:
@@ -576,21 +556,39 @@ def numel(params_dict: dict) -> int:
 
 #     return unflattened
 
-# def unvectorize(vector: torch.Tensor, shapes: Dict[str, torch.Size]) -> Dict[str, torch.Tensor]:
-#     ''' Inflate a large vector into weights that match `shapes` using torch.tensor_split. '''
-#     unflattened = {}
-#     split_sizes = [torch.prod(torch.tensor(shape)).item() for shape in shapes.values()]
+def unvectorize(vector: torch.Tensor, shapes: Dict[str, torch.Size]) -> Dict[str, torch.Tensor]:
+    ''' Inflate a large vector into weights that match `shapes` using torch.tensor_split. '''
+    unflattened = {}
+    split_sizes = [torch.prod(torch.tensor(shape)).item() for shape in shapes.values()]
 
-#     # Calculate the indices for splitting
-#     indices = torch.cumsum(torch.tensor(split_sizes), dim=0)[:-1]
+    # Calculate the indices for splitting
+    indices = torch.cumsum(torch.tensor(split_sizes), dim=0)[:-1]
 
-#     # Use torch.tensor_split to split the vector
-#     chunks = torch.tensor_split(vector, indices)
+    # Use torch.tensor_split to split the vector
+    chunks = torch.tensor_split(vector, indices)
 
-#     for (name, shape), chunk in zip(shapes.items(), chunks):
-#         unflattened[name] = chunk.view(shape)
+    for (name, shape), chunk in zip(shapes.items(), chunks):
+        unflattened[name] = chunk.view(shape)
 
-#     return unflattened
+    return unflattened
+
+def unvectorize(vector: torch.Tensor, shapes: Dict[str, torch.Size]) -> Dict[str, torch.Tensor]:
+    ''' Inflate a single vector or a batch of vectors into weights that match `shapes`. '''
+    if vector.dim() not in [1, 2]:
+        raise ValueError(f"Input vector must be 1D or 2D, but got {vector.dim()}D")
+
+    unflattened = {}
+    split_sizes = [torch.prod(torch.tensor(shape)).item() for shape in shapes.values()]
+    batch_size = vector.shape[0] if vector.dim() == 2 else 1
+
+    # Split the vector along the last dimension
+    chunks = torch.split(vector, split_sizes, dim=-1)
+
+    for (name, shape), chunk in zip(shapes.items(), chunks):
+        new_shape = (batch_size,) + shape if vector.dim() == 2 else shape
+        unflattened[name] = chunk.view(new_shape)
+
+    return unflattened
 
 
 def check_equality(dict1: Dict[str, Any], dict2: Dict[str, Any], rtol: float = 1e-5, atol: float = 1e-8) -> bool:
@@ -631,7 +629,112 @@ def check_equality(dict1: Dict[str, Any], dict2: Dict[str, Any], rtol: float = 1
 
 ##############################
 
-def test_vectorize_backprop():
+# def test_vectorize_backprop():
+#     # Create a sample dictionary of parameters
+#     params = {
+#         'layer1.weight': nn.Parameter(torch.randn(3, 4)),
+#         'layer1.bias': nn.Parameter(torch.randn(3)),
+#         'layer2.weight': nn.Parameter(torch.randn(2, 3)),
+#         'layer2.bias': nn.Parameter(torch.randn(2)),
+#     }
+
+#     # Vectorize the parameters
+#     vector, shapes = vectorize(params)
+
+#     # Create a dummy loss
+#     loss = vector.sum()
+
+#     # Try to backpropagate
+#     try:
+#         loss.backward()
+#         print("Vectorize: Backpropagation successful!")
+#         # Check if gradients were computed
+#         all_have_grad = all(p.grad is not None for p in params.values())
+#         assert all_have_grad
+#         print(f"All parameters have gradients: {all_have_grad}")
+#     except Exception as e:
+#         print(f"Vectorize: Backpropagation failed with error: {str(e)}")
+
+
+# def test_unvectorize_backprop():
+#     # Create a sample vector and shapes dictionary
+#     vector = nn.Parameter(torch.randn(23))
+#     shapes = {
+#         'layer1.weight': (3, 4),
+#         'layer1.bias': (3,),
+#         'layer2.weight': (2, 3),
+#         'layer2.bias': (2,),
+#     }
+
+#     # Unvectorize the vector
+#     params = unvectorize(vector, shapes)
+
+#     # Create a dummy loss
+#     loss = sum(p.sum() for p in params.values())
+
+#     # Try to backpropagate
+#     try:
+#         loss.backward()
+#         print("Unvectorize: Backpropagation successful!")
+#         # Check if gradient was computed for the original vector
+#         assert vector.grad is not None
+#         print(f"Original vector has gradient: {vector.grad is not None}")
+#     except Exception as e:
+#         print(f"Unvectorize: Backpropagation failed with error: {str(e)}")
+
+
+# def test_vectorize_unvectorize_backprop():
+#     # Create a sample dictionary of parameters
+#     original_params = {
+#         'layer1.weight': nn.Parameter(torch.randn(3, 4, )),
+#         'layer1.bias': nn.Parameter(torch.randn(3, )),
+#         'layer2.weight': nn.Parameter(torch.randn(2, 3, )),
+#         'layer2.bias': nn.Parameter(torch.randn(2, )),
+#     }
+
+#     # Vectorize the parameters
+#     vector, shapes = vectorize(original_params)
+
+#     # Apply some operation to the vector
+#     modified_vector = vector * 2  # Simple scaling operation
+
+#     # Unvectorize the modified vector
+#     reconstructed_params = unvectorize(modified_vector, shapes)
+
+#     # Create a dummy loss using the reconstructed parameters
+#     loss = torch.stack([p.sum() for p in reconstructed_params.values()]).sum()
+
+#     # Try to backpropagate
+#     try:
+#         loss.backward()
+#         print("Vectorize + Unvectorize: Backpropagation successful!")
+
+#         # Check if gradients were computed for original parameters
+#         original_grads = all(p.grad is not None for p in original_params.values())
+#         print(f"All original parameters have gradients: {original_grads}")
+
+#         # # This grad has not been retained
+#         # vectorized_grad = vector.grad is not None
+#         # print(f'Vectorized version has grads: {vectorized_grad}')
+
+#         # # These grads were not retained
+#         # # Check if gradients were computed for reconstructed parameters
+#         # reconstructed_grads = all(p.grad is not None for p in reconstructed_params.values())
+#         # print(f"All reconstructed parameters have gradients: {reconstructed_grads}")
+
+#         # Print some gradient values for verification
+#         print("\nSample gradient values:")
+#         for name, param in original_params.items():
+#             if param.grad is not None:
+#                 assert param.grad.abs().sum().item() > 0
+#                 print(f"{name} grad: {param.grad.sum().item()}")
+
+#     except Exception as e:
+#         print(f"Vectorize + Unvectorize: Backpropagation failed with error: {str(e)}")
+
+
+
+def test_vectorize_backprop(batch_size=None):
     # Create a sample dictionary of parameters
     params = {
         'layer1.weight': nn.Parameter(torch.randn(3, 4)),
@@ -643,21 +746,25 @@ def test_vectorize_backprop():
     # Vectorize the parameters
     vector, shapes = vectorize(params)
 
+    # Create a batch if specified
+    if batch_size is not None:
+        vector = vector.unsqueeze(0).repeat(batch_size, 1)
+
     # Create a dummy loss
     loss = vector.sum()
 
     # Try to backpropagate
     try:
         loss.backward()
-        print("Vectorize: Backpropagation successful!")
+        print(f"Vectorize ({'batched' if batch_size else 'single'}): Backpropagation successful!")
         # Check if gradients were computed
         all_have_grad = all(p.grad is not None for p in params.values())
+        assert all_have_grad
         print(f"All parameters have gradients: {all_have_grad}")
     except Exception as e:
-        print(f"Vectorize: Backpropagation failed with error: {str(e)}")
+        print(f"Vectorize ({'batched' if batch_size else 'single'}): Backpropagation failed with error: {str(e)}")
 
-
-def test_unvectorize_backprop():
+def test_unvectorize_backprop(batch_size=None):
     # Create a sample vector and shapes dictionary
     vector = nn.Parameter(torch.randn(23))
     shapes = {
@@ -666,6 +773,10 @@ def test_unvectorize_backprop():
         'layer2.weight': (2, 3),
         'layer2.bias': (2,),
     }
+
+    # Create a batch if specified
+    if batch_size is not None:
+        vector = vector.unsqueeze(0).repeat(batch_size, 1)
 
     # Unvectorize the vector
     params = unvectorize(vector, shapes)
@@ -676,24 +787,28 @@ def test_unvectorize_backprop():
     # Try to backpropagate
     try:
         loss.backward()
-        print("Unvectorize: Backpropagation successful!")
+        print(f"Unvectorize ({'batched' if batch_size else 'single'}): Backpropagation successful!")
         # Check if gradient was computed for the original vector
+        assert vector.grad is not None
         print(f"Original vector has gradient: {vector.grad is not None}")
     except Exception as e:
-        print(f"Unvectorize: Backpropagation failed with error: {str(e)}")
+        print(f"Unvectorize ({'batched' if batch_size else 'single'}): Backpropagation failed with error: {str(e)}")
 
-
-def test_vectorize_unvectorize_backprop():
+def test_vectorize_unvectorize_backprop(batch_size=None):
     # Create a sample dictionary of parameters
     original_params = {
-        'layer1.weight': nn.Parameter(torch.randn(3, 4, )),
-        'layer1.bias': nn.Parameter(torch.randn(3, )),
-        'layer2.weight': nn.Parameter(torch.randn(2, 3, )),
-        'layer2.bias': nn.Parameter(torch.randn(2, )),
+        'layer1.weight': nn.Parameter(torch.randn(3, 4)),
+        'layer1.bias': nn.Parameter(torch.randn(3)),
+        'layer2.weight': nn.Parameter(torch.randn(2, 3)),
+        'layer2.bias': nn.Parameter(torch.randn(2)),
     }
 
     # Vectorize the parameters
     vector, shapes = vectorize(original_params)
+
+    # Create a batch if specified
+    if batch_size is not None:
+        vector = vector.unsqueeze(0).repeat(batch_size, 1)
 
     # Apply some operation to the vector
     modified_vector = vector * 2  # Simple scaling operation
@@ -702,45 +817,81 @@ def test_vectorize_unvectorize_backprop():
     reconstructed_params = unvectorize(modified_vector, shapes)
 
     # Create a dummy loss using the reconstructed parameters
-    loss = torch.stack([p.sum() for p in reconstructed_params.values()]).sum()
+    loss = sum(p.sum() for p in reconstructed_params.values())
 
     # Try to backpropagate
     try:
         loss.backward()
-        print("Vectorize + Unvectorize: Backpropagation successful!")
+        print(f"Vectorize + Unvectorize ({'batched' if batch_size else 'single'}): Backpropagation successful!")
 
         # Check if gradients were computed for original parameters
         original_grads = all(p.grad is not None for p in original_params.values())
         print(f"All original parameters have gradients: {original_grads}")
 
-        # # This grad has not been retained
-        # vectorized_grad = vector.grad is not None
-        # print(f'Vectorized version has grads: {vectorized_grad}')
-
-        # # These grads were not retained
-        # # Check if gradients were computed for reconstructed parameters
-        # reconstructed_grads = all(p.grad is not None for p in reconstructed_params.values())
-        # print(f"All reconstructed parameters have gradients: {reconstructed_grads}")
-
         # Print some gradient values for verification
         print("\nSample gradient values:")
         for name, param in original_params.items():
             if param.grad is not None:
+                assert param.grad.abs().sum().item() > 0
                 print(f"{name} grad: {param.grad.sum().item()}")
 
     except Exception as e:
-        print(f"Vectorize + Unvectorize: Backpropagation failed with error: {str(e)}")
-
-
-
+        print(f"Vectorize + Unvectorize ({'batched' if batch_size else 'single'}): Backpropagation failed with error: {str(e)}")
 
 
 ##############################
 # round trip check
 
+# if TEST:
+#     torch.manual_seed(152)
+#     print()
+
+#     class Model(nn.Module):
+#         def __init__(self):
+#             super().__init__()
+#             self.fc1 = nn.Linear(10, 20)
+#             self.fc2 = nn.Linear(20, 1)
+
+#         def forward(self, x):
+#             x = torch.relu(self.fc1(x))
+#             return self.fc2(x)
+
+#     original_mlp = Model()
+#     params = build_params_dict(original_mlp)
+
+#     v, shape_template = vectorize(params)
+#     uv = unvectorize(v, shape_template)
+
+#     assert check_equality(params, uv)
+#     print('vectorize + unvectorize round trip works')
+
+
+#     # More Tests
+#     print("Testing vectorize function:")
+#     test_vectorize_backprop()
+
+#     print("\nTesting unvectorize function:")
+#     test_unvectorize_backprop()
+
+#     print("Testing vectorize and unvectorize functions together:")
+#     test_vectorize_unvectorize_backprop()
+
+
+
 if TEST:
+    print("Testing single input:")
+    test_vectorize_backprop()
+    test_unvectorize_backprop()
+    test_vectorize_unvectorize_backprop()
+
+    print("\nTesting batched input (batch_size=32):")
+    test_vectorize_backprop(batch_size=32)
+    test_unvectorize_backprop(batch_size=32)
+    test_vectorize_unvectorize_backprop(batch_size=32)
+
+    # Round trip check
     torch.manual_seed(152)
-    print()
+    print("\nRound trip check:")
 
     class Model(nn.Module):
         def __init__(self):
@@ -759,18 +910,13 @@ if TEST:
     uv = unvectorize(v, shape_template)
 
     assert check_equality(params, uv)
-    print('vectorize + unvectorize round trip works')
+    print('vectorize + unvectorize round trip works for single input')
 
-
-    # More Tests
-    print("Testing vectorize function:")
-    test_vectorize_backprop()
-
-    print("\nTesting unvectorize function:")
-    test_unvectorize_backprop()
-
-    print("Testing vectorize and unvectorize functions together:")
-    test_vectorize_unvectorize_backprop()
+    # Batched round trip check
+    v_batched = v.unsqueeze(0).repeat(32, 1)
+    uv_batched = unvectorize(v_batched, shape_template)
+    assert all(torch.allclose(uv[k], uv_batched[k][0]) for k in uv.keys())
+    print('vectorize + unvectorize round trip works for batched input')
 
 
 
@@ -871,6 +1017,87 @@ if TEST:
 
     # Generate target values
     y = torch.randn(batch_size, 1)
+
+    # Optimizer for batched parameters
+    optimizer = optim.Adam(batched_params.values(), lr=0.01)
+    criterion = nn.MSELoss()
+
+    num_epochs = 5
+    for epoch in range(num_epochs):
+        # Forward pass with batched parameters
+        y_pred = transformed_model(x, **batched_params)
+
+        # Compute loss
+        loss = criterion(y_pred, y)
+
+        # Backward pass and optimize
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
+
+    # Verify that batched parameters have different values across the batch dimension
+    for name, param in batched_params.items():
+        unique_params = torch.unique(param, dim=0)
+        assert unique_params.shape[0] == batch_size, f"Parameter {name} does not have unique values for each batch item"
+
+    print("Batchify integration test passed successfully!")
+
+    # Compare outputs of original and transformed models after training
+    with torch.no_grad():
+        original_output = original_model(x)
+        transformed_output = transformed_model(x, **batched_params)
+        print(f"Max difference between original and transformed outputs after training: {(original_output - transformed_output).abs().max().item()}")
+
+
+
+##################################################
+# Test `torch.nn.functional` replacements
+
+if TEST:
+    torch.manual_seed(152)
+
+    class BatchTestModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lin_w = nn.Parameter(torch.randn(32 * 32, 32 * 32))
+            # convolution via functional api
+            self.conv_w = nn.Parameter(torch.randn(5, 16, 3, 3))  # 16 channels in, 5 channels out
+            self.conv_b = nn.Parameter(torch.randn(5))
+
+        def forward(self, x):
+            B, chan = x.shape[0], x.shape[1]
+            x = torch.flatten(x, start_dim=-2, end_dim=-1)
+            x = F.linear(x, self.lin_w)
+            x = x.reshape(B, chan, 32, 32)
+            x = F.conv2d(x, self.conv_w, self.conv_b, stride=1, padding=1)  # Direct use of F.conv2d
+            return x
+
+    # Create and transform the model
+    original_model = BatchTestModel()
+    transformed_model = transform_control_inversion(original_model, use_batchify=True)
+
+    # Create batched input
+    batch_size = 7
+    x = torch.randn(batch_size, 16, 32, 32)
+    y = torch.randn(batch_size, 5, 32, 32)
+
+    # Get original parameters and create batched versions
+    orig_params = build_params_dict(original_model)
+    batched_params = {}
+    for name, param in orig_params.items():
+        batched_params[name] = nn.Parameter(param.repeat(batch_size, *[1 for _ in range(param.dim())]))
+
+    # Check outputs before training
+    with torch.no_grad():
+        original_output = original_model(x)
+        transformed_output = transformed_model(x, **batched_params)
+        assert torch.allclose(original_output, transformed_output, atol=1e-3), "Outputs are not equal before training!"
+        print("Original and transformed model outputs match before training.")
+
+    # Generate target values
+
 
     # Optimizer for batched parameters
     optimizer = optim.Adam(batched_params.values(), lr=0.01)

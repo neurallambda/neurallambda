@@ -17,7 +17,8 @@ ABLATIONS
 IMPROVING AUTOENCODER
 - Use MLP Mixer?? just in middle after convs?
 - batch/layer norm?
-- [X] use_skip_connections helped a lot
+- [ ] BatchNorm is supposed to help a lot. It may also be responsible for decoder-only working without skip connections. Use batchnorm *before* activations (apparently its debated). BatchNorm centers you wrt activation functions.
+- [X] use_skip_connections helped a lot.
 - [X] pad input image, then rm padding after decoding. (https://ai.stackexchange.com/a/34929) helped a lot
 - interpolate + conv instead of deconvolution. But then can you still tie params? Maybe interpolate to quadruple, then use the tied weights to halve it?
 - https://distill.pub/2016/deconv-checkerboard/
@@ -46,11 +47,8 @@ from collections import defaultdict
 from neurallambda.lab.common import print_model_info
 import t13_metalearning_hypernet_data as data
 
-torch.manual_seed(152)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 class Autoencoder(nn.Module):
-    def __init__(self, in_channels, img_size, bottleneck_size, kernel_size, pool_size, layer_config, actfn='swish', padding_size=1):
+    def __init__(self, in_channels, img_size, bottleneck_size, kernel_size, pool_size, layer_config, actfn='swish', padding_size=1, use_skip_connections=True):
         super().__init__()
         assert actfn in {'relu', 'swish'}
         self.in_channels = in_channels
@@ -61,6 +59,7 @@ class Autoencoder(nn.Module):
         self.layer_config = layer_config
         self.actfn = actfn
         self.padding_size = padding_size
+        self.use_skip_connections = use_skip_connections
 
         # Initialize layer parameters
         self.conv_weights = nn.ParameterList()
@@ -92,7 +91,7 @@ class Autoencoder(nn.Module):
         self.linear_bias_encoder = nn.Parameter(torch.zeros(bottleneck_size))
         self.linear_bias_decoder = nn.Parameter(torch.zeros(linear_in_features))
 
-    def encode(self, x, use_skip_connections=True):
+    def encode(self, x):
         encoded = x
         if self.padding_size > 0:
             encoded = F.pad(encoded, (self.padding_size,) * 4, mode='reflect')
@@ -106,7 +105,7 @@ class Autoencoder(nn.Module):
                 encoded = F.relu(encoded)
             elif self.actfn == 'swish':
                 encoded = F.silu(encoded)
-            if use_skip_connections:
+            if self.use_skip_connections:
                 skip_connections.append(encoded)
             if use_pool:
                 encoded, indices = F.max_pool2d(encoded, self.pool_size, return_indices=True)
@@ -126,10 +125,10 @@ class Autoencoder(nn.Module):
         return encoded, pool_indices, last_conv_shape, skip_connections, shapes
 
     def decode(self, encoded, pool_indices, last_conv_shape, skip_connections=None, shapes=None):
-        decoded = F.linear(encoded, self.linear_weights.t(), self.linear_bias_decoder)
+        # decoded = F.linear(encoded, self.linear_weights.t(), self.linear_bias_decoder)
+        decoded = F.linear(encoded, torch.transpose(self.linear_weights, -2, -1), self.linear_bias_decoder)
 
         # note: `*last_conv_shape` doesn't work with fx.Proxy, so, unpack by hand
-        print('LAST_CONV_SHAPE:', last_conv_shape)
         decoded = decoded.view(-1, last_conv_shape[0], last_conv_shape[1], last_conv_shape[2])
 
         for i, (conv_weight, conv_bias, use_pool, indices) in enumerate(zip(
@@ -155,7 +154,7 @@ class Autoencoder(nn.Module):
         return decoded
 
     def forward(self, x):
-        encoded, pool_indices, last_conv_shape, skip_connections, shapes = self.encode(x, use_skip_connections=True)
+        encoded, pool_indices, last_conv_shape, skip_connections, shapes = self.encode(x)
         decoded = self.decode(encoded, pool_indices, last_conv_shape, skip_connections, shapes)
 
         # Note: imgs are normalized to [-1, 1]
@@ -201,6 +200,7 @@ def run_epoch(model, dataloader, optimizer, device, mask_ratio, train=True):
 
 
 def visualize_reconstructions(vmodel, vmodel_params, dataloader, num_images=10):
+    device = list(vmodel_params.parameters())[0].device
     vmodel.eval()
     with torch.no_grad():
         # Get a batch of images
@@ -233,6 +233,9 @@ def visualize_reconstructions(vmodel, vmodel_params, dataloader, num_images=10):
 # Go
 
 if False:
+    torch.manual_seed(152)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     batch_size = 64
     num_epochs = 20
     lr = 2e-3
