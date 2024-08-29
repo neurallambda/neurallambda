@@ -19,20 +19,6 @@ STEPS:
 3. hypernetwork (this module ties everything together)
 
 
-NOTES: I'm debugging some batchify stuff
-
-# naive for loop batching, no batchify
-batch_size=1  val_loss=0.007
-batch_size=2  val_loss=0.009
-batch_size=8  val_loss=0.014 (maybe better, but slower improvement per epoch)
-batch_size=64 val_loss=0.02
-
-
-SIMPLIFY
-- make an AE version not dependent on torch.fx stuff
-- ascertain a lift from metalearning
-
-
 Q:
 - metalearn hypernet too? or just its outputs?
 
@@ -187,7 +173,7 @@ class Thing(nn.Module):
             mx = x
 
         # Metalearning
-        BATCH_MODE=False
+        BATCH_MODE = False
         if BATCH_MODE:
             with torch.enable_grad():
 
