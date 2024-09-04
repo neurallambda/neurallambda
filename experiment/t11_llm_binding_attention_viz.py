@@ -44,7 +44,7 @@ random.seed(SEED)
 DEVICE = 'cuda'
 BATCH_SIZE = 32
 
-model_name = "/home/josh/_/models/Qwen2-1.5B"
+model_name = os.path.expanduser("~/_/models/Qwen2-1.5B")
 
 
 ##################################################

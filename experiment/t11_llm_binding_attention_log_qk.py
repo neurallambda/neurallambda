@@ -37,8 +37,8 @@ torch.manual_seed(152)
 DEVICE = 'cuda'
 BATCH_SIZE = 128
 
-# model_name = "/home/josh/_/models/Qwen2-0.5B"
-# # model_name = "/home/josh/_/models/Qwen2-1.5B"
+# model_name = os.path.expanduser("~/_/models/Qwen2-0.5B")
+# # model_name = os.path.expanduser("~/_/models/Qwen2-1.5B")
 
 
 ##################################################
@@ -382,7 +382,7 @@ if False:
     print()
     print('Hand Checking Logging')
 
-    model_name = "/home/josh/_/models/Qwen2-1.5B"
+    model_name = os.path.expanduser("~/_/models/Qwen2-1.5B")
     cpu_model = AutoModelForCausalLM.from_pretrained(
         model_name,
         torch_dtype="auto",

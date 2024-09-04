@@ -88,8 +88,8 @@ USE_TRAINED_LSTM = True
 LSTM_DIR = 't11_llm_binding_attention_lstms'
 os.makedirs(LSTM_DIR, exist_ok=True)
 
-# model_name = "/home/josh/_/models/Qwen2-0.5B"
-model_name = "/home/josh/_/models/Qwen2-1.5B"
+# model_name = os.path.expanduser("~/_/models/Qwen2-0.5B")
+model_name = os.path.expanduser("~/_/models/Qwen2-1.5B")
 
 
 ##################################################
