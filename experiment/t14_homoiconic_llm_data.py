@@ -1,5 +1,8 @@
 '''
 
+Generate a toy dataset of arithmetic problems
+
+Example:
 
 a=1^
 b=2^
@@ -94,6 +97,8 @@ def expression_to_str(expr: Expression) -> str:
         case _:
             raise TypeError(f"Unknown expression type: {type(expr)}")
 
+
+##########
 # Demo
 vars = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j']
 nums = [-2, -1, 0, 1, 2]
@@ -103,6 +108,3 @@ for _ in range(5):
     puzzle = make_puzzle(vars, nums, ops)
     print(pretty_print(puzzle))
     print()
-
-
-##################################################

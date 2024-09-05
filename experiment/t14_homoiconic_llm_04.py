@@ -2,7 +2,7 @@
 
 Apply Metalearning-Hypernet stuff to Transformer arch
 
-This version just wires everything up and does a "smoke test", of training a single row of data in and seeing what happens.
+The previous version wired everything up and did a smoke test, this version will train in a toy dataset.
 
 
 TO CONSIDER:
@@ -17,7 +17,7 @@ TO CONSIDER:
 
 
 PROVENANCE:
-- t13_metalearning_hypernet_03.py
+- t14_homoiconic_llm_03.py
 
 ----------
 QWEN 0.5B
