@@ -10,12 +10,24 @@
 
 <div align="center">
   <img src="doc/logo.png" width="150" alt="Blueberry soil pH">
+</div>
 
-Reasoning AI, via Differentiable Lambda Calculus.
+# V2: Homoiconic LLM
+
+> [!NOTE]
+> 
+> V2 is [under construction](https://github.com/neurallambda/neurallambda/pull/3), and I need to organize and write it up better. I keep [X](https://x.com/neurallambda) more up to date rn.
+>
+> **tl;dr** I'm augmenting LLMs with a "weight" modality that allows LLMs to input/generate/apply weight updates within the stream of tokens they normally output.
+
+
+----------
+
+# V1: Reasoning AI, via Differentiable Lambda Calculus.
 
 (And other NeuroSymbolic stuff: Stacks, Queues, Addressable Memory, Lists, Trees, Latches, etc.)
 
-</div>
+
 
 ## **tl;dr**
 
