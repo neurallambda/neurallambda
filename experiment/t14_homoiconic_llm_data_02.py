@@ -17,13 +17,13 @@ from dataclasses import dataclass
 from typing import Union, List, Dict
 import json
 from tqdm import tqdm
-from datasets import Dataset, load_dataset
+from datasets import Dataset, DatasetDict, load_dataset
 from huggingface_hub import HfApi, HfFolder
 from typing import Union, Dict
-from datasets import Dataset, DatasetDict, load_dataset
 import json
 import matplotlib.pyplot as plt
 from collections import Counter
+import logging
 
 @dataclass
 class IntLiteral:
@@ -129,33 +129,47 @@ def save_dataset(dataset: List[Dict], filename: str):
         json.dump(dataset, f, indent=2)
 
 def upload_to_huggingface(dataset_name: str, dataset_files: Dict[str, str], readme: str):
-    # Load the datasets
-    datasets = {}
-    for split, file in dataset_files.items():
-        with open(file, 'r') as f:
-            data = json.load(f)
-        datasets[split] = Dataset.from_dict({
-            "input": [example["input"] for example in data],
-            "output": [example["output"] for example in data]
-        })
+    logging.info(f"Starting upload process for dataset: {dataset_name}")
 
-    # Create a DatasetDict
-    dataset_dict = Dataset.DatasetDict(datasets)
+    try:
+        # Load the datasets
+        datasets = {}
+        for split, file in dataset_files.items():
+            with open(file, 'r') as f:
+                data = json.load(f)
+            datasets[split] = Dataset.from_dict({
+                "input": [example["input"] for example in data],
+                "output": [example["output"] for example in data]
+            })
 
-    # Push to the Hugging Face Hub
-    api = HfApi()
-    api.create_repo(dataset_name, repo_type="dataset", exist_ok=True)
+        # Create a DatasetDict
+        dataset_dict = DatasetDict(datasets)
 
-    dataset_dict.push_to_hub(dataset_name, token=HfFolder.get_token())
+        # Get the token
+        token = HfFolder.get_token()
+        if not token:
+            raise ValueError("No Hugging Face token found. Please login using `huggingface-cli login` or set the HUGGINGFACE_TOKEN environment variable.")
 
-    # Update dataset metadata
-    api.update_repo_visibility(dataset_name, private=False, repo_type="dataset")
-    api.upload_file(
-        path_or_fileobj=readme.encode(),
-        path_in_repo="README.md",
-        repo_id=dataset_name,
-        repo_type="dataset"
-    )
+        # Push to the Hugging Face Hub
+        api = HfApi()
+        api.create_repo(dataset_name, repo_type="dataset", exist_ok=True)
+
+        dataset_dict.push_to_hub(dataset_name, token=token)
+
+        # Update dataset metadata
+        api.update_repo_visibility(dataset_name, private=False, repo_type="dataset")
+        api.upload_file(
+            path_or_fileobj=readme.encode(),
+            path_in_repo="README.md",
+            repo_id=dataset_name,
+            repo_type="dataset",
+            token=token
+        )
+
+        logging.info(f"Successfully uploaded dataset: {dataset_name}")
+    except Exception as e:
+        logging.error(f"Error uploading dataset {dataset_name}: {str(e)}")
+        raise
 
 def load_dataset_from_source(source: Union[str, Dict[str, str]], is_local: bool = False) -> DatasetDict:
     if is_local:
@@ -332,7 +346,7 @@ if True or __name__ == "__main__":
     nums = list(range(-10, 11))  # integer literals
     ops = ['+', '-', '*']
 
-    n_samples = 100
+    n_samples = 10_000
 
     train_small = generate_dataset(n_samples, 10, nums, ops)
     test_small = generate_dataset(n_samples, 10, nums, ops)
@@ -346,15 +360,6 @@ if True or __name__ == "__main__":
     save_dataset(train_large, 'arithmetic_train_large.json')
     save_dataset(test_large, 'arithmetic_test_large.json')
 
-    # Save to HF Hub
-    # upload_to_huggingface(dataset_name, local_files, readme)
-
-    # Load and inspect
-
-    # # From Hugging Face Hub
-    # print("Loading from Hugging Face Hub:")
-    # demonstrate_dataset("neurallambda/arithmetic_puzzles")
-
     print("\n" + "=" * 50 + "\n")
 
     # From local JSON files
@@ -365,5 +370,16 @@ if True or __name__ == "__main__":
         "train_large": "arithmetic_train_large.json",
         "test_large": "arithmetic_test_large.json"
     }
-    demonstrate_dataset(local_files, is_local=True)
-    generate_output_histograms(local_files, is_local=True)
+
+    # # Visualize
+    # demonstrate_dataset(local_files, is_local=True)
+    # generate_output_histograms(local_files, is_local=True)
+
+    # # Save to HF Hub
+    # upload_to_huggingface(dataset_name, local_files, readme)
+
+    # Load and inspect
+
+    # # From Hugging Face Hub
+    # print("Loading from Hugging Face Hub:")
+    # demonstrate_dataset("neurallambda/arithmetic_puzzles")
