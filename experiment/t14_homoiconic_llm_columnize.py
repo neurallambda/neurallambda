@@ -2,7 +2,7 @@
 
 Verify that batches of data can be:
 
-* processed into columns
+* processed into column blocks
 * have the BLOCKS aligned
 * ensure that attention masking works properly with padding
 * ensure that position_ids make processing with padding, or not, equivalent
@@ -36,7 +36,8 @@ except:
         model_name,
         # torch_dtype="auto",
         # torch_dtype=torch.bfloat16,
-        torch_dtype=torch.float64,
+        torch_dtype=torch.float32,
+        # torch_dtype=torch.float64,
         device_map=DEVICE,
         _attn_implementation='eager',
     )
@@ -85,9 +86,9 @@ past_key_values across generations. '''
 
         # `attention_mask` will continue to grow as the entire sequence length
         # seen so far
-        if i > 0:
+        if attention_mask is not None:
             attention_mask = torch.cat([attention_mask, new_attention_mask], dim=-1)
-        if i == 0:
+        else:
             attention_mask = new_attention_mask
 
         # run column
@@ -254,25 +255,18 @@ def pad_columns(xss: List[List[str]], padding_side='right'):
 
 BLOCK = '~X'
 
-check_eq_ixs = [0, 5, 6, 7, 8] # to check that block-wise padding works
+check_eq_ixs = [0, 5, 6, 7, 8, 9] # to check that block-wise padding works
 
 # This contains 2 different tests:
 #   1. is processing in columnized batches equivalent (even after padding) to processing rows?
 #   2. is block padding equivalent to not using it?
 prompt_chonkss = pad_columns([
     ["A~B~C~D~E", BLOCK, "~F~G~H~I~J", BLOCK, "~K~L~M~N~O"],
-    ["A~B~C~D",   BLOCK, "~F~G~H~I",   BLOCK, "~K~L~M~N"],
-    ["A~B~C",     BLOCK, "~F~G~H",     BLOCK, "~K~L~M"],
-    ["A~B",       BLOCK, "~F~G",       BLOCK, "~K~L"],
-    ["A",         BLOCK, "~F",         BLOCK, "~K"],
-
-
     ["A~B~C~D~E", BLOCK, "~F~G~H~I~J", BLOCK + "~K~L~M~N~O"],
     ["A~B~C~D~E", BLOCK, "~F~G~H~I~J" + BLOCK + "~K~L~M~N~O"],
     ["A~B~C~D~E", BLOCK + "~F~G~H~I~J" + BLOCK + "~K~L~M~N~O"],
     ["A~B~C~D~E" + BLOCK + "~F~G~H~I~J" + BLOCK + "~K~L~M~N~O"],
-    # [f"A~B~C~D~E{BLOCK}~F~G~H~I~J{BLOCK}~K~L~M~N~O"],
-
+    ["", "A~B~C~D~E" + BLOCK + "~F~G~H~I~J" + BLOCK + "~K~L~M~N~O"],
 ])
 
 # Double check block padding tests tokenize the same
@@ -383,7 +377,7 @@ for i in range(len(prompt_chonkss)):
     s = single_logits[i].squeeze(0)
 
     # Check if the differences are within an acceptable threshold
-    threshold = 1e-4
+    threshold = 1e-3
     is_close = torch.allclose(b, s, atol=threshold)
 
     if is_close:

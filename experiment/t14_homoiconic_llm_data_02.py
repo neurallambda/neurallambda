@@ -339,7 +339,7 @@ Output: 3
 '''
 
 
-if True or __name__ == "__main__":
+if False:
     dataset_name = "neurallambda/arithmetic_dataset"
 
     # Generate datasets

@@ -487,7 +487,8 @@ class Qwen2Model(Q.Qwen2PreTrainedModel):
                 use_cache = False
 
         use_legacy_cache = False
-        if use_cache and not isinstance(past_key_values, Cache) and not self.training:
+        # if use_cache and not isinstance(past_key_values, Cache) and not self.training:  # original, bans cache if training
+        if use_cache and not isinstance(past_key_values, Cache):
             use_legacy_cache = True
             past_key_values = DynamicCache.from_legacy_cache(past_key_values)
             Q.logger.warning_once(
