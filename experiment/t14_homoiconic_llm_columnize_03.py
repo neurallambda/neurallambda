@@ -44,7 +44,7 @@ def columnwise_collate_fn(
     # not all data has same number of blocks/single columns, this pads blocks/cols with empty data
     padded_batch = []
     for item in batch:
-        padded_item = item + [{'type': 'pad_block', 'content': ''}] * (max_cols - len(item))
+        padded_item = item + [{'type': 'pad_block', 'content': '', 'include_in_loss': False}] * (max_cols - len(item))
         padded_batch.append(padded_item)
 
     # Transpose the batch to get columns

@@ -393,179 +393,21 @@ past_key_values across generations. '''
         assert past_key_values is not None, "past_key_values cannot be None. Typically `transformers` models won't return past_key_values during training, so, you need to modify the underlying model class."
 
         # EXPERIMENT: TODO fix: for testing, odd columns are the lor_block
+        warnings.warn('hardcoded lor blocks')
         if i % 2 == 1:
-            final_emb = out.hidden_states[-1]
+            h_emb = out.hidden_states[lor_layer]
             for lor_key, (lor_i, lor_j) in lor_parse.items():
                 lors[lor_key][lor_layer] = (
-                    final_emb[:, lor_i].unsqueeze(2),
-                    final_emb[:, lor_j].unsqueeze(1)
+                    h_emb[:, lor_i].unsqueeze(2),
+                    h_emb[:, lor_j].unsqueeze(1)
                 )
 
     return col_out_logits, attention_mask, past_key_values
 
 
-def ORIGINAL_generate(model, input_ids, lors, attention_mask, max_new_tokens, past_key_values=None):
-    '''Generate tokens autoregressively using or initializing the past_key_value cache.'''
-    generated_tokens = []
-    next_token = None
-    for i in range(max_new_tokens):
-        # For the first iteration, use the full prompt. For subsequent
-        # iterations, use only the last generated token. `attention_mask` will
-        # continue to grow as the entire sequence length seen so far
-        if i > 0:
-            input_ids = next_token.unsqueeze(1)
-            attention_mask = torch.cat([attention_mask, torch.ones_like(input_ids)], dim=-1)
-        out = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            past_key_values=past_key_values,
-            return_dict=True,
-            **lors,
-        )
-        next_token = out.logits[:, -1].argmax(dim=-1)
-        generated_tokens.append(next_token)
-        attention_mask = torch.cat([attention_mask, torch.ones_like(input_ids)], dim=-1)
-        past_key_values = out.past_key_values
-
-        # EXPERIMENT: TODO fix: for testing, column 1 is the lor_block
-        if i == 1:
-            final_emb = out.hidden_states[-1]
-            for lor_key, (lor_i, lor_j) in lor_parse.items():
-                lors[lor_key][lor_layer] = (
-                    final_emb[:, lor_i].unsqueeze(2),
-                    final_emb[:, lor_j].unsqueeze(1)
-                )
-
-    return (
-        torch.stack(generated_tokens, dim=-1),
-        attention_mask,
-        past_key_values
-    )
-
-
-def generate(model, col_inputs, lors, max_new_tokens=0):
-    '''Recurrently process column blocks of ids, concatenating attention_mask and
-    past_key_values across generations. Can generate new tokens if max_new_tokens > 0.'''
-    col_out_logits = []
-    past_key_values = None
-    attention_mask = None
-    all_output_ids = []
-    tokens_generated = 0
-
-    # Iterate over each column in the batch
-    for i, batch_column in enumerate(col_inputs):
-        input_ids = batch_column['input_ids']
-        new_attention_mask = batch_column['attention_mask']
-        position_ids = batch_column['position_ids']
-
-        # skip empty batches. this can happen because of padded blocks.
-        if input_ids.numel() == 0:
-            continue
-
-        # `attention_mask` will continue to grow as the entire sequence length
-        # seen so far (even though input_ids will only be new inputs, not past)
-        if attention_mask is not None:
-            attention_mask = torch.cat([attention_mask, new_attention_mask], dim=-1)
-        else:
-            attention_mask = new_attention_mask
-
-        # run column
-        out = model(input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    past_key_values=past_key_values,
-                    return_dict=True,
-                    use_cache=True,
-                    position_ids=position_ids,
-                    output_hidden_states=True,  # OPTIM: we don't need this for non-lor blocks
-                    **lors,
-                    )
-        col_out_logits.append(out.logits)
-        all_output_ids.append(input_ids)
-
-        past_key_values = out.past_key_values
-        assert past_key_values is not None, "past_key_values cannot be None. Typically `transformers` models won't return past_key_values during training, so, you need to modify the underlying model class."
-
-        # EXPERIMENT: TODO fix: for testing, odd columns are the lor_block
-        if i % 2 == 1:
-            final_emb = out.hidden_states[-1]
-            for lor_key, (lor_i, lor_j) in lor_parse.items():
-                lors[lor_key][lor_layer] = (
-                    final_emb[:, lor_i].unsqueeze(2),
-                    final_emb[:, lor_j].unsqueeze(1)
-                )
-
-    # If max_new_tokens > 0, continue generating new tokens
-    while tokens_generated < max_new_tokens:
-        # Get the last token's logits
-        last_token_logits = out.logits[:, -1, :]
-
-        # Sample the next token (you can replace this with your preferred sampling method)
-        next_token = torch.argmax(last_token_logits, dim=-1).unsqueeze(-1)
-
-        # Update input_ids for the next iteration
-        input_ids = next_token
-        all_output_ids.append(input_ids)
-
-        # Update position_ids
-        position_ids = (position_ids[:, -1] + 1).unsqueeze(-1)
-
-        # Update attention_mask
-        attention_mask = torch.cat([attention_mask, torch.ones_like(next_token)], dim=-1)
-
-        # Generate the next token
-        out = model(input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    past_key_values=past_key_values,
-                    return_dict=True,
-                    use_cache=True,
-                    position_ids=position_ids,
-                    output_hidden_states=True,
-                    **lors,
-                    )
-
-        col_out_logits.append(out.logits)
-        past_key_values = out.past_key_values
-
-        tokens_generated += 1
-
-    return col_out_logits, attention_mask, past_key_values, torch.cat(all_output_ids, dim=-1)
-
 
 ##########
 # Training Fns
-
-# def loss_fn(col_batch_in, col_batch_out, loss_mask):
-#     ''' this version hardcodes column_ix==1 is the only lor block '''
-#     breakpoint()
-#     warnings.warn('loss fn should account for attention_mask so that padded tokens cannot contribute to eg means')
-#     vocab_size = col_batch_out[0].shape[2]
-#     # Shift so that tokens < n predict n, and flatten
-#     loss = 0
-#     labels = []
-#     logits = []
-#     for i, (inp, out) in enumerate(zip(col_batch_in, col_batch_out)):
-#         if i == 1:
-#             # handle lor_block
-#             B, D = out.shape[0], out.shape[2]
-#             warnings.warn('skip calculating cross entropy loss for column==1. For the current dataset this column is the lor_block.')  # TODO: fix
-#             m = lor_mask.nonzero().squeeze(1)  # convert bools to indices
-#             im = m.unsqueeze(0).expand(B, -1)
-#             om = im.unsqueeze(2).expand(-1, -1, D)
-#             labels.append(inp.gather(1, im))
-#             logits.append(out.gather(1, om))
-#         else:
-#             # non lor block
-#             labels.append(inp)
-#             logits.append(out)
-
-#     # NOTE: loss needs to reach across columns so that the final output of one
-#     # column predicts the next input of next column, so we aggregate and then
-#     # shift
-#     shift_labels = torch.cat(labels, dim=1)[..., 1:].contiguous().view(-1)
-#     shift_logits = torch.cat(logits, dim=1)[..., :-1, :].contiguous().view(-1, vocab_size)
-#     loss = loss + F.cross_entropy(shift_logits, shift_labels)
-#     return loss
-
 
 def loss_fn(
     col_batch_in: List[torch.Tensor],  # list of blocks of TOKENS IDS (dtype=int)
@@ -659,11 +501,12 @@ except:
 
     already_loaded = True
 
+
 ##########
 # LOR stuff
 
 # hard code the layer these apply to
-lor_layer = 25  # qwen1.5B has 28 layers
+lor_layer = 2  # qwen1.5B has 28 layers
 # Q|| K|| V|| O|| G|| U|| D||
 lor_block = "^@Q^@|^@|^@K^@|^@|^@V^@|^@|^@O^@|^@|^@G^@|^@|^@U^@|^@|^@D^@|^@|"
 
@@ -671,6 +514,7 @@ lor_block = "^@Q^@|^@|^@K^@|^@|^@V^@|^@|^@O^@|^@|^@G^@|^@|^@U^@|^@|^@D^@|^@|"
 # it to loss. meta weights should not be affected directly by the cross entropy
 # loss.
 lor_mask = [1, 0, 0] * 7  # note: should be list, not tensor. `datasets` converts it back to a list (then tensor again) anyway
+lor_mask = [0, 0, 0] * 7  # TODO: rm, this mask does NOT learn output of metatokens
 
 # NOTE: lor_metatokens and lor_parse are offset by 1, because they parse out of
 # the outputs. The metatoken ^@Q in the input gets converted into the first
@@ -688,22 +532,12 @@ lor_parse = {
     'lor_ds': [18, 19],
 }
 
-# ##########
-# # Data V1
-
-# prompt_chonkss = [
-#     ["Once upon a time in a galaxy far away, ", lor_block, "there was a lion who went"],
-#     ["Once upon a time in a galaxy far away, ", lor_block, "there was a lion"],
-# ]
-
-# col_inputs = C.create_column_batch_inputs(prompt_chonkss, tokenizer, DEVICE)
-
 
 ####################
 # Data v2
 
-train_small = load_dataset("neurallambda/arithmetic_dataset", split="train_small").select(range(100))  # todo: rm, this shrinks test
-test_small = load_dataset("neurallambda/arithmetic_dataset", split="test_small").select(range(100))
+train_small = load_dataset("neurallambda/arithmetic_dataset", split="train_small").select(range(100))  # todo: rm, this shrinks training
+test_small = load_dataset("neurallambda/arithmetic_dataset", split="test_small").select(range(20))
 
 def insert_lor_blocks(dataset: HFDataset, block_content) -> HFDataset:
     """
@@ -806,38 +640,135 @@ plt.show()
 
 
 
-# ##########
+##########
 
-# # Inference, ie Autoregressive Continuation
+# Inference, ie Autoregressive Continuation
 
-# # START_BLOCK_1
+# START_BLOCK_1
 
-# model.eval()
-# with torch.no_grad():
-#     test_prompts = [
-#         ["var_0=1", "var_1=2", "var_3=var_0 + var_1", "solve(var_3)="],  # 3
-#         ["var_0=3", "var_1=5", "var_3=var_0 - var_1", "solve(var_3)="],  # -2
-#         ["var_0=2", "var_1=3", "var_3=var_0 * var_1", "solve(var_3)="],  # 6
-#     ]
-#     lors = empty_lors(model.config.num_hidden_layers)
-#     tokenizer.padding_side = 'left'
-#     inputs = tokenizer(test_prompts, padding=True, return_tensors="pt").to(DEVICE)
-#     input_ids = inputs['input_ids']
-#     attention_mask = inputs['attention_mask']
-#     output_ids, col_attention_mask, col_past_key_values = generate(model, input_ids, lors, attention_mask, max_new_tokens=20, past_key_values=None)
-#     # for display add in col outputs
-#     outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=False)
-#     print('---------- gen results')
-#     for o in outputs:
-#         print(f'"{o}"')
+def generate(model, col_inputs, lors, max_new_tokens):
+    '''Recurrently process column blocks of ids, concatenating attention_mask and
+    past_key_values across generations. Can generate new tokens if max_new_tokens > 0.'''
+    col_out_logits = []
+    past_key_values = None
+    attention_mask = None
+    all_output_ids = []
+    tokens_generated = 0
 
-# # END_BLOCK_1
+    # Iterate over each column in the batch
+    for i, batch_column in enumerate(col_inputs):
+        input_ids = batch_column['input_ids']
+        new_attention_mask = batch_column['attention_mask']
+        position_ids = batch_column['position_ids']
+
+        # skip empty batches. this can happen because of padded blocks.
+        if input_ids.numel() == 0:
+            continue
+
+        # `attention_mask` will continue to grow as the entire sequence length
+        # seen so far (even though input_ids will only be new inputs, not past)
+        if attention_mask is not None:
+            attention_mask = torch.cat([attention_mask, new_attention_mask], dim=-1)
+        else:
+            attention_mask = new_attention_mask
+
+        # run column
+        out = model(input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    past_key_values=past_key_values,
+                    return_dict=True,
+                    use_cache=True,
+                    position_ids=position_ids,
+                    output_hidden_states=True,  # OPTIM: we don't need this for non-lor blocks
+                    **lors,
+                    )
+        col_out_logits.append(out.logits)
+        # all_output_ids.append(input_ids)
+
+        past_key_values = out.past_key_values
+        assert past_key_values is not None, "past_key_values cannot be None. Typically `transformers` models won't return past_key_values during training, so, you need to modify the underlying model class."
+
+        # EXPERIMENT: TODO fix: for testing, odd columns are the lor_block
+        warnings.warn('hardcoded lor blocks')
+        if i % 2 == 1:
+            h_emb = out.hidden_states[lor_layer]
+            for lor_key, (lor_i, lor_j) in lor_parse.items():
+                lors[lor_key][lor_layer] = (
+                    h_emb[:, lor_i].unsqueeze(2),
+                    h_emb[:, lor_j].unsqueeze(1)
+                )
+
+    # If max_new_tokens > 0, continue generating new tokens
+    while tokens_generated < max_new_tokens:
+
+        # Get the last token's logits
+        last_token_logits = out.logits[:, -1, :]
+
+        # Sample the next token (you can replace this with your preferred sampling method)
+        next_token = torch.argmax(last_token_logits, dim=-1).unsqueeze(-1)
+
+        # Update input_ids for the next iteration
+        input_ids = next_token
+        all_output_ids.append(input_ids)
+
+        # Update position_ids
+        position_ids = (position_ids[:, -1] + 1).unsqueeze(-1)
+
+        # Update attention_mask
+        attention_mask = torch.cat([attention_mask, torch.ones_like(next_token)], dim=-1)
+
+        # Generate the next token
+        out = model(input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    past_key_values=past_key_values,
+                    return_dict=True,
+                    use_cache=True,
+                    position_ids=position_ids,
+                    output_hidden_states=True,
+                    **lors,
+                    )
+
+        col_out_logits.append(out.logits)
+        past_key_values = out.past_key_values
+
+        tokens_generated += 1
+
+    return col_out_logits, attention_mask, past_key_values, torch.cat(all_output_ids, dim=-1)
+
+def t(x):
+    return {'type': 'text', 'content': x, 'include_in_loss': False}  # loss not needed during inference
+
+def w(x):
+    return {'type': 'lor', 'content': x, 'include_in_loss': False}  # loss not needed during inference
+
+model.eval()
+with torch.no_grad():
+
+    test_prompts = [
+        [t("var_0=1"), w(lor_block), t("var_1=2"), w(lor_block), t("var_3=var_0 + var_1"), w(lor_block), t("solve(var_3)=")],  # 3
+        [t("var_0=3"), w(lor_block), t("var_1=5"), w(lor_block), t("var_3=var_0 - var_1"), w(lor_block), t("solve(var_3)=")],  # -2
+        [t("var_0=2"), w(lor_block), t("var_1=3"), w(lor_block), t("var_3=var_0 * var_1"), w(lor_block), t("solve(var_3)=")],  # 6
+        [t("hi there"), w(lor_block)],
+        [t("wow whats up")],
+    ]
+
+    inputs = C.create_column_batch_inputs(test_prompts, tokenizer, device='cuda')
+    lors = empty_lors(model.config.num_hidden_layers)
+
+    output_logits, col_attention_mask, col_past_key_values, output_ids = generate(model, inputs, lors, max_new_tokens=20)
+    # for display add in col outputs
+    outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=False)
+    print('---------- gen results')
+    for o in outputs:
+        print(f'"{o}"')
+
+# END_BLOCK_1
 
 
 
-# # x = torch.arange(60).reshape(3, 4, 5)
-# # m = torch.tensor([
-# #     [1, 0, 0, 0],
-# #     [0, 1, 0, 0],
-# #     [0, 0, 1, 0],
-# # ], dtype=torch.bool)
+# x = torch.arange(60).reshape(3, 4, 5)
+# m = torch.tensor([
+#     [1, 0, 0, 0],
+#     [0, 1, 0, 0],
+#     [0, 0, 1, 0],
+# ], dtype=torch.bool)
