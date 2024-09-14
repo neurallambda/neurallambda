@@ -71,8 +71,11 @@ def lor(x, in_proj, out_proj) -> torch.Tensor:
 
     '''
 
-    x = x @ in_proj  # [B, rank]
-    x = x @ out_proj  # [B, out_features]
+    # x = x @ in_proj  # [B, rank]
+    # x = x @ out_proj  # [B, out_features]
+
+    x = torch.einsum('bsd, brd -> bsr', x, in_proj)
+    x = torch.einsum('bsr, bdr -> bsd', x, out_proj)
     return x
 
 
@@ -109,50 +112,53 @@ class Qwen2MLP(nn.Module):
         '''
         B, S, D = hidden_state.shape
         if lor_g is not None:
-            assert lor_g[0].shape[0] == B
-            assert lor_g[0].shape[1] == D
-            assert lor_g[1].shape[0] == B
-            assert lor_g[1].shape[2] == D
+            # left vecs, ie output
+            assert lor_g[0].shape[0] == B, f'{lor_g[0].shape[0]} should == {B}'
+            assert lor_g[0].shape[1] == self.intermediate_size, f'{lor_g[0].shape[1]} should == {self.intermediate_size}'
+            # right vecs, ie input
+            assert lor_g[1].shape[0] == B, f'{lor_g[1].shape[0]} should == {B}'
+            assert lor_g[1].shape[2] == D, f'{lor_g[1].shape[2]} should == {D}'
 
         if lor_u is not None:
-            assert lor_u[0].shape[0] == B
-            assert lor_u[0].shape[1] == D
-            assert lor_u[1].shape[0] == B
-            assert lor_u[1].shape[2] == D
+            # left vecs, ie output
+            assert lor_u[0].shape[0] == B, f'{lor_u[0].shape[0]} should == {B}'
+            assert lor_u[0].shape[1] == self.intermediate_size, f'{lor_u[0].shape[1]} should == {self.intermediate_size}'
+            # right vecs, ie input
+            assert lor_u[1].shape[0] == B, f'{lor_u[1].shape[0]} should == {B}'
+            assert lor_u[1].shape[2] == D, f'{lor_u[1].shape[2]} should == {D}'
 
         if lor_d is not None:
-            assert lor_d[0].shape[0] == B
-            assert lor_d[0].shape[1] == D
-            assert lor_d[1].shape[0] == B
-            assert lor_d[1].shape[2] == D
-
-
-        warnings.warn('NOT USING GUD BLOCKS ' * 50)
+            # left vecs, ie output
+            assert lor_d[0].shape[0] == B, f'{lor_d[0].shape[0]} should == {B}'
+            assert lor_d[0].shape[1] == D, f'{lor_d[0].shape[1]} should == {D}'
+            # right vecs, ie input
+            assert lor_d[1].shape[0] == B, f'{lor_d[1].shape[0]} should == {B}'
+            assert lor_d[1].shape[2] == self.intermediate_size, f'{lor_d[1].shape[2]} should == {self.intermediate_size}'
 
         # low rank gate_proj
         g = self.gate_proj(hidden_state)
-        # if lor_g is not None:
-        #     loro, lori = lor_g
-        #     # we interpolate here bc the lor dim is the same as the embedding
-        #     # dim, but the mlp layers are typically bigger (on the order of
-        #     # ~4-8x)
-        #     loro = F.interpolate(loro, size=self.intermediate_size, mode='linear', align_corners=True)
-        #     g = g + lor(hidden_state, lori, loro)
+        if lor_g is not None:
+            loro, lori = lor_g
+            # # we interpolate here bc the lor dim is the same as the embedding
+            # # dim, but the mlp layers are typically bigger (on the order of
+            # # ~4-8x)
+            # loro = F.interpolate(loro, size=self.intermediate_size, mode='linear', align_corners=True)
+            g = g + lor(hidden_state, lori, loro)
 
         # low rank up_proj
         u = self.up_proj(hidden_state)
-        # if lor_u is not None:
-        #     loro, lori = lor_u
-        #     loro = F.interpolate(loro, size=self.intermediate_size, mode='linear', align_corners=True)
-        #     u = u + lor(hidden_state, lori, loro)
+        if lor_u is not None:
+            loro, lori = lor_u
+            # loro = F.interpolate(loro, size=self.intermediate_size, mode='linear', align_corners=True)
+            u = u + lor(hidden_state, lori, loro)
 
         # low rank down_proj
         d_in = self.act_fn(g) * u
         out = self.down_proj(d_in)
-        # if lor_d is not None:
-        #     loro, lori = lor_d
-        #     lori = F.interpolate(lori.permute(0, 2, 1), size=self.intermediate_size, mode='linear', align_corners=True).permute(0, 2, 1)
-        #     out = out + lor(d_in, lori, loro)
+        if lor_d is not None:
+            loro, lori = lor_d
+            # lori = F.interpolate(lori.permute(0, 2, 1), size=self.intermediate_size, mode='linear', align_corners=True).permute(0, 2, 1)
+            out = out + lor(d_in, lori, loro)
 
         return out
 
@@ -256,11 +262,21 @@ class Qwen2Attention(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
-        MAKE USE OF lor_qkvo
-
         query_states = self.q_proj(hidden_states)
+        if lor_q is not None:
+            lor_qo, lor_qi = lor_q
+            query_states = lor(query_states, lor_qi, lor_qo)
+
         key_states = self.k_proj(hidden_states)
+        if lor_k is not None:
+            lor_ko, lor_ki = lor_k
+            key_states = lor(key_states, lor_ki, lor_ko)
+
         value_states = self.v_proj(hidden_states)
+        if lor_v is not None:
+            lor_vo, lor_vi = lor_v
+            value_states = lor(value_states, lor_vi, lor_vo)
+
 
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
@@ -313,6 +329,9 @@ class Qwen2Attention(nn.Module):
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
         attn_output = self.o_proj(attn_output)
+        if lor_o is not None:
+            lor_oo, lor_oi = lor_o
+            attn_output = lor(attn_output, lor_oi, lor_oo)
 
         if not output_attentions:
             attn_weights = None
@@ -395,6 +414,10 @@ class Qwen2DecoderLayer(nn.Module):
             output_attentions=output_attentions,
             use_cache=use_cache,
             cache_position=cache_position,
+            lor_q=lor_q,
+            lor_k=lor_k,
+            lor_v=lor_v,
+            lor_o=lor_o,
         )
         hidden_states = residual + hidden_states
 
@@ -860,6 +883,8 @@ cache version.'''
 # Double check cache works
 
 if False:
+    warnings.warn('NOT using custom model, just testing caching stuff')
+
     SEED = 152
     torch.manual_seed(152)
     random.seed(SEED)

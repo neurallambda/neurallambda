@@ -11,10 +11,10 @@ PROVENANCE:
 
 TODO FIX:
 
-- [ ] make use of lor_qkvo in model
-- [ ] replace F.interpolate with a Linear Forward in LORModule
-- [ ] i flipped lor_i and lor_o from lor_gud, fix
-- [ ] make sure to properly initialize params in LORModule
+- [X] make use of lor_qkvo in model
+- [X] replace F.interpolate with a Linear Forward in LORModule
+- [X] i flipped lor_i and lor_o from lor_gud, fix
+- [X] make sure to properly initialize params in LORModule
 
 
 TODO:
@@ -66,16 +66,23 @@ import itertools
 from neurallambda.lab.common import print_model_info
 from neurallambda.torch import get_last_attended_token
 
-import t14_homoiconic_llm_model as Q
 import t14_homoiconic_llm_add_tokens as AT
 
 from datasets import Dataset as HFDataset
 
 import importlib
+
 try:
     importlib.reload(C)
+    print('RELOADING C')
 except NameError:
     import t14_homoiconic_llm_columnize_04 as C
+
+try:
+    importlib.reload(Q)
+    print('RELOADING Q')
+except NameError:
+    import t14_homoiconic_llm_model as Q
 
 
 SEED = 152
@@ -423,6 +430,7 @@ def add_hooks(model):
         module.register_forward_hook(hook_fn)
 
 try:
+    fail
     already_loaded
 except:
     print('Loading model')
@@ -523,20 +531,21 @@ warnings.warn('training data is severely truncated during r&d')
 train_small = load_dataset("neurallambda/arithmetic_dataset", split="train_small").select(range(100))  # todo: rm, this truncates training
 test_small = load_dataset("neurallambda/arithmetic_dataset", split="test_small").select(range(100))
 
+def process_row(row):
+    prepared_data = []
+    for item in row['input']:
+        prepared_data.append({"type": "text", "content": item, 'include_in_loss': False, **empty_lor_ixs})
+        prepared_data.append({"type": "lor", "content": block_content, 'include_in_loss': True, 'loss_mask': lor_mask, **lor_ixs})
+    # Add the output
+    prepared_data.append({"type": "text", "content": row['output'], 'include_in_loss': True, **empty_lor_ixs})
+    return {"prepared_data": prepared_data}
+
+
 def insert_lor_blocks(dataset: HFDataset, block_content) -> HFDataset:
     """
     Insert LOR blocks between text elements in the dataset.
     """
-    def process_row(row):
-        prepared_data = []
-        for item in row['input']:
-            prepared_data.append({"type": "text", "content": item, 'include_in_loss': False, **empty_lor_ixs})
-            prepared_data.append({"type": "lor", "content": block_content, 'include_in_loss': True, 'loss_mask': lor_mask, **lor_ixs})
-        # Add the output
-        prepared_data.append({"type": "text", "content": row['output'], 'include_in_loss': True, **empty_lor_ixs})
-        return {"prepared_data": prepared_data}
-
-    # NOTE: the `map` process injects missing keys found among any rows, ie loss_mask
+    # NOTE: the `dataset.map` process injects missing keys found among any rows, ie loss_mask
     out = dataset.map(process_row, remove_columns=["input", "output"])
     return out
 
@@ -590,10 +599,10 @@ test_dl = C.create_dataloader(
 ### Linear
 
 class LORModule(nn.Module):
-    def __init__(self, dim, is_left_singular_value):
+    def __init__(self, in_dim, out_dim, is_left_singular_value):
         super().__init__()
         self.is_left_singular_value = is_left_singular_value
-        self.f = nn.Linear(dim, dim, bias=False)
+        self.f = nn.Linear(in_dim, out_dim, bias=False)
         self.initialize_parameters()
 
     def forward(self, x):
@@ -643,24 +652,39 @@ class LORModule(nn.Module):
 if True:
     LOR_LAYER = -2
     num_epochs = 10
-    lr = 1e-4
+    lr = 1e-6
     wd = 0.0
 
 
     # LOR Models: same structure as LORs
     dim = model.model.embed_tokens.weight.shape[1]
+    k_dim = model.model.layers[0].self_attn.k_proj.weight.shape[0]
+    v_dim = model.model.layers[0].self_attn.v_proj.weight.shape[0]
+    ff_dim = model.config.intermediate_size
     num_layers = model.config.num_hidden_layers
     lor_models = empty_lors(num_layers)
     for k in lor_models.keys():
         lor_models[k] = nn.ParameterList(lor_models[k])
 
-    lor_models['lor_qs'][LOR_LAYER] = nn.ParameterList([LORModule(dim, True), LORModule(dim, False)])  # (left singular value, right singular value)
-    lor_models['lor_ks'][LOR_LAYER] = nn.ParameterList([LORModule(dim, True), LORModule(dim, False)])
-    lor_models['lor_vs'][LOR_LAYER] = nn.ParameterList([LORModule(dim, True), LORModule(dim, False)])
-    lor_models['lor_os'][LOR_LAYER] = nn.ParameterList([LORModule(dim, True), LORModule(dim, False)])
-    lor_models['lor_gs'][LOR_LAYER] = nn.ParameterList([LORModule(dim, True), LORModule(dim, False)])
-    lor_models['lor_us'][LOR_LAYER] = nn.ParameterList([LORModule(dim, True), LORModule(dim, False)])
-    lor_models['lor_ds'][LOR_LAYER] = nn.ParameterList([LORModule(dim, True), LORModule(dim, False)])
+    # LOR weights need to be projected to fit the shapes of the underlying
+    # Linear layers they're matching. These LORModules solve this, and there
+    # are 2 modules per target linear layer, (left singular values, right
+    # singular values). They multiply like: out=LRx, to match the usual out=Wx,
+    # so the new calculation becomes out=Wx + LRx.
+    #
+    # R are the input vectors, and L are the output vectors. The first
+    # dimension of the LORModules must match the embedding that we're
+    # projecting, so the 1st values are all `dim`. The 2nd dim of R is the
+    # input dimension of the matched linear weights. The 2nd dim of L is the
+    # output dimension of the same linear layer.
+    lor_models['lor_qs'][LOR_LAYER] = nn.ParameterList([LORModule(dim, dim, True), LORModule(dim, dim, False)])  # (left singular value (outputs), right singular value (inputs))
+    lor_models['lor_ks'][LOR_LAYER] = nn.ParameterList([LORModule(dim, k_dim, True), LORModule(dim, k_dim, False)])
+    lor_models['lor_vs'][LOR_LAYER] = nn.ParameterList([LORModule(dim, v_dim, True), LORModule(dim, v_dim, False)])
+    lor_models['lor_os'][LOR_LAYER] = nn.ParameterList([LORModule(dim, dim, True), LORModule(dim, dim, False)])
+
+    lor_models['lor_gs'][LOR_LAYER] = nn.ParameterList([LORModule(dim, ff_dim, True), LORModule(dim, dim, False)])
+    lor_models['lor_us'][LOR_LAYER] = nn.ParameterList([LORModule(dim, ff_dim, True), LORModule(dim, dim, False)])
+    lor_models['lor_ds'][LOR_LAYER] = nn.ParameterList([LORModule(dim, dim, True), LORModule(dim, ff_dim, False)])
     lor_models = nn.ParameterDict(lor_models)
     lor_models = lor_models.to(DEVICE, dtype=model.dtype)
 
@@ -850,7 +874,26 @@ with torch.no_grad():
 
     lor = w(lor_block, lor_ixs)
 
+    tlor = {'content': '^@Q^@|^@|^@K^@|^@|^@V^@|^@|^@O^@|^@|^@G^@|^@|^@U^@|^@|^@D^@|^@|', 'include_in_loss': True, 'lor_ds': [18, 19], 'lor_gs': [12, 13], 'lor_ks': [3, 4], 'lor_os': [9, 10], 'lor_qs': [0, 1], 'lor_us': [15, 16], 'lor_vs': [6, 7], 'loss_mask': [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 'type': 'lor'}
+    tempty_lor = {'lor_ds': [None, None], 'lor_gs': [None, None], 'lor_ks': [None, None], 'lor_os': [None, None], 'lor_qs': [None, None], 'lor_us': [None, None], 'lor_vs': [None, None]}
+    training_prob = [
+        {'content': 'var_0=-2', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **tempty_lor}, tlor,
+        {'content': 'var_1=var_0', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **tempty_lor}, tlor,
+        {'content': 'var_2=var_1', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **tempty_lor}, tlor,
+        {'content': 'var_3=var_2', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **tempty_lor}, tlor,
+        {'content': 'var_4=var_3', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **tempty_lor}, tlor,
+        {'content': 'var_5=4 - 3', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **tempty_lor}, tlor,
+        {'content': 'var_6=1', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **tempty_lor}, tlor,
+        {'content': 'var_7=var_2', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **tempty_lor}, tlor,
+        {'content': 'var_8=-4', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **tempty_lor}, tlor,
+        {'content': 'var_9=var_0 * 8', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **tempty_lor}, tlor,
+        {'content': 'solve(var_7)=', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **tempty_lor}, tlor,
+        # {'content': '-2', 'include_in_loss': True, 'loss_mask': None, 'type': 'text', **tempty_lor}
+    ]
+
+
     test_prompts = [
+        training_prob,
         [t("var_0=1"), lor, t("var_1=2"), lor, t("var_3=var_0 + var_1"), lor, t("solve(var_3)=")],  # 3
         [t("var_0=3"), lor, t("var_1=5"), lor, t("var_3=var_0 - var_1"), lor, t("solve(var_3)=")],  # -2
         [t("var_0=2"), lor, t("var_1=3"), lor, t("var_3=var_0 * var_1"), lor, t("solve(var_3)=")],  # 6
