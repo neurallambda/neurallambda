@@ -126,27 +126,33 @@ class Qwen2MLP(nn.Module):
             assert lor_d[1].shape[0] == B
             assert lor_d[1].shape[2] == D
 
+
+        warnings.warn('NOT USING GUD BLOCKS ' * 50)
+
         # low rank gate_proj
         g = self.gate_proj(hidden_state)
-        if lor_g is not None:
-            lori, loro = lor_g
-            loro = F.interpolate(loro, size=self.intermediate_size, mode='linear', align_corners=True)
-            g = g + lor(hidden_state, lori, loro)
+        # if lor_g is not None:
+        #     loro, lori = lor_g
+        #     # we interpolate here bc the lor dim is the same as the embedding
+        #     # dim, but the mlp layers are typically bigger (on the order of
+        #     # ~4-8x)
+        #     loro = F.interpolate(loro, size=self.intermediate_size, mode='linear', align_corners=True)
+        #     g = g + lor(hidden_state, lori, loro)
 
         # low rank up_proj
         u = self.up_proj(hidden_state)
-        if lor_u is not None:
-            lori, loro = lor_u
-            loro = F.interpolate(loro, size=self.intermediate_size, mode='linear', align_corners=True)
-            u = u + lor(hidden_state, lori, loro)
+        # if lor_u is not None:
+        #     loro, lori = lor_u
+        #     loro = F.interpolate(loro, size=self.intermediate_size, mode='linear', align_corners=True)
+        #     u = u + lor(hidden_state, lori, loro)
 
         # low rank down_proj
         d_in = self.act_fn(g) * u
         out = self.down_proj(d_in)
-        if lor_d is not None:
-            lori, loro = lor_d
-            lori = F.interpolate(lori.permute(0, 2, 1), size=self.intermediate_size, mode='linear', align_corners=True).permute(0, 2, 1)
-            out = out + lor(d_in, lori, loro)
+        # if lor_d is not None:
+        #     loro, lori = lor_d
+        #     lori = F.interpolate(lori.permute(0, 2, 1), size=self.intermediate_size, mode='linear', align_corners=True).permute(0, 2, 1)
+        #     out = out + lor(d_in, lori, loro)
 
         return out
 
@@ -183,7 +189,8 @@ def test_qwen2mlp_low_rank_equivalence(hidden_size=1536, intermediate_size=8960,
     output_lor = model(hidden_state, lor_g=zero_lor, lor_u=zero_lor, lor_d=zero_lor_d)
     assert torch.allclose(output_none, output_lor, atol=1e-6), 'MLP with low rank computation is not equivalent to naieve version.'
 
-test_qwen2mlp_low_rank_equivalence()
+if False:
+    test_qwen2mlp_low_rank_equivalence()
 
 # @@@@@@@@@@@@@@@@@@@@
 
@@ -248,6 +255,8 @@ class Qwen2Attention(nn.Module):
         lor_o: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
+
+        MAKE USE OF lor_qkvo
 
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)

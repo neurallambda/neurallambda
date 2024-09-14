@@ -10,16 +10,27 @@ PROVENANCE:
 - t14_homoiconic_llm_04.py
 
 TODO FIX:
-- [ ] trash results from `generate` even if USE_LORS==False
-- [ ] is lor stuff leaking between batch items?
+
+- [ ] make use of lor_qkvo in model
+- [ ] replace F.interpolate with a Linear Forward in LORModule
+- [ ] i flipped lor_i and lor_o from lor_gud, fix
+- [ ] make sure to properly initialize params in LORModule
 
 
 TODO:
-- [ ] ^@| instead of QKV etc, loss masking / shifting is off
+- [ ] is loss masking shifted?
 - [ ] teacher forcing by taking preceding clause, ex x=1, and setting QKVOGUD to relevant portions of that
 - [ ] aggregate LORs instead of replace
 - [ ] teacher forcing (via training lor weights one step, then using those)
 - [ ] if not training text tokens, consider tracing what the outputs actually are
+- [ ] implement LOR parsing during inference's autoregressive portion
+- [ ] lor_ixs makes lor_mask irrelevant? maybe not...
+
+IDEAS:
+
+- [ ] after a LOR block, forbid attention to preceding tokens (or just make
+      RNN). This could provide an info bottleneck, and force lors to be highly
+      relevant.
 
 '''
 
@@ -64,7 +75,7 @@ import importlib
 try:
     importlib.reload(C)
 except NameError:
-    import t14_homoiconic_llm_columnize_03 as C
+    import t14_homoiconic_llm_columnize_04 as C
 
 
 SEED = 152
@@ -109,7 +120,60 @@ new_token_pairs = [
 
 
 ##################################################
-# Sandbox: Chonking, to collect lorws occassionally
+# Lor stuff
+
+def select_ixs(x, indices):
+    """Selects values from a 3D tensor (`[batch, seq, dim]`) along dim=1 using
+    provided indices.
+
+    Perform indexed selection on a 3D tensor. If `indices` contains -1, that
+    location will be filled with 0s.
+
+    Args:
+        x (torch.Tensor): Input tensor of shape [batch, xs, ys] where:
+
+        indices (torch.Tensor): 1D tensor of indices for selection. Its length
+            should match the batch size of x, and it's max value must be
+            smaller than the length of xs. Negative values in indices indicate
+            that the location should be filled with default 0 values.
+
+    Returns:
+        torch.Tensor: [batch, ys]
+
+    Raises:
+        ValueError: If dim is not 1 or 2.
+
+    Note:
+        - The function uses torch.where to handle negative indices, replacing them with zeros.
+        - Gradients can flow through this operation, making it suitable for use in
+          differentiable computations.
+
+    Example:
+        >>> x = torch.tensor([[[1, 2, 3], [4, 5, 6], [7, 8, 9]],
+        ...                   [[10, 11, 12], [13, 14, 15], [16, 17, 18]]])
+        >>> indices = torch.tensor([1, -1])
+        >>> select_ixs(x, indices, dim=1)
+        tensor([[[ 4,  5,  6]],
+                [[ 0,  0,  0]]])
+
+    """
+    B = x.shape[0]  # batch
+
+    # a mask for valid indices (non-negative)
+    mask = indices >= 0
+
+    # replace negative indices (indicating default 0 values) with 0
+    safe_indices = torch.where(mask, indices, torch.zeros_like(indices))
+
+    # gather the embeddings along the sequence dimension
+    gathered_values = x[torch.arange(B), safe_indices]
+
+    # a zero tensor, for default values where index == -1
+    zeros = torch.zeros_like(gathered_values)
+
+    # combine selected indices with defaults
+    return torch.where(mask.unsqueeze(1), gathered_values, zeros)
+
 
 def create_position_ids(attention_mask):
     """
@@ -122,6 +186,11 @@ def create_position_ids(attention_mask):
 
 
 def empty_lors(num_layers):
+    '''per-layer cache of all lor blocks parsed during generation, and used in
+future generation. The None values at a given layer index will be replaced with
+a tuple of tensors shaped like ([BATCH, DIM, N], [BATCH, N, DIM]). N is the
+rank of the LOR matrix. In the current implementation, these are just
+concatenated, and never erased (within a batch, ofc). '''
     lors = {
         # low rank attention params
         "lor_qs": [None] * num_layers,
@@ -137,31 +206,55 @@ def empty_lors(num_layers):
     return lors
 
 
-def update_lors(lors, hidden_states, lor_layer):
+def update_lors(
+        lors,  # shaped like `empty_lors`
+        lor_ixs: Dict[str, List[Tuple[Union[int, None], Union[int, None]]]],  # {'lor_qs': [(left_ix, right_ix), ...n_layers]}
+        hidden_states,  # from out.hidden_states
+        lor_layer
+):
     ''' Update the LORs by interpreting hidden states as new lor blocks '''
-    alpha = 1e-3  # EXPERIMENT: shrink hidden values
-    # alpha = 1
+    # alpha = 1e-3  # EXPERIMENT: shrink hidden values
+    alpha = 1
 
     h_emb = hidden_states[lor_layer]
 
-    for lor_key, (lor_i, lor_j) in lor_parse.items():
+    for lor_key, (lor_l, lor_r) in lor_ixs.items():
+        # skip parsing lors if there aren't any to do
+        if (lor_l >= 0).sum() == 0:
+            assert (lor_r >= 0).sum() == 0, "lor_l does not indicate any parses to be done, but lor_r does"
+            continue
 
-        # # EXPERIMENT skip some lor keys
-        # if lor_key not in {'lor_us', 'lor_ds'}:
-        #     continue
+        is_first_pass = lors[lor_key][lor_layer] is None
+        if is_first_pass:
+            lors[lor_key][lor_layer] = (None, None)
 
-        if lors[lor_key][lor_layer] is None:
-            lors[lor_key][lor_layer] = (
-                h_emb[:, lor_i].unsqueeze(2) * alpha,
-                h_emb[:, lor_j].unsqueeze(1) * alpha
-            )
-        else:  # accumulate
-            lors[lor_key][lor_layer] = (
-                torch.cat([lors[lor_key][lor_layer][0], h_emb[:, lor_i].unsqueeze(2) * alpha], dim=2),
-                torch.cat([lors[lor_key][lor_layer][1], h_emb[:, lor_j].unsqueeze(1) * alpha], dim=1)
-            )
+        # left singular values
+        left_lors = select_ixs(h_emb, lor_l)
+        if is_first_pass:
+            # lors[lor_key][lor_layer][0] = h_emb[:, lor_i].unsqueeze(2) * alpha
+            # lors[lor_key][lor_layer][0] = left_lors.unsqueeze(2) * alpha
+            new_l = left_lors.unsqueeze(2) * alpha
+        else:
+            # aggregate all lor weights
+            # lors[lor_key][lor_layer][0] = torch.cat([lors[lor_key][lor_layer][0], h_emb[:, lor_i].unsqueeze(2) * alpha], dim=2)
+            # lors[lor_key][lor_layer][0] = torch.cat([lors[lor_key][lor_layer][0], left_lors.unsqueeze(2) * alpha], dim=2)
+            new_l = torch.cat([lors[lor_key][lor_layer][0], left_lors.unsqueeze(2) * alpha], dim=2)
 
-USE_LORS = False  # TODO
+        right_lors = select_ixs(h_emb, lor_l)
+        if is_first_pass:
+            # lors[lor_key][lor_layer][1] = h_emb[:, lor_i].unsqueeze(1) * alpha
+            # lors[lor_key][lor_layer][1] = left_lors.unsqueeze(1) * alpha
+            new_r = left_lors.unsqueeze(1) * alpha
+        else:
+            # aggregate all lor weights
+            # lors[lor_key][lor_layer][1] = torch.cat([lors[lor_key][lor_layer][1], h_emb[:, lor_i].unsqueeze(1) * alpha], dim=2)
+            # lors[lor_key][lor_layer][1] = torch.cat([lors[lor_key][lor_layer][1], left_lors.unsqueeze(1) * alpha], dim=2)
+            new_r = torch.cat([lors[lor_key][lor_layer][1], left_lors.unsqueeze(1) * alpha], dim=1)
+
+        lors[lor_key][lor_layer] = (new_l, new_r)
+
+
+USE_LORS = True
 def forward_lor_models(lors, lor_models, num_layers):
     ''' Zip up lor models with lors to do the forward passes '''
     if not USE_LORS:
@@ -183,7 +276,7 @@ def forward_lor_models(lors, lor_models, num_layers):
         return out
 
 
-def forward_columns(model, lor_models, col_inputs, lors):
+def forward_columns(model, lor_models, input_idss, attention_masks, position_idss, lors, lor_ixss):
     '''Recurrently process column blocks of ids, concatenating attention_mask and
 past_key_values across generations. '''
     col_out_logits = []
@@ -191,10 +284,12 @@ past_key_values across generations. '''
     attention_mask = None
 
     # Iterate over each column in the batch
-    for i, batch_column in enumerate(col_inputs):
-        input_ids = batch_column['input_ids']
-        new_attention_mask = batch_column['attention_mask']
-        position_ids = batch_column['position_ids']
+    for i, (input_ids, new_attention_mask, position_ids, lor_ixs) in enumerate(zip(input_idss, attention_masks, position_idss, lor_ixss)):
+
+    # for i, batch_column in enumerate(col_inputs):
+        # input_ids = batch_column['input_ids']
+        # new_attention_mask = batch_column['attention_mask']
+        # position_ids = batch_column['position_ids']
 
         # skip empty batches. this can happen because of padded blocks.
         if input_ids.numel() == 0:
@@ -209,8 +304,7 @@ past_key_values across generations. '''
 
         # forward versions of lors
         if USE_LORS:
-            # lorf = forward_lor_models(lors, lor_models, model.config.num_hidden_layers) # TODO
-            lorf = lors
+            lorf = forward_lor_models(lors, lor_models, model.config.num_hidden_layers)
         else:
             lorf = lors
 
@@ -229,10 +323,12 @@ past_key_values across generations. '''
         past_key_values = out.past_key_values
         assert past_key_values is not None, "past_key_values cannot be None. Typically `transformers` models won't return past_key_values during training, so, you need to modify the underlying model class."
 
-        if i % 2 == 1 and USE_LORS:
-            # EXPERIMENT: TODO fix: for R&D, odd columns are the lor_block
-            warnings.warn('hardcoded lor block positions')
-            update_lors(lors, out.hidden_states, LOR_LAYER)
+        update_lors(lors, lor_ixs, out.hidden_states, LOR_LAYER)
+
+        # if i % 2 == 1 and USE_LORS:
+        #     # EXPERIMENT: TODO fix: for R&D, odd columns are the lor_block
+        #     warnings.warn('hardcoded lor block positions')
+        #     update_lors(lors, out.hidden_states, LOR_LAYER)
 
     return col_out_logits, attention_mask, past_key_values
 
@@ -265,12 +361,30 @@ def run_epoch(model, lor_models, dataloader, optimizer, device, train=True):
     with torch.set_grad_enabled(train):
         for batch_cols in tqdm(dataloader, desc="Training" if train else "Evaluating"):
             B = batch_cols[0]['input_ids'].shape[0]
-            batch_cols = [x.to(device) for x in batch_cols]
-            lors = empty_lors(model.config.num_hidden_layers)
-            out_logits, _, _  = forward_columns(model, lor_models, batch_cols, lors)
-            loss = loss_fn([x['input_ids'] for x in batch_cols],
+            device = model.device
+
+            # list of columns
+            input_idss = [x['input_ids'].to(device) for x in batch_cols]
+            attention_masks = [x['attention_mask'].to(device) for x in batch_cols]
+            position_idss = [x['position_ids'].to(device) for x in batch_cols]
+            loss_masks = [x['loss_mask'].to(device) for x in batch_cols]
+
+            # lor_ixs per column
+            lor_ixss = []
+            for col in batch_cols:
+                lor_ixs = {k: (v[0].to(device), v[1].to(device)) for k, v in col.items() if k in lor_ix_keys}
+                lor_ixss.append(lor_ixs)
+
+            # batch_cols = [x.to(device) for x in batch_cols]
+            lors = empty_lors(model.config.num_hidden_layers)  # init lors
+            # out_logits, _, _  = forward_columns(model, lor_models, batch_cols, lors)
+            out_logits, _, _  = forward_columns(model, lor_models, input_idss, attention_masks, position_idss, lors, lor_ixss)
+            # loss = loss_fn([x['input_ids'] for x in batch_cols],
+            #                out_logits,
+            #                [x['loss_mask'] for x in batch_cols])
+            loss = loss_fn(input_idss,
                            out_logits,
-                           [x['loss_mask'] for x in batch_cols])
+                           loss_masks)
 
             if train:
                 optimizer.zero_grad()
@@ -290,6 +404,24 @@ def run_epoch(model, lor_models, dataloader, optimizer, device, train=True):
 model_name = os.path.expanduser("~/_/models/Qwen2-1.5B")
 # model_name = os.path.expanduser("~/_/models/Qwen2-7B")
 
+
+def hook_fn(module, input, output):
+    if isinstance(output, torch.Tensor):
+        if torch.isnan(output).any() or torch.isinf(output).any():
+            print(f"NaN or inf detected in {module.__class__.__name__}")
+            print(f"Module: {module}")
+            print(f"Module name: {module_names.get(module, 'Unknown')}")
+            print(f"Input shape: {[i.shape if isinstance(i, torch.Tensor) else type(i) for i in input]}")
+            print(f"Output shape: {output.shape}")
+            raise RuntimeError("NaN or inf detected")
+
+module_names = {}
+
+def add_hooks(model):
+    for name, module in model.named_modules():
+        module_names[module] = name
+        module.register_forward_hook(hook_fn)
+
 try:
     already_loaded
 except:
@@ -297,8 +429,8 @@ except:
     model = Q.Qwen2ForCausalLM.from_pretrained(
         model_name,
         # torch_dtype="auto",
-        # torch_dtype=torch.bfloat16,
-        torch_dtype=torch.float32,
+        torch_dtype=torch.bfloat16,
+        # torch_dtype=torch.float32,
         device_map=DEVICE,
         _attn_implementation='eager',
     )
@@ -326,6 +458,8 @@ except:
     if False:
         print_model_info(model)
 
+    add_hooks(model)
+
     already_loaded = True
 
 
@@ -340,6 +474,9 @@ lor_block = "^@Q^@|^@|^@K^@|^@|^@V^@|^@|^@O^@|^@|^@G^@|^@|^@U^@|^@|^@D^@|^@|"
 # metatoken mask, for masking loss. metatokens should be predicted, thus make
 # it to loss. meta weights should not be affected directly by the cross entropy
 # loss.
+
+# TODO: i think this needs to be shifted one left, into the preceding block (??)
+
 lor_mask = [1, 0, 0] * 7  # note: should be list, not tensor. `datasets` converts it back to a list (then tensor again) anyway
 lor_mask = [0, 0, 0] * 7  # TODO: rm, this mask does NOT learn output of metatokens
 
@@ -348,16 +485,33 @@ lor_mask = [0, 0, 0] * 7  # TODO: rm, this mask does NOT learn output of metatok
 # metaweight; the next input token, a dummy weight, gets converted into the
 # second metaweight.
 
-# where to parse to collect metaweights
-lor_parse = {
-    'lor_qs': [0, 1],
-    'lor_ks': [3, 4],
-    'lor_vs': [6, 7],
-    'lor_os': [9, 10],
-    'lor_gs': [12, 13],
-    'lor_us': [15, 16],
-    'lor_ds': [18, 19],
+# for blocks that don't contain any lors
+#   note: right now this assumes only a single layer is getting targeted, but someday could have separate values per index
+empty_lor_ixs = {
+    'lor_qs': (None, None),
+    'lor_ks': (None, None),
+    'lor_vs': (None, None),
+    'lor_os': (None, None),
+    'lor_gs': (None, None),
+    'lor_us': (None, None),
+    'lor_ds': (None, None),
 }
+
+# where to parse to collect metaweights, tied to `lor_block`'s implementation.
+#
+# note: this might look shifted left, but consider "Q||". The token emitted
+#       after Q will be in location 0 and represent the first predicted |.
+lor_ixs = {
+    'lor_qs': (0, 1),  # (left singular value, right singular value)
+    'lor_ks': (3, 4),
+    'lor_vs': (6, 7),
+    'lor_os': (9, 10),
+    'lor_gs': (12, 13),
+    'lor_us': (15, 16),
+    'lor_ds': (18, 19),
+}
+
+lor_ix_keys = set(lor_ixs.keys())
 
 
 ####################
@@ -376,12 +530,10 @@ def insert_lor_blocks(dataset: HFDataset, block_content) -> HFDataset:
     def process_row(row):
         prepared_data = []
         for item in row['input']:
-            prepared_data.append({"type": "text", "content": item, 'include_in_loss': False})
-            prepared_data.append({"type": "lor", "content": block_content, 'include_in_loss': True, 'loss_mask': lor_mask})
-        # # Remove the last LOR block
-        # prepared_data = prepared_data[:-1]
+            prepared_data.append({"type": "text", "content": item, 'include_in_loss': False, **empty_lor_ixs})
+            prepared_data.append({"type": "lor", "content": block_content, 'include_in_loss': True, 'loss_mask': lor_mask, **lor_ixs})
         # Add the output
-        prepared_data.append({"type": "text", "content": row['output'], 'include_in_loss': True})
+        prepared_data.append({"type": "text", "content": row['output'], 'include_in_loss': True, **empty_lor_ixs})
         return {"prepared_data": prepared_data}
 
     # NOTE: the `map` process injects missing keys found among any rows, ie loss_mask
@@ -397,6 +549,7 @@ train_small = insert_lor_blocks(train_small, lor_block)
 #     print()
 train_dl = C.create_dataloader(
     dataset=train_small,
+    lor_ix_keys=lor_ix_keys,
     batch_size=BATCH_SIZE,
     tokenizer=tokenizer,
     device='cpu',
@@ -413,6 +566,7 @@ test_small = insert_lor_blocks(test_small, lor_block)
 #     print()
 test_dl = C.create_dataloader(
     dataset=test_small,
+    lor_ix_keys=lor_ix_keys,
     batch_size=BATCH_SIZE,
     tokenizer=tokenizer,
     device='cpu',
@@ -425,31 +579,33 @@ test_dl = C.create_dataloader(
 
 ### IDENTITY
 
-class LORModule(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-
-    def forward(self, x):
-        return x
-
-
-### Linear
 # class LORModule(nn.Module):
 #     def __init__(self, dim):
 #         super().__init__()
-#         self.f = nn.Sequential(
-#             nn.Linear(dim, dim)
-#         )
 
 #     def forward(self, x):
-#         return self.f(x)
+#         return x
 
-#     def initialize_parameters(self):
-#         for module in self.modules():
-#             if isinstance(module, nn.Linear):
-#                 nn.init.xavier_normal_(module.weight, gain=1e-3)
-#                 if module.bias is not None:
-#                     nn.init.zeros_(module.bias)
+
+### Linear
+
+class LORModule(nn.Module):
+    def __init__(self, dim, is_left_singular_value):
+        super().__init__()
+        self.is_left_singular_value = is_left_singular_value
+        self.f = nn.Linear(dim, dim, bias=False)
+        self.initialize_parameters()
+
+    def forward(self, x):
+        return self.f(x)
+
+    def initialize_parameters(self) -> None:
+        ''' This is how LoRAs are initialized, roughly '''
+        if self.is_left_singular_value:
+            nn.init.zeros_(self.f.weight)
+        else:
+            nn.init.normal_(self.f.weight, mean=0.0, std=1e-6)
+
 
 
 ### SWIGLU MLP
@@ -486,7 +642,7 @@ class LORModule(nn.Module):
 
 if True:
     LOR_LAYER = -2
-    num_epochs = 0
+    num_epochs = 10
     lr = 1e-4
     wd = 0.0
 
@@ -498,13 +654,13 @@ if True:
     for k in lor_models.keys():
         lor_models[k] = nn.ParameterList(lor_models[k])
 
-    lor_models['lor_qs'][LOR_LAYER] = nn.ParameterList([LORModule(dim), LORModule(dim)])  # (left singular value, right singular value)
-    lor_models['lor_ks'][LOR_LAYER] = nn.ParameterList([LORModule(dim), LORModule(dim)])
-    lor_models['lor_vs'][LOR_LAYER] = nn.ParameterList([LORModule(dim), LORModule(dim)])
-    lor_models['lor_os'][LOR_LAYER] = nn.ParameterList([LORModule(dim), LORModule(dim)])
-    lor_models['lor_gs'][LOR_LAYER] = nn.ParameterList([LORModule(dim), LORModule(dim)])
-    lor_models['lor_us'][LOR_LAYER] = nn.ParameterList([LORModule(dim), LORModule(dim)])
-    lor_models['lor_ds'][LOR_LAYER] = nn.ParameterList([LORModule(dim), LORModule(dim)])
+    lor_models['lor_qs'][LOR_LAYER] = nn.ParameterList([LORModule(dim, True), LORModule(dim, False)])  # (left singular value, right singular value)
+    lor_models['lor_ks'][LOR_LAYER] = nn.ParameterList([LORModule(dim, True), LORModule(dim, False)])
+    lor_models['lor_vs'][LOR_LAYER] = nn.ParameterList([LORModule(dim, True), LORModule(dim, False)])
+    lor_models['lor_os'][LOR_LAYER] = nn.ParameterList([LORModule(dim, True), LORModule(dim, False)])
+    lor_models['lor_gs'][LOR_LAYER] = nn.ParameterList([LORModule(dim, True), LORModule(dim, False)])
+    lor_models['lor_us'][LOR_LAYER] = nn.ParameterList([LORModule(dim, True), LORModule(dim, False)])
+    lor_models['lor_ds'][LOR_LAYER] = nn.ParameterList([LORModule(dim, True), LORModule(dim, False)])
     lor_models = nn.ParameterDict(lor_models)
     lor_models = lor_models.to(DEVICE, dtype=model.dtype)
 
@@ -576,6 +732,9 @@ def generate(model, lor_models, col_inputs, lors, max_new_tokens):
         input_ids = batch_column['input_ids']
         new_attention_mask = batch_column['attention_mask']
         position_ids = batch_column['position_ids']
+        device = input_ids.device
+
+        lor_ixs = {k: (v[0].to(device), v[1].to(device)) for k, v in batch_column.items() if k in lor_ix_keys}
 
         # skip empty batches. this can happen because of padded blocks.
         if input_ids.numel() == 0:
@@ -590,8 +749,7 @@ def generate(model, lor_models, col_inputs, lors, max_new_tokens):
 
         # forward versions of lors
         if USE_LORS:
-            # lorf = forward_lor_models(lors, lor_models, model.config.num_hidden_layers) # TODO
-            lorf = lors
+            lorf = forward_lor_models(lors, lor_models, model.config.num_hidden_layers)
         else:
             lorf = lors
 
@@ -611,7 +769,9 @@ def generate(model, lor_models, col_inputs, lors, max_new_tokens):
         past_key_values = out.past_key_values
         assert past_key_values is not None, "past_key_values cannot be None. Typically `transformers` models won't return past_key_values during training, so, you need to modify the underlying model class."
 
-        # if i % 2 == 1 and USE_LORS:  # TODO
+        update_lors(lors, lor_ixs, out.hidden_states, LOR_LAYER)
+
+        # if i % 2 == 1 and USE_LORS:
         #     # EXPERIMENT: TODO fix: for R&D, odd columns are the lor_block
         #     warnings.warn('hardcoded lor block positions')
         #     update_lors(lors, out.hidden_states, LOR_LAYER)
@@ -641,7 +801,6 @@ def generate(model, lor_models, col_inputs, lors, max_new_tokens):
 
     # If max_new_tokens > 0, continue generating new tokens
     position_ids = max_position_ids.unsqueeze(1)
-    print(position_ids)
     while tokens_generated < max_new_tokens:
 
         # Update position_ids
@@ -661,6 +820,7 @@ def generate(model, lor_models, col_inputs, lors, max_new_tokens):
                     **lorf,
                     )
 
+        # TODO: lor updates aren't implemented during autoregression
         col_out_logits.append(out.logits)
         past_key_values = out.past_key_values
 
@@ -672,34 +832,39 @@ def generate(model, lor_models, col_inputs, lors, max_new_tokens):
 
     return col_out_logits, attention_mask, past_key_values, torch.cat(all_output_ids, dim=-1), lors, position_ids, attention_mask
 
-def t(x):
-    return {'type': 'text', 'content': x, 'include_in_loss': False}  # loss not needed during inference
 
-def w(x):
-    return {'type': 'lor', 'content': x, 'include_in_loss': False}  # loss not needed during inference
+def t(x):
+    return {'type': 'text', 'content': x, 'include_in_loss': False, **empty_lor_ixs}
+
+def w(x, lor_ixs):
+    # one parse per type can be used per column/block, eg LOR Q left
+    # singular value, LOR Q right singular value, LOR K etc...
+    return {'type': 'lor', 'content': x, 'include_in_loss': False, **lor_ixs}
 
 def p(x):
-    return {'type': 'pad_block', 'content': x, 'include_in_loss': False}  # loss not needed during inference
+    return {'type': 'pad_block', 'content': x, 'include_in_loss': False, **empty_lor_ixs}
 
 
 model.eval()
 with torch.no_grad():
 
-    test_prompts = [
-        # [t("var_0=1"), w(lor_block), t("var_1=2"), w(lor_block), t("var_3=var_0 + var_1"), w(lor_block), t("solve(var_3)=")],  # 3
-        # [t("var_0=3"), w(lor_block), t("var_1=5"), w(lor_block), t("var_3=var_0 - var_1"), w(lor_block), t("solve(var_3)=")],  # -2
-        # [t("var_0=2"), w(lor_block), t("var_1=3"), w(lor_block), t("var_3=var_0 * var_1"), w(lor_block), t("solve(var_3)=")],  # 6
+    lor = w(lor_block, lor_ixs)
 
-        # [t("hi there"), w(lor_block), t('how'), w(lor_block)],
-        # [t("hi there"), w(lor_block), t('how')],
-        # [t("hi there"), w(lor_block)],
+    test_prompts = [
+        [t("var_0=1"), lor, t("var_1=2"), lor, t("var_3=var_0 + var_1"), lor, t("solve(var_3)=")],  # 3
+        [t("var_0=3"), lor, t("var_1=5"), lor, t("var_3=var_0 - var_1"), lor, t("solve(var_3)=")],  # -2
+        [t("var_0=2"), lor, t("var_1=3"), lor, t("var_3=var_0 * var_1"), lor, t("solve(var_3)=")],  # 6
+
+        # [t("hi there"), lor, t('how'), lor],
+        # [t("hi there"), lor, t('how')],
+        # [t("hi there"), lor],
 
         [t("Once when")],
         [t("Let me tell you about the time")],
         [t("Let me tell you about the time I was golfing outside one sunny afternoon when suddenly")],
     ]
 
-    inputs = C.create_column_batch_inputs(test_prompts, tokenizer, device='cuda')
+    inputs = C.create_column_batch_inputs(test_prompts, lor_ix_keys, tokenizer, device='cuda')
     lors = empty_lors(num_layers)
 
     output_logits, col_attention_mask, col_past_key_values, output_ids, lors, position_ids, attention_mask = generate(model, lor_models, inputs, lors, max_new_tokens=40)
@@ -712,15 +877,55 @@ with torch.no_grad():
 # END_BLOCK_1
 
 
-# B = len(test_prompts)
-# ids = []
-# pos = []
-# atn = []
-# for col in inputs:
-#     # os = tokenizer.batch_decode(col['input_ids'], skip_special_tokens=False)
-#     ids.append(col['input_ids'])
-#     pos.append(col['position_ids'])
-#     atn.append(col['attention_mask'])
-# print(torch.cat(ids, dim=-1))
-# print(torch.cat(pos, dim=-1))
-# print(torch.cat(atn, dim=-1))
+##################################################
+# sandbox
+if False:
+    def select_ixs(x, indices):
+        batch_size, sequence_length, embedding_dim = x.shape
+
+        # Create a mask for valid indices (non-negative)
+        mask = indices >= 0
+
+        # Use torch.where to replace negative indices (indicating default 0 values) with 0
+        safe_indices = torch.where(mask, indices, torch.zeros_like(indices))
+
+        # Gather the embeddings along the sequence dimension
+        gathered_values = x[torch.arange(batch_size), safe_indices]
+
+        # Create a zero tensor of the same shape as the gathered values
+        zeros = torch.zeros_like(gathered_values)
+
+        # Apply the mask: keep the gathered values where mask is True, otherwise use zeros
+        out = torch.where(mask.unsqueeze(1), gathered_values, zeros)
+
+        return out
+
+    # Example usage
+    x = torch.tensor([[[1.0, 2.0, 3.0],
+                       [4.0, 5.0, 6.0],
+                       [7.0, 8.0, 9.0]],
+
+                      [[10.0, 11.0, 12.0],
+                       [13.0, 14.0, 15.0],
+                       [16.0, 17.0, 18.0]],
+
+                      [[19.0, 20.0, 21.0],
+                       [22.0, 23.0, 24.0],
+                       [25.0, 26.0, 27.0]]], requires_grad=True)  # Enable gradient tracking
+
+    indices = torch.tensor([
+        1,  # from first sequence select index 1
+        2,  # from second sequence select index 2
+        -1  # for third sequence, it should default to 0
+    ])
+
+    out = select_ixs(x, indices)
+
+    # Define a simple loss function (e.g., sum of all elements in the output)
+    loss = out.sum()
+
+    # Perform backpropagation
+    loss.backward()
+
+    # Print the gradients of x
+    print(x.grad)
