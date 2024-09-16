@@ -9,13 +9,36 @@ to experiment with just accumulating them.
 PROVENANCE:
 - t14_homoiconic_llm_04.py
 
+NaN CAUSES:
+- ragged batch sizes
+- bfloat16?
+- clip grads?
+- layer norm?
+- lor module init?
+- if loss_mask is all False = NaN
+
+
+NOTES:
+- LayerNorm on end of LORModule encouraged weights to move more, without, they imperceptibly moved (also used high lr (1e-2))
+- Biases in LORModule can cause non-lor layers, which receive 0 values, to suddenly have values, and corrupt performance. LORModules should have the property that they cannot alter non-LOR'd samples.
+- swiglu lor modules seem more stable to train than linear-only, and better val loss
+- sensitive to lr. 1e-5 seems ok, 1e-4 even might be too high. Even with lor-module params only training, 1e-3 diverges.
+- sensitive to initialization
+
+
 TODO FIX:
 
+- [ ] causal masking?
+- [ ] causal mask LOR blocks?
+- [ ] OFF BY ONE ERROR IN LOSS?!
+- [ ] new tokens (meta tokens) not updating, should they?
+- [ ] when training loss hits 0, @ inference it gets training probs wrong
 - [ ] lor_models weights not updating, but loss decreases (and they're the only params!?)
   - lor modules in ParameterDict?
   - forward_lor mutates dict?
 - [ ] dbl check loss_mask, and off-by-one, and include_in_loss
 - [ ] dbl check off-by-one shifts in data/parsing lors/loss
+- [X] right singular vectors not updating
 - [X] make use of lor_qkvo in model
 - [X] replace F.interpolate with a Linear Forward in LORModule
 - [X] i flipped lor_i and lor_o from lor_gud, fix
@@ -31,7 +54,7 @@ TODO:
 - [ ] implement LOR parsing during inference's autoregressive portion
 - [ ] lor_ixs makes lor_mask irrelevant? maybe not...
 - [ ] OPTIM: is the way I'm unsqueezing/stacking dimensions of left/right lors ideal?
-
+- [ ] OPTIM: LOR projections (LORModule) could be cached (should be cached?)
 
 IDEAS:
 
@@ -179,6 +202,7 @@ def select_ixs(x, indices):
                 [[ 0,  0,  0]]])
 
     """
+
     B = x.shape[0]  # batch
 
     # a mask for valid indices (non-negative)
@@ -328,16 +352,35 @@ past_key_values across generations. '''
 
         lors = update_lors(lors, lor_ixs, out.hidden_states, LOR_LAYER)
 
-        # if i % 2 == 1 and USE_LORS:
-        #     # EXPERIMENT: TODO fix: for R&D, odd columns are the lor_block
-        #     warnings.warn('hardcoded lor block positions')
-        #     update_lors(lors, out.hidden_states, LOR_LAYER)
-
-    return col_out_logits, attention_mask, past_key_values
+    return col_out_logits, attention_mask, past_key_values, lors
 
 
 ##################################################
 # Training Fns
+
+
+def unfreeze_embeddings(grads, ixs):
+    """
+    Zero out gradients for all embeddings except those specified by ixs.
+
+    Args:
+    grads (torch.Tensor): Gradients of the embedding layer
+    ixs (list or torch.Tensor): Indices of the embeddings to keep unfrozen
+
+    Returns:
+    torch.Tensor: Modified gradients with appropriate values zeroed out
+    """
+    # Create a mask of zeros with the same shape as grads
+    mask = torch.zeros_like(grads)
+
+    # Set the mask to 1 for the indices we want to keep unfrozen
+    mask[ixs] = 1
+
+    # Multiply the original gradients by the mask
+    # This zeroes out gradients for all embeddings except those in ixs
+    out = grads * mask
+    return out
+
 
 def loss_fn(
     col_batch_in: List[torch.Tensor],  # list of blocks of TOKENS IDS (dtype=int)
@@ -347,16 +390,42 @@ def loss_fn(
     vocab_size = col_batch_out[0].shape[2]
 
     # Concatenate, shift, flatten
-    labels = torch.cat(col_batch_in, dim=1)[..., 1:].contiguous().view(-1)
-    logits = torch.cat(col_batch_out, dim=1)[..., :-1, :].contiguous().view(-1, vocab_size)
-    m = torch.cat(loss_mask, dim=1)[..., :-1].contiguous().view(-1)
+    labels = torch.cat(col_batch_in, dim=1)[..., 1:].contiguous().view(-1)  # [B, S-1] -> [B * (S-1)]
+    logits = torch.cat(col_batch_out, dim=1)[..., :-1, :].contiguous().view(-1, vocab_size)  # [B, S-1, D] -> [B * (S-1), D]
+    # m = torch.cat(loss_mask, dim=1)[..., :-1].contiguous().view(-1)  # TODO: is this right?
+    m = torch.cat(loss_mask, dim=1)[..., 1:].contiguous().view(-1)
 
     # Calculate masked loss
     loss = F.cross_entropy(logits[m], labels[m], reduction='mean')
+    breakpoint()
     return loss
 
 
-def run_epoch(model, lor_models, dataloader, optimizer, device, train=True):
+
+def loss_fn(
+    col_batch_in: List[torch.Tensor],  # list of blocks of TOKENS IDS (dtype=int)
+    col_batch_out: List[torch.Tensor],  # list of blocks of EMBEDDINGS (dtype=float)
+    loss_mask: List[torch.Tensor]  # list of blocks of masks (dtype=bool)
+):
+    ''' TODO DEBUG for loop to make sure view isn't messing things up '''
+
+    # Concatenate, shift, flatten
+    labels = torch.cat(col_batch_in, dim=1)[..., 1:].contiguous()  # [B, S-1]
+    logits = torch.cat(col_batch_out, dim=1)[..., :-1, :].contiguous()  # [B, S-1, D]
+    m = torch.cat(loss_mask, dim=1)[..., 1:].contiguous()
+
+    B = labels.shape[0]
+
+    loss = 0
+    for b in range(B):
+        loss = loss + F.cross_entropy(logits[b][m[b]], labels[b][m[b]], reduction='mean')
+
+    loss = loss / B
+    return loss
+
+
+
+def run_epoch(model, lor_models, dataloader, optimizer, device, train=True, debug=False):
     model.train() if train else model.eval()
     total_loss = 0
     total_samples = 0
@@ -381,7 +450,7 @@ def run_epoch(model, lor_models, dataloader, optimizer, device, train=True):
             # batch_cols = [x.to(device) for x in batch_cols]
             lors = empty_lors(model.config.num_hidden_layers)  # init lors
             # out_logits, _, _  = forward_columns(model, lor_models, batch_cols, lors)
-            out_logits, _, _  = forward_columns(model, lor_models, input_idss, attention_masks, position_idss, lors, lor_ixss)
+            out_logits, cat_attention_mask, _ , lors = forward_columns(model, lor_models, input_idss, attention_masks, position_idss, lors, lor_ixss)
             # loss = loss_fn([x['input_ids'] for x in batch_cols],
             #                out_logits,
             #                [x['loss_mask'] for x in batch_cols])
@@ -396,6 +465,11 @@ def run_epoch(model, lor_models, dataloader, optimizer, device, train=True):
             if train:
                 optimizer.zero_grad()
                 loss.backward()
+
+                # mask out all tokens except the new meta tokens
+                warnings.warn('freezing all token embeddings except new meta tokens')
+                with torch.no_grad():
+                    model.model.embed_tokens.weight.grad[:] = unfreeze_embeddings(model.model.embed_tokens.weight.grad, new_token_ids)
 
                 MAX_GRAD_NORM = 1.0
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=MAX_GRAD_NORM)  # NOTE: nan fix?
@@ -413,12 +487,15 @@ def run_epoch(model, lor_models, dataloader, optimizer, device, train=True):
         # for name, param in itertools.chain(model.named_parameters(), lor_models.named_parameters()):
         for name, param in lor_models.named_parameters():
             if param.requires_grad:
-                writer.add_histogram(f'weights/{name}', param.data.detach().to(dtype=torch.float32).cpu().numpy(), epoch)
+                writer.add_histogram(f'weights/{name}', param.data.detach().to(dtype=torch.float32).cpu().numpy(), global_epoch)
                 if param.grad is not None:
-                    writer.add_histogram(f'grads/{name}', param.grad.data.detach().to(dtype=torch.float32).cpu().numpy(), epoch)
+                    writer.add_histogram(f'grads/{name}', param.grad.data.detach().to(dtype=torch.float32).cpu().numpy(), global_epoch)
 
-    return avg_loss
-
+    if debug:
+        warnings.warn('only debugging the last batch, values are not accumulated across batches (loss *is* averaged though)')
+        return avg_loss, out_logits, cat_attention_mask, lors
+    else:
+        return avg_loss
 
 ##################################################
 
@@ -452,8 +529,8 @@ except:
     model = Q.Qwen2ForCausalLM.from_pretrained(
         model_name,
         # torch_dtype="auto",
-        # torch_dtype=torch.bfloat16,
-        torch_dtype=torch.float32,
+        torch_dtype=torch.bfloat16,
+        # torch_dtype=torch.float32,
         device_map=DEVICE,
         _attn_implementation='eager',
     )
@@ -466,6 +543,8 @@ except:
         AT.assert_unique_tokens(tokenizer, [x[0] for x in new_token_pairs])
 
     AT.add_and_initialize_tokens(model, tokenizer, new_token_pairs)
+
+    new_token_ids = [tokenizer.convert_tokens_to_ids(x[0]) for x in new_token_pairs]
 
     if False:
         AT.test_token_behavior(model, tokenizer, new_token_pairs)
@@ -503,11 +582,6 @@ lor_block = "^@Q^@|^@|^@K^@|^@|^@V^@|^@|^@O^@|^@|^@G^@|^@|^@U^@|^@|^@D^@|^@|"
 # lor_mask = [1, 0, 0] * 7  # note: should be list, not tensor. `datasets` converts it back to a list (then tensor again) anyway
 lor_mask = [0, 0, 0] * 7  # TODO: rm, this mask does NOT learn output of metatokens
 
-# NOTE: lor_metatokens and lor_parse are offset by 1, because they parse out of
-# the outputs. The metatoken ^@Q in the input gets converted into the first
-# metaweight; the next input token, a dummy weight, gets converted into the
-# second metaweight.
-
 # for blocks that don't contain any lors
 #   note: right now this assumes only a single layer is getting targeted, but someday could have separate values per index
 empty_lor_ixs = {
@@ -543,13 +617,13 @@ lor_ix_keys = set(lor_ixs.keys())
 BATCH_SIZE = 12
 
 warnings.warn('training data is severely truncated during r&d')
-train_small = load_dataset("neurallambda/arithmetic_dataset", split="train_small").select(range(BATCH_SIZE * 4))  # todo: rm, this truncates training
+train_small = load_dataset("neurallambda/arithmetic_dataset", split="train_small").select(range(BATCH_SIZE * 1))  # todo: rm, this truncates training
 test_small = load_dataset("neurallambda/arithmetic_dataset", split="test_small").select(range(BATCH_SIZE * 1))
 
 def process_row(row, lor_block, lor_mask):
     prepared_data = []
     for item in row['input']:
-        prepared_data.append({"type": "text", "content": item, 'include_in_loss': False, **empty_lor_ixs})
+        prepared_data.append({"type": "text", "content": item, 'include_in_loss': True, **empty_lor_ixs})  # TODO: including text in loss
         prepared_data.append({"type": "lor", "content": lor_block, 'include_in_loss': True, 'loss_mask': lor_mask, **lor_ixs})
     # Add the output
     prepared_data.append({"type": "text", "content": row['output'], 'include_in_loss': True, **empty_lor_ixs})
@@ -621,67 +695,85 @@ test_dl = C.create_dataloader(
 
 ### Linear
 
-class LORModule(nn.Module):
-    def __init__(self, in_dim, out_dim, is_left_singular_value):
-        super().__init__()
-        self.is_left_singular_value = is_left_singular_value
-        self.f = nn.Linear(in_dim, out_dim, bias=False)
-        # self.norm = nn.LayerNorm(out_dim)  # NOTE: nan fix?
-        # self.initialize_parameters()
+# class LORModule(nn.Module):
+#     def __init__(self, in_dim, out_dim, is_left_singular_value):
+#         super().__init__()
+#         self.is_left_singular_value = is_left_singular_value
+#         self.f = nn.Linear(in_dim, out_dim, bias=False)
+#         # self.norm = nn.LayerNorm(out_dim)  # NOTE: nan fix?
+#         self.initialize_parameters()
 
-    def forward(self, x):
-        # return self.norm(self.f(x))
-        return self.f(x)
+#     def forward(self, x):
+#         # return self.norm(self.f(x))
+#         return self.f(x)
 
-    # def initialize_parameters(self) -> None:
-    #     if self.is_left_singular_value:
-    #         nn.init.zeros_(self.f.weight)
-    #         # nn.init.normal_(self.f.weight, mean=0.0, std=1e-2)
-    #     else:
-    #         # nn.init.zeros_(self.f.weight)
-    #         # nn.init.normal_(self.f.weight, mean=0.0, std=1e-2)
-    #         pass
-
+#     def initialize_parameters(self) -> None:
+#         if self.is_left_singular_value:
+#             nn.init.zeros_(self.f.weight)
+#             # nn.init.normal_(self.f.weight, mean=0.0, std=1e-2)
+#         else:
+#             # nn.init.zeros_(self.f.weight)
+#             nn.init.normal_(self.f.weight, mean=0.0, std=1e-4)
+#             # pass
 
 
 ### SWIGLU MLP
-# class SwiGLU(nn.Module):
-#     def __init__(self, dim):
-#         super().__init__()
-#         self.w1 = nn.Linear(dim, dim)
-#         self.w2 = nn.Linear(dim, dim)
 
-#     def forward(self, x):
-#         return F.silu(self.w1(x)) * self.w2(x)
+class SwiGLU(nn.Module):
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
+        self.w1 = nn.Linear(in_dim, out_dim, bias=False)
+        self.w2 = nn.Linear(in_dim, out_dim, bias=False)
 
-# class LORModule(nn.Module):
-#     def __init__(self, dim):
-#         super().__init__()
-#         self.f = nn.Sequential(
-#             SwiGLU(dim),
-#             nn.Linear(dim, dim, bias=False)
-#         )
-#         # output layer will be initialized to be very small, yielding
-#         # negligible impact at the start of training
-#         self.init_gain = 0
+    def forward(self, x):
+        return (
+            F.silu(self.w1(x)) *  # silu = x * sigmoid(x)
+            self.w2(x)
+        )
 
-#     def forward(self, x):
-#         return self.f(x)
+class LORModule(nn.Module):
+    '''Project the LOR weights before using them.
 
-#     def initialize_parameters(self):
-#         nn.init.xavier_normal_(self.f[1].weight, gain=self.init_gain)
-#         if self.f[1].bias is not None:
-#             nn.init.zeros_(self.f[1].bias)
+    NOTE: this module should probably never have bias parameters. If it has
+    bias parameters it can corrupt 0-vector lors, ie non-lor'd samples.'''
+    def __init__(self, in_dim, out_dim, is_left_singular_value):
+        super().__init__()
+        self.is_left_singular_value = is_left_singular_value
+        self.f = nn.Sequential(
+            nn.LayerNorm(in_dim, bias=False),
+            SwiGLU(in_dim, in_dim),
+            # nn.LayerNorm(in_dim, bias=False),
+            nn.Linear(in_dim, out_dim, bias=False),
+            # nn.LayerNorm(out_dim, bias=False),
+        )
+        self.initialize_parameters()
+
+    def forward(self, x):
+        return self.f(x)
+
+    def initialize_parameters(self):
+        # linear layer
+        with torch.no_grad():
+
+            if self.is_left_singular_value:
+                # # swiglu
+                # self.f[1].w1.weight[:] = torch.randn_like(self.f[1].w1.weight) * 1e-3
+                # self.f[1].w2.weight[:] = torch.randn_like(self.f[1].w2.weight) * 1e-3
+
+                # linear
+                # self.f[2].weight[:] = torch.randn_like(self.f[2].weight) * 1e-4
+                self.f[2].weight[:] = torch.zeros_like(self.f[2].weight)
+
 
 ##########
 #
 
 if True:
     LOR_LAYER = 14  # must be positive num (can't index bwd)
-    num_epochs = 10
+    num_epochs = 100
     lr = 1e-4
 
-    wd = 0.0
+    wd = 1e-2
 
     # warnings.warn('WEIGHT DECAY turned on')
     # wd = 1e-2
@@ -723,7 +815,6 @@ if True:
     # })
 
     # lor_models = lor_models.to(DEVICE, dtype=model.dtype)
-
 
     lor_models = nn.ModuleDict(
         {
@@ -769,31 +860,37 @@ if True:
     # LOR Params Only
     parameters = list(lor_models.parameters())
 
+    # Embeddings. Add all, and then zero out grads to target just the new tokens
+    parameters = parameters + list(model.model.embed_tokens.parameters())
+
     optimizer = optim.AdamW(parameters, lr=lr, weight_decay=wd)
 
     '''
 
     optimizer = optim.AdamW(parameters, lr=1e-3, weight_decay=wd)
 
-    optimizer = optim.AdamW(parameters, lr=lr, weight_decay=wd)
+    optimizer = optim.AdamW(parameters, lr=1e-4, weight_decay=wd)
 
     '''
 
     train_losses = []
     test_losses = []
 
+    global_epoch = 0
+
     # START_BLOCK_2
 
     model.train()
     for epoch in range(num_epochs):
+        global_epoch += epoch
         train_loss = run_epoch(model, lor_models, train_dl, optimizer, DEVICE, train=True)
         train_losses.append(train_loss)
         test_loss = run_epoch(model, lor_models, test_dl, optimizer, DEVICE, train=False)
         test_losses.append(test_loss)
         print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss:.4f}, Test Loss: {test_loss:.4f}")
 
-        writer.add_scalars('loss', {'train': train_loss}, epoch)
-        writer.add_scalars('loss', {'test': test_loss}, epoch)
+        writer.add_scalars('loss', {'train': train_loss}, global_epoch)
+        writer.add_scalars('loss', {'test': test_loss}, global_epoch)
 
     # END_BLOCK_2
 
@@ -901,6 +998,7 @@ def generate(model, lor_models, col_inputs, lors, max_new_tokens):
     # Sample final prediction as first output token
     input_ids = last_token.unsqueeze(1)
     all_output_ids.append(input_ids)
+    tokens_generated += 1
 
     # If max_new_tokens > 0, continue generating new tokens
     position_ids = max_position_ids.unsqueeze(1)
@@ -958,25 +1056,43 @@ with torch.no_grad():
             'lor_ds': [18, 19], 'lor_gs': [12, 13], 'lor_ks': [3, 4], 'lor_os': [9, 10], 'lor_qs': [0, 1], 'lor_us': [15, 16], 'lor_vs': [6, 7],
             'loss_mask': [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             'type': 'lor'}
-    tempty_lor = {'lor_ds': [None, None], 'lor_gs': [None, None], 'lor_ks': [None, None], 'lor_os': [None, None], 'lor_qs': [None, None], 'lor_us': [None, None], 'lor_vs': [None, None]}
+    te = {'lor_ds': [None, None], 'lor_gs': [None, None], 'lor_ks': [None, None], 'lor_os': [None, None], 'lor_qs': [None, None], 'lor_us': [None, None], 'lor_vs': [None, None]}
+
     training_prob = [
-        {'content': 'var_0=-2', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **tempty_lor}, tlor,
-        {'content': 'var_1=var_0', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **tempty_lor}, tlor,
-        {'content': 'var_2=var_1', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **tempty_lor}, tlor,
-        {'content': 'var_3=var_2', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **tempty_lor}, tlor,
-        {'content': 'var_4=var_3', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **tempty_lor}, tlor,
-        {'content': 'var_5=4 - 3', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **tempty_lor}, tlor,
-        {'content': 'var_6=1', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **tempty_lor}, tlor,
-        {'content': 'var_7=var_2', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **tempty_lor}, tlor,
-        {'content': 'var_8=-4', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **tempty_lor}, tlor,
-        {'content': 'var_9=var_0 * 8', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **tempty_lor}, tlor,
-        {'content': 'solve(var_7)=', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **tempty_lor}, tlor,
-        # {'content': '-2', 'include_in_loss': True, 'loss_mask': None, 'type': 'text', **tempty_lor}
+        {'content': 'var_0=-2', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
+        {'content': 'var_1=var_0', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
+        {'content': 'var_2=var_1', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
+        {'content': 'var_3=var_2', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
+        {'content': 'var_4=var_3', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
+        {'content': 'var_5=4 - 3', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
+        {'content': 'var_6=1', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
+        {'content': 'var_7=var_2', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
+        {'content': 'var_8=-4', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
+        {'content': 'var_9=var_0 * 8', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
+        {'content': 'solve(var_7)=', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
+        {'content': '-', 'include_in_loss': True, 'loss_mask': None, 'type': 'text', **te}
+        # {'content': '-2', 'include_in_loss': True, 'loss_mask': None, 'type': 'text', **te}
     ]
 
+    training_prob_2 = [
+        {'content': 'var_0=9', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
+        {'content': 'var_1=var_0', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
+        {'content': 'var_2=1 - var_1', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
+        {'content': 'var_3=-1', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
+        {'content': 'var_4=-3', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
+        {'content': 'var_5=-7', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
+        {'content': 'var_6=7', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
+        {'content': 'var_7=-6 * var_4', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
+        {'content': 'var_8=var_1 + var_3', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
+        {'content': 'var_9=var_8', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
+        {'content': 'solve(var_5)=', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
+        {'content': '-', 'include_in_loss': True, 'loss_mask': None, 'type': 'text', **te}
+        # {'content': '-7', 'include_in_loss': True, 'loss_mask': None, 'type': 'text', **te}
+    ]
 
     test_prompts = [
         training_prob,
+        training_prob_2,
         [t("var_0=1"), lor, t("var_1=2"), lor, t("var_3=var_0 + var_1"), lor, t("solve(var_3)=")],  # 3
         [t("var_0=3"), lor, t("var_1=5"), lor, t("var_3=var_0 - var_1"), lor, t("solve(var_3)=")],  # -2
         [t("var_0=2"), lor, t("var_1=3"), lor, t("var_3=var_0 * var_1"), lor, t("solve(var_3)=")],  # 6
@@ -1003,92 +1119,49 @@ with torch.no_grad():
 # END_BLOCK_1
 
 
-##################################################
-# sandbox
-if False:
-    def select_ixs(x, indices):
-        batch_size, sequence_length, embedding_dim = x.shape
-
-        # Create a mask for valid indices (non-negative)
-        mask = indices >= 0
-
-        # Use torch.where to replace negative indices (indicating default 0 values) with 0
-        safe_indices = torch.where(mask, indices, torch.zeros_like(indices))
-
-        # Gather the embeddings along the sequence dimension
-        gathered_values = x[torch.arange(batch_size), safe_indices]
-
-        # Create a zero tensor of the same shape as the gathered values
-        zeros = torch.zeros_like(gathered_values)
-
-        # Apply the mask: keep the gathered values where mask is True, otherwise use zeros
-        out = torch.where(mask.unsqueeze(1), gathered_values, zeros)
-
-        return out
-
-    # Example usage
-    x = torch.tensor([[[1.0, 2.0, 3.0],
-                       [4.0, 5.0, 6.0],
-                       [7.0, 8.0, 9.0]],
-
-                      [[10.0, 11.0, 12.0],
-                       [13.0, 14.0, 15.0],
-                       [16.0, 17.0, 18.0]],
-
-                      [[19.0, 20.0, 21.0],
-                       [22.0, 23.0, 24.0],
-                       [25.0, 26.0, 27.0]]], requires_grad=True)  # Enable gradient tracking
-
-    indices = torch.tensor([
-        1,  # from first sequence select index 1
-        2,  # from second sequence select index 2
-        -1  # for third sequence, it should default to 0
-    ])
-
-    out = select_ixs(x, indices)
-
-    # Define a simple loss function (e.g., sum of all elements in the output)
-    loss = out.sum()
-
-    # Perform backpropagation
-    loss.backward()
-
-    # Print the gradients of x
-    print(x.grad)
-
-
-
 
 ##################################################
-#
 
 
-# START_BLOCK_3
-if False:
-    import matplotlib.pyplot as plt
+# START_BLOCK_4
 
-    def plot_weight_histograms(model, layer_index=14, num_bins=100):
-        layer = model.model.layers[layer_index].self_attn
-        projections = ['q_proj', 'k_proj', 'v_proj', 'o_proj']
+def clean(tensor, pad_token_id=151643):
+    # Move tensor to CPU if it's on CUDA
+    if tensor.is_cuda:
+        tensor = tensor.cpu()
 
-        fig, axs = plt.subplots(2, 2, figsize=(15, 15))
-        fig.suptitle(f'Weight Distributions of Layer {layer_index} Projections', fontsize=16)
+    # Convert tensor to a list and filter out pad tokens
+    cleaned_list = [item.item() for item in tensor if item.item() != pad_token_id]
 
-        for idx, proj in enumerate(projections):
-            weights = getattr(layer, proj).weight.to(dtype=torch.float32).detach().cpu().numpy().flatten()
+    # Convert back to tensor
+    return torch.tensor(cleaned_list)
 
-            row = idx // 2
-            col = idx % 2
 
-            axs[row, col].hist(weights, bins=num_bins, edgecolor='black')
-            axs[row, col].set_title(f'{proj} Weights')
-            axs[row, col].set_xlabel('Weight Value')
-            axs[row, col].set_ylabel('Frequency')
+batch0 = next(iter(train_dl))
+a = clean(torch.cat([x['input_ids'][0] for x in batch0], dim=0)[:-2])  # trim off answer
+b = clean(torch.cat([x['input_ids'][0] for x in inputs], dim=0))
 
-        plt.tight_layout()
-        plt.show()
+ix = 1
+inp = [{
+    'input_ids': x['input_ids'][ix:ix+1],
+    'attention_mask': x['attention_mask'][ix:ix+1],
+    'position_ids': x['position_ids'][ix:ix+1],
+    'loss_mask': x['loss_mask'][ix:ix+1],
+    'lor_qs': (x['lor_qs'][0][ix:ix+1], x['lor_qs'][1][ix:ix+1]),
+    'lor_ks': (x['lor_ks'][0][ix:ix+1], x['lor_ks'][1][ix:ix+1]),
+    'lor_vs': (x['lor_vs'][0][ix:ix+1], x['lor_vs'][1][ix:ix+1]),
+    'lor_os': (x['lor_os'][0][ix:ix+1], x['lor_os'][1][ix:ix+1]),
+    'lor_gs': (x['lor_gs'][0][ix:ix+1], x['lor_gs'][1][ix:ix+1]),
+    'lor_us': (x['lor_us'][0][ix:ix+1], x['lor_us'][1][ix:ix+1]),
+    'lor_ds': (x['lor_ds'][0][ix:ix+1], x['lor_ds'][1][ix:ix+1]),
+} for x in inputs]
 
-    # Assuming 'model' is your loaded model
-    plot_weight_histograms(model)
+avg_loss, out_logits, cat_attention_mask, lors = run_epoch(model, lor_models, [inp], optimizer=None, device=DEVICE, train=False, debug=True)
+out_logits = torch.cat(out_logits, dim=1)
 
-# END_BLOCK_3
+print('loss:', avg_loss)
+print(tokenizer.decode(out_logits[0].argmax(dim=1)))
+
+# output_logits, col_attention_mask, col_past_key_values, output_ids, lors, position_ids, attention_mask = generate(model, lor_models, inputs, lors, max_new_tokens=10)
+
+# END_BLOCK_4
