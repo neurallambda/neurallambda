@@ -18,6 +18,17 @@ NaN CAUSES:
 - if loss_mask is all False = NaN
 
 
+TODO: STABILIZE TRAINING
+- [ ] curriculum learning (simpler data (fewer variable indirections), for starters)
+- [ ] teacher forcing
+- [ ] test time training
+- [ ] init lormodules to output top eigenvectors of matched linear layers?
+- [X] increasing dataset size helped, there's seems to be a minimal count necessary
+- [X] adding problem text to loss seems to stabilize training, and it appears
+      to still be able to overfit training. I suspect an issue with this though,
+      that problem syntax might be predictable, but not specifics, so this might
+      hurt the quality
+
 NOTES:
 - LayerNorm on end of LORModule encouraged weights to move more, without, they imperceptibly moved (also used high lr (1e-2))
 - Biases in LORModule can cause non-lor layers, which receive 0 values, to suddenly have values, and corrupt performance. LORModules should have the property that they cannot alter non-LOR'd samples.
@@ -28,6 +39,9 @@ NOTES:
 
 TODO FIX:
 
+- [ ] SMALLER DATASET (fewer vars)
+- [ ] OVERFIT A SINGLE SAMPLE. If this doesn't work, test time training won't, not teacher forcing.
+- [ ] LORModule weights not updating much
 - [ ] causal masking?
 - [ ] causal mask LOR blocks?
 - [ ] OFF BY ONE ERROR IN LOSS?!
@@ -48,19 +62,26 @@ TODO FIX:
 TODO:
 - [ ] with torch.autograd.detect_anomaly():
 - [ ] teacher forcing by taking preceding clause, ex x=1, and setting QKVOGUD to relevant portions of that
-- [ ] aggregate LORs instead of replace
 - [ ] teacher forcing (via training lor weights one step, then using those)
-- [ ] if not training text tokens, consider tracing what the outputs actually are
+- [X] aggregate LORs instead of replace
+- [X] if not training text tokens, consider tracing what the outputs actually are
 - [ ] implement LOR parsing during inference's autoregressive portion
 - [ ] lor_ixs makes lor_mask irrelevant? maybe not...
-- [ ] OPTIM: is the way I'm unsqueezing/stacking dimensions of left/right lors ideal?
-- [ ] OPTIM: LOR projections (LORModule) could be cached (should be cached?)
+
+
+OPTIM:
+- [ ] batch size QUICKLY eats up VRAM
+- [ ] is the way I'm unsqueezing/stacking dimensions of left/right lors ideal?
+- [ ] LOR projections (LORModule) could be cached (should be cached?)
+- [ ] multi-gpu
+
 
 IDEAS:
 
 - [ ] after a LOR block, forbid attention to preceding tokens (or just make
       RNN). This could provide an info bottleneck, and force lors to be highly
       relevant.
+- [ ] instead of interpretting hidden state as metaweights, interpret traces of Q/K/V/etc projections?
 
 '''
 
@@ -259,7 +280,10 @@ def update_lors(
         lor_layer
 ):
     ''' Update the LORs by interpreting hidden states as new lor blocks '''
-    h_emb = hidden_states[lor_layer]
+
+    warnings.warn(f'taking final layer of hidden states for projection to lor_layer={lor_layer}') # TODO
+    # h_emb = hidden_states[lor_layer]
+    h_emb = hidden_states[-1]
 
     for lor_key, (lor_l, lor_r) in lor_ixs.items():
         # skip parsing lors if there aren't any to do
@@ -447,13 +471,8 @@ def run_epoch(model, lor_models, dataloader, optimizer, device, train=True, debu
                 lor_ixs = {k: (v[0].to(device), v[1].to(device)) for k, v in col.items() if k in lor_ix_keys}
                 lor_ixss.append(lor_ixs)
 
-            # batch_cols = [x.to(device) for x in batch_cols]
-            lors = empty_lors(model.config.num_hidden_layers)  # init lors
-            # out_logits, _, _  = forward_columns(model, lor_models, batch_cols, lors)
+            lors = empty_lors(model.config.num_hidden_layers)  # init lors for whole batch
             out_logits, cat_attention_mask, _ , lors = forward_columns(model, lor_models, input_idss, attention_masks, position_idss, lors, lor_ixss)
-            # loss = loss_fn([x['input_ids'] for x in batch_cols],
-            #                out_logits,
-            #                [x['loss_mask'] for x in batch_cols])
 
             loss = loss_fn(input_idss,
                            out_logits,
@@ -467,13 +486,14 @@ def run_epoch(model, lor_models, dataloader, optimizer, device, train=True, debu
                 loss.backward()
 
                 # mask out all tokens except the new meta tokens
-                warnings.warn('freezing all token embeddings except new meta tokens')
-                with torch.no_grad():
-                    model.model.embed_tokens.weight.grad[:] = unfreeze_embeddings(model.model.embed_tokens.weight.grad, new_token_ids)
+                if model.model.embed_tokens.weight.grad is not None:
+                    warnings.warn('freezing all token embeddings except new meta tokens')
+                    with torch.no_grad():
+                        model.model.embed_tokens.weight.grad[:] = unfreeze_embeddings(model.model.embed_tokens.weight.grad, new_token_ids)
 
-                MAX_GRAD_NORM = 1.0
-                nn.utils.clip_grad_norm_(model.parameters(), max_norm=MAX_GRAD_NORM)  # NOTE: nan fix?
-                nn.utils.clip_grad_norm_(lor_models.parameters(), max_norm=MAX_GRAD_NORM)  # NOTE: nan fix?
+                # MAX_GRAD_NORM = 1.0
+                # nn.utils.clip_grad_norm_(model.parameters(), max_norm=MAX_GRAD_NORM)  # NOTE: nan fix?
+                # nn.utils.clip_grad_norm_(lor_models.parameters(), max_norm=MAX_GRAD_NORM)  # NOTE: nan fix?
 
                 optimizer.step()
 
@@ -484,12 +504,15 @@ def run_epoch(model, lor_models, dataloader, optimizer, device, train=True, debu
 
     # Log weight histogram
     if LOG and train:
-        # for name, param in itertools.chain(model.named_parameters(), lor_models.named_parameters()):
-        for name, param in lor_models.named_parameters():
-            if param.requires_grad:
-                writer.add_histogram(f'weights/{name}', param.data.detach().to(dtype=torch.float32).cpu().numpy(), global_epoch)
-                if param.grad is not None:
-                    writer.add_histogram(f'grads/{name}', param.grad.data.detach().to(dtype=torch.float32).cpu().numpy(), global_epoch)
+        try:
+            # for name, param in itertools.chain(model.named_parameters(), lor_models.named_parameters()):
+            for name, param in lor_models.named_parameters():
+                if param.requires_grad:
+                    writer.add_histogram(f'weights/{name}', param.data.detach().to(dtype=torch.float32).cpu().numpy(), global_epoch)
+                    if param.grad is not None:
+                        writer.add_histogram(f'grads/{name}', param.grad.data.detach().to(dtype=torch.float32).cpu().numpy(), global_epoch)
+        except Exception as e:
+            warnings.warn(f'Failed to write to tensorboard: {e}')
 
     if debug:
         warnings.warn('only debugging the last batch, values are not accumulated across batches (loss *is* averaged though)')
@@ -549,6 +572,21 @@ except:
     if False:
         AT.test_token_behavior(model, tokenizer, new_token_pairs)
 
+
+    # fuzz new tokens
+    with torch.no_grad():
+        for i, t in enumerate(new_token_ids):
+
+            # random fuzz
+            # model.model.embed_tokens.weight[t, :] += torch.randn_like(model.model.embed_tokens.weight[t]) * 1e-2
+
+            # # fuzz by rolling; preserves statistics, but eliminates semantixs
+            # model.model.embed_tokens.weight[t, :] += torch.roll(model.model.embed_tokens.weight[t], shifts=i)
+
+            # ignore inits, make random
+            model.model.embed_tokens.weight[t, :] += torch.randn_like(model.model.embed_tokens.weight[t]) * 1e-3
+
+
     # ensure parsability
     if False:
         print('Testing that new tokens are parsable')
@@ -568,8 +606,8 @@ except:
 ##########
 # LOR stuff
 
-# hard code the layer these apply to
-# lor_layer = 25  # qwen1.5B has 28 layers
+# These are metatokens that get interjected throughout training data
+#
 # Q|| K|| V|| O|| G|| U|| D||
 lor_block = "^@Q^@|^@|^@K^@|^@|^@V^@|^@|^@O^@|^@|^@G^@|^@|^@U^@|^@|^@D^@|^@|"
 
@@ -614,17 +652,23 @@ lor_ix_keys = set(lor_ixs.keys())
 ####################
 # Data
 
-BATCH_SIZE = 12
+BATCH_SIZE = 16
 
 warnings.warn('training data is severely truncated during r&d')
-train_small = load_dataset("neurallambda/arithmetic_dataset", split="train_small").select(range(BATCH_SIZE * 1))  # todo: rm, this truncates training
-test_small = load_dataset("neurallambda/arithmetic_dataset", split="test_small").select(range(BATCH_SIZE * 1))
+train_small = load_dataset("neurallambda/arithmetic_dataset", split="train_small").select(range(BATCH_SIZE * 100))  # todo: rm, this truncates training
+test_small = load_dataset("neurallambda/arithmetic_dataset", split="test_small").select(range(BATCH_SIZE * 6))
 
 def process_row(row, lor_block, lor_mask):
     prepared_data = []
     for item in row['input']:
-        prepared_data.append({"type": "text", "content": item, 'include_in_loss': True, **empty_lor_ixs})  # TODO: including text in loss
+
+        # # warnings.warn('including whole sample in loss mask')
+        # prepared_data.append({"type": "text", "content": item, 'include_in_loss': True, **empty_lor_ixs})  # TODO: including text in loss
+
+        prepared_data.append({"type": "text", "content": item, 'include_in_loss': False, **empty_lor_ixs})  # TODO: including text in loss
+
         prepared_data.append({"type": "lor", "content": lor_block, 'include_in_loss': True, 'loss_mask': lor_mask, **lor_ixs})
+
     # Add the output
     prepared_data.append({"type": "text", "content": row['output'], 'include_in_loss': True, **empty_lor_ixs})
     return {"prepared_data": prepared_data}
@@ -740,9 +784,9 @@ class LORModule(nn.Module):
         super().__init__()
         self.is_left_singular_value = is_left_singular_value
         self.f = nn.Sequential(
-            nn.LayerNorm(in_dim, bias=False),
-            SwiGLU(in_dim, in_dim),
             # nn.LayerNorm(in_dim, bias=False),
+            SwiGLU(in_dim, in_dim),
+            nn.LayerNorm(in_dim, bias=False),
             nn.Linear(in_dim, out_dim, bias=False),
             # nn.LayerNorm(out_dim, bias=False),
         )
@@ -754,15 +798,30 @@ class LORModule(nn.Module):
     def initialize_parameters(self):
         # linear layer
         with torch.no_grad():
+            swiglu_ix = 0
+            linear_ix = 1
+
+            # linear
+            self.f[linear_ix].weight[:] = torch.randn_like(self.f[linear_ix].weight) * 1e-3
+            # self.f[linear_ix].weight[:] = torch.zeros_like(self.f[linear_ix].weight)
+
+
+            # swiglu
+            self.f[swiglu_ix].w1.weight[:] = torch.randn_like(self.f[swiglu_ix].w1.weight) * 1e-3
+            self.f[swiglu_ix].w2.weight[:] = torch.randn_like(self.f[swiglu_ix].w2.weight) * 1e-3
+
 
             if self.is_left_singular_value:
                 # # swiglu
-                # self.f[1].w1.weight[:] = torch.randn_like(self.f[1].w1.weight) * 1e-3
-                # self.f[1].w2.weight[:] = torch.randn_like(self.f[1].w2.weight) * 1e-3
+                # self.f[swiglu_ix].w1.weight[:] = torch.randn_like(self.f[swiglu_ix].w1.weight) * 1e-3
+                # self.f[swiglu_ix].w2.weight[:] = torch.randn_like(self.f[swiglu_ix].w2.weight) * 1e-3
 
                 # linear
-                # self.f[2].weight[:] = torch.randn_like(self.f[2].weight) * 1e-4
-                self.f[2].weight[:] = torch.zeros_like(self.f[2].weight)
+                # self.f[linear_ix].weight[:] = torch.randn_like(self.f[linear_ix].weight) * 1e-4
+                # self.f[linear_ix].weight[:] = torch.zeros_like(self.f[linear_ix].weight)
+                pass
+
+
 
 
 ##########
@@ -773,7 +832,7 @@ if True:
     num_epochs = 100
     lr = 1e-4
 
-    wd = 1e-2
+    wd = 0
 
     # warnings.warn('WEIGHT DECAY turned on')
     # wd = 1e-2
@@ -784,37 +843,6 @@ if True:
     v_dim = model.model.layers[0].self_attn.v_proj.weight.shape[0]
     ff_dim = model.config.intermediate_size
     num_layers = model.config.num_hidden_layers
-
-
-    # lor_qs = nn.ModuleList([LORModule(dim, dim, True), LORModule(dim, dim, False)])
-    # lor_ks = nn.ModuleList([LORModule(dim, k_dim, True), LORModule(dim, k_dim, False)])
-    # lor_vs = nn.ModuleList([LORModule(dim, v_dim, True), LORModule(dim, v_dim, False)])
-    # lor_os = nn.ModuleList([LORModule(dim, dim, True), LORModule(dim, dim, False)])
-    # lor_gs = nn.ModuleList([LORModule(dim, ff_dim, True), LORModule(dim, dim, False)])
-    # lor_us = nn.ModuleList([LORModule(dim, ff_dim, True), LORModule(dim, dim, False)])
-    # lor_ds = nn.ModuleList([LORModule(dim, dim, True), LORModule(dim, ff_dim, False)])
-
-    # a = LOR_LAYER
-    # b = num_layers - LOR_LAYER - 1
-    # lor_qss = nn.ModuleList([None] * a + [lor_qs] + [None] * b)
-    # lor_kss = nn.ModuleList([None] * a + [lor_ks] + [None] * b)
-    # lor_vss = nn.ModuleList([None] * a + [lor_vs] + [None] * b)
-    # lor_oss = nn.ModuleList([None] * a + [lor_os] + [None] * b)
-    # lor_gss = nn.ModuleList([None] * a + [lor_gs] + [None] * b)
-    # lor_uss = nn.ModuleList([None] * a + [lor_us] + [None] * b)
-    # lor_dss = nn.ModuleList([None] * a + [lor_ds] + [None] * b)
-
-    # lor_models = nn.ModuleDict({
-    #     'lor_qs': lor_qss,
-    #     'lor_ks': lor_kss,
-    #     'lor_vs': lor_vss,
-    #     'lor_os': lor_oss,
-    #     'lor_gs': lor_gss,
-    #     'lor_us': lor_uss,
-    #     'lor_ds': lor_dss
-    # })
-
-    # lor_models = lor_models.to(DEVICE, dtype=model.dtype)
 
     lor_models = nn.ModuleDict(
         {
@@ -867,9 +895,15 @@ if True:
 
     '''
 
-    optimizer = optim.AdamW(parameters, lr=1e-3, weight_decay=wd)
+new_lr = 1e-2
+for param_group in optimizer.param_groups: param_group['lr'] = new_lr
 
-    optimizer = optim.AdamW(parameters, lr=1e-4, weight_decay=wd)
+new_lr = 1e-3
+for param_group in optimizer.param_groups: param_group['lr'] = new_lr
+
+new_lr = 1e-4
+for param_group in optimizer.param_groups: param_group['lr'] = new_lr
+
 
     '''
 
@@ -882,15 +916,20 @@ if True:
 
     model.train()
     for epoch in range(num_epochs):
-        global_epoch += epoch
+        global_epoch += 1
         train_loss = run_epoch(model, lor_models, train_dl, optimizer, DEVICE, train=True)
         train_losses.append(train_loss)
-        test_loss = run_epoch(model, lor_models, test_dl, optimizer, DEVICE, train=False)
-        test_losses.append(test_loss)
-        print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss:.4f}, Test Loss: {test_loss:.4f}")
-
         writer.add_scalars('loss', {'train': train_loss}, global_epoch)
-        writer.add_scalars('loss', {'test': test_loss}, global_epoch)
+
+        if epoch % 5 == 0:
+            test_loss = run_epoch(model, lor_models, test_dl, optimizer, DEVICE, train=False)  # TODO: turned off testing
+            # test_loss = 0
+            test_losses.append(test_loss)
+            writer.add_scalars('loss', {'test': test_loss}, global_epoch)
+            print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss:.4f}, Test Loss: {test_loss:.4f}")
+        else:
+            print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss:.4f}")
+
 
     # END_BLOCK_2
 
@@ -1070,7 +1109,7 @@ with torch.no_grad():
         {'content': 'var_8=-4', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
         {'content': 'var_9=var_0 * 8', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
         {'content': 'solve(var_7)=', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
-        {'content': '-', 'include_in_loss': True, 'loss_mask': None, 'type': 'text', **te}
+        # {'content': '-', 'include_in_loss': True, 'loss_mask': None, 'type': 'text', **te}
         # {'content': '-2', 'include_in_loss': True, 'loss_mask': None, 'type': 'text', **te}
     ]
 
@@ -1086,7 +1125,7 @@ with torch.no_grad():
         {'content': 'var_8=var_1 + var_3', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
         {'content': 'var_9=var_8', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
         {'content': 'solve(var_5)=', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
-        {'content': '-', 'include_in_loss': True, 'loss_mask': None, 'type': 'text', **te}
+        # {'content': '-', 'include_in_loss': True, 'loss_mask': None, 'type': 'text', **te}
         # {'content': '-7', 'include_in_loss': True, 'loss_mask': None, 'type': 'text', **te}
     ]
 
@@ -1096,10 +1135,6 @@ with torch.no_grad():
         [t("var_0=1"), lor, t("var_1=2"), lor, t("var_3=var_0 + var_1"), lor, t("solve(var_3)=")],  # 3
         [t("var_0=3"), lor, t("var_1=5"), lor, t("var_3=var_0 - var_1"), lor, t("solve(var_3)=")],  # -2
         [t("var_0=2"), lor, t("var_1=3"), lor, t("var_3=var_0 * var_1"), lor, t("solve(var_3)=")],  # 6
-
-        # [t("hi there"), lor, t('how'), lor],
-        # [t("hi there"), lor, t('how')],
-        # [t("hi there"), lor],
 
         [t("Once when")],
         [t("Let me tell you about the time")],
@@ -1141,7 +1176,7 @@ batch0 = next(iter(train_dl))
 a = clean(torch.cat([x['input_ids'][0] for x in batch0], dim=0)[:-2])  # trim off answer
 b = clean(torch.cat([x['input_ids'][0] for x in inputs], dim=0))
 
-ix = 1
+ix = 0
 inp = [{
     'input_ids': x['input_ids'][ix:ix+1],
     'attention_mask': x['attention_mask'][ix:ix+1],
