@@ -1,4 +1,6 @@
-'''Apply Metalearning-Hypernet stuff to Transformer arch
+'''
+
+Apply Metalearning-Hypernet stuff to Transformer arch
 
 This version uses teacher forcing on the lor metatokens. The previous version
 didn't include lor metatokens in the loss, and likely suffered from vanishing
@@ -15,7 +17,7 @@ NaN CAUSES:
 - clip grads?
 - layer norm?
 - lor module init?
-- if loss_mask is all False = NaN
+- if loss_mask is all False = NaN (ie cross_entropy gets empty tensors)
 
 
 TODO: STABILIZE TRAINING
@@ -40,7 +42,8 @@ NOTES:
 TODO FIX:
 
 - [ ] SMALLER DATASET (fewer vars)
-- [ ] OVERFIT A SINGLE SAMPLE. If this doesn't work, test time training won't, not teacher forcing.
+- [ ] ONLY TRAIN GUD for now
+- [ ] OVERFIT A SINGLE SAMPLE. If this doesn't work, test time training won't, nor teacher forcing.
 - [ ] LORModule weights not updating much
 - [ ] causal masking?
 - [ ] causal mask LOR blocks?
@@ -82,6 +85,7 @@ IDEAS:
       RNN). This could provide an info bottleneck, and force lors to be highly
       relevant.
 - [ ] instead of interpretting hidden state as metaweights, interpret traces of Q/K/V/etc projections?
+- [ ] query back out matrix->vector. We have vec->mat, but not the reverse.
 
 '''
 
@@ -339,11 +343,6 @@ past_key_values across generations. '''
 
     # Iterate over each column in the batch
     for i, (input_ids, new_attention_mask, position_ids, lor_ixs) in enumerate(zip(input_idss, attention_masks, position_idss, lor_ixss)):
-
-        # for i, batch_column in enumerate(col_inputs):
-        # input_ids = batch_column['input_ids']
-        # new_attention_mask = batch_column['attention_mask']
-        # position_ids = batch_column['position_ids']
 
         # skip empty batches. this can happen because of padded blocks.
         if input_ids.numel() == 0:
@@ -606,57 +605,111 @@ except:
 ##########
 # LOR stuff
 
-# These are metatokens that get interjected throughout training data
-#
-# Q|| K|| V|| O|| G|| U|| D||
-lor_block = "^@Q^@|^@|^@K^@|^@|^@V^@|^@|^@O^@|^@|^@G^@|^@|^@U^@|^@|^@D^@|^@|"
+WHICH_LOR = 2
 
-# metatoken mask, for masking loss. metatokens should be predicted, thus make
-# it to loss. meta weights should not be affected directly by the cross entropy
-# loss.
+##########
+# Do QKVOGUD Lors
 
-# TODO: i think this needs to be shifted one left, into the preceding block (??)
+if WHICH_LOR == 1:
+    # These are metatokens that get interjected throughout training data
+    #
+    # Q|| K|| V|| O|| G|| U|| D||
+    lor_block = "^@Q^@|^@|^@K^@|^@|^@V^@|^@|^@O^@|^@|^@G^@|^@|^@U^@|^@|^@D^@|^@|"
 
-# lor_mask = [1, 0, 0] * 7  # note: should be list, not tensor. `datasets` converts it back to a list (then tensor again) anyway
-lor_mask = [0, 0, 0] * 7  # TODO: rm, this mask does NOT learn output of metatokens
+    # metatoken mask, for masking loss. metatokens should be predicted, thus make
+    # it to loss. meta weights should not be affected directly by the cross entropy
+    # loss.
 
-# for blocks that don't contain any lors
-#   note: right now this assumes only a single layer is getting targeted, but someday could have separate values per index
-empty_lor_ixs = {
-    'lor_qs': (None, None),
-    'lor_ks': (None, None),
-    'lor_vs': (None, None),
-    'lor_os': (None, None),
-    'lor_gs': (None, None),
-    'lor_us': (None, None),
-    'lor_ds': (None, None),
-}
+    # TODO: i think this needs to be shifted one left, into the preceding block (??)
 
-# where to parse to collect metaweights, tied to `lor_block`'s implementation.
-#
-# note: this might look shifted left, but consider "Q||". The token emitted
-#       after Q will be in location 0 and represent the first predicted |.
-lor_ixs = {
-    'lor_qs': (0, 1),  # (left singular value, right singular value)
-    'lor_ks': (3, 4),
-    'lor_vs': (6, 7),
-    'lor_os': (9, 10),
-    'lor_gs': (12, 13),
-    'lor_us': (15, 16),
-    'lor_ds': (18, 19),
-}
+    # lor_mask = [1, 0, 0] * 7  # note: should be list, not tensor. `datasets` converts it back to a list (then tensor again) anyway
+    lor_mask = [0, 0, 0] * 7  # TODO: rm, this mask does NOT learn output of metatokens
 
-lor_ix_keys = set(lor_ixs.keys())
+    # for blocks that don't contain any lors
+    #   note: right now this assumes only a single layer is getting targeted, but someday could have separate values per index
+    empty_lor_ixs = {
+        'lor_qs': (None, None),
+        'lor_ks': (None, None),
+        'lor_vs': (None, None),
+        'lor_os': (None, None),
+        'lor_gs': (None, None),
+        'lor_us': (None, None),
+        'lor_ds': (None, None),
+    }
+
+    # where to parse to collect metaweights, tied to `lor_block`'s implementation.
+    #
+    # note: this might look shifted left, but consider "Q||". The token emitted
+    #       after Q will be in location 0 and represent the first predicted |.
+    lor_ixs = {
+        'lor_qs': (0, 1),  # (left singular value, right singular value)
+        'lor_ks': (3, 4),
+        'lor_vs': (6, 7),
+        'lor_os': (9, 10),
+        'lor_gs': (12, 13),
+        'lor_us': (15, 16),
+        'lor_ds': (18, 19),
+    }
+
+    lor_ix_keys = set(lor_ixs.keys())
+
+
+##########
+# Just do GUD Lors
+
+elif WHICH_LOR == 2:
+    # These are metatokens that get interjected throughout training data
+    #
+    # G|| U|| D||
+    lor_block = "^@G^@|^@|^@U^@|^@|^@D^@|^@|"
+
+    # metatoken mask, for masking loss. metatokens should be predicted, thus make
+    # it to loss. meta weights should not be affected directly by the cross entropy
+    # loss.
+
+    # TODO: i think this needs to be shifted one left, into the preceding block (??)
+
+    # lor_mask = [1, 0, 0] * 3  # note: should be list, not tensor. `datasets` converts it back to a list (then tensor again) anyway
+    lor_mask = [0, 0, 0] * 3  # TODO: rm, this mask does NOT learn output of metatokens
+
+    # for blocks that don't contain any lors
+    #   note: right now this assumes only a single layer is getting targeted, but someday could have separate values per index
+    empty_lor_ixs = {
+        'lor_gs': (None, None),
+        'lor_us': (None, None),
+        'lor_ds': (None, None),
+    }
+
+    # where to parse to collect metaweights, tied to `lor_block`'s implementation.
+    #
+    # note: this might look shifted left, but consider "Q||". The token emitted
+    #       after Q will be in location 0 and represent the first predicted |.
+
+    lor_ixs = {
+        'lor_gs': (0, 1),  # (left singular value, right singular value)
+        'lor_us': (3, 4),
+        'lor_ds': (6, 7),
+    }
+
+    # warnings.warn('TODO: is this off by one?')
+    # lor_ixs = {
+    #     'lor_gs': (1, 2),  # (left singular value, right singular value)
+    #     'lor_us': (4, 5),
+    #     'lor_ds': (7, 8),
+    # }
+
+    lor_ix_keys = set(lor_ixs.keys())
 
 
 ####################
 # Data
 
-BATCH_SIZE = 16
+BATCH_SIZE = 64
+split = '_4'  # 4 variable version of dataset
 
 warnings.warn('training data is severely truncated during r&d')
-train_small = load_dataset("neurallambda/arithmetic_dataset", split="train_small").select(range(BATCH_SIZE * 100))  # todo: rm, this truncates training
-test_small = load_dataset("neurallambda/arithmetic_dataset", split="test_small").select(range(BATCH_SIZE * 6))
+train_small = load_dataset("neurallambda/arithmetic_dataset", split=f"train{split}").select(range(BATCH_SIZE * 10))  # todo: rm, this truncates training
+test_small = load_dataset("neurallambda/arithmetic_dataset", split=f"test{split}").select(range(BATCH_SIZE * 1))
 
 def process_row(row, lor_block, lor_mask):
     prepared_data = []
@@ -832,10 +885,10 @@ if True:
     num_epochs = 100
     lr = 1e-4
 
-    wd = 0
+    # wd = 0
 
-    # warnings.warn('WEIGHT DECAY turned on')
-    # wd = 1e-2
+    warnings.warn('WEIGHT DECAY turned on')
+    wd = 1e-2
 
     # LOR Models: same structure as LORs
     dim = model.model.embed_tokens.weight.shape[1]
@@ -882,14 +935,14 @@ if True:
     lor_models['lor_ds'][LOR_LAYER] = nn.ModuleList([LORModule(dim, dim, True), LORModule(dim, ff_dim, False)])
     lor_models = lor_models.to(DEVICE, dtype=model.dtype)
 
-    # # All Params
-    # parameters = list(itertools.chain(model.parameters(), lor_models.parameters()))
+    # All Params
+    parameters = list(itertools.chain(model.parameters(), lor_models.parameters()))
 
-    # LOR Params Only
-    parameters = list(lor_models.parameters())
+    # # LOR Params Only
+    # parameters = list(lor_models.parameters())
 
-    # Embeddings. Add all, and then zero out grads to target just the new tokens
-    parameters = parameters + list(model.model.embed_tokens.parameters())
+    # # Embeddings. Add all, and then zero out grads to target just the new tokens
+    # parameters = parameters + list(model.model.embed_tokens.parameters())
 
     optimizer = optim.AdamW(parameters, lr=lr, weight_decay=wd)
 
