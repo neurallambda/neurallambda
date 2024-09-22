@@ -24,6 +24,8 @@ import json
 import matplotlib.pyplot as plt
 from collections import Counter
 import logging
+import copy
+import math
 
 @dataclass
 class IntLiteral:
@@ -58,6 +60,8 @@ def generate_simple_expression(available_vars: List[str], nums: List[int], ops: 
         return BinaryOperation(op, left, right)
 
 def make_puzzle(vars: List[str], nums: List[int], ops: List[str]) -> Puzzle:
+    vars = copy.copy(vars)
+    random.shuffle(vars)
     variables = {}
     available_vars = []
     for var in vars:
@@ -108,25 +112,50 @@ def puzzle_to_chunks(puzzle: Puzzle) -> List[str]:
     chunks.append(str(evaluate(Variable(puzzle.solve), puzzle.variables)))
     return chunks
 
-def generate_dataset(num_examples: int, num_vars: int, nums: List[int], ops: List[str], filter_num_size=100) -> List[Dict]:
+
+def generate_dataset(num_examples: int, num_vars: int, nums: List[int], ops: List[str], filter_num_size=100) -> Dict[str, List[Dict]]:
     vars = [f'var_{i}' for i in range(num_vars)]
-    dataset = []
-    while len(dataset) < num_examples:
+    dataset = set()
+    last_unique_sample = 0
+    pbar = tqdm(total=num_examples, desc=f"Generating dataset (vars: {num_vars})")
+
+    while len(dataset) < num_examples and last_unique_sample < 100:
         puzzle = make_puzzle(vars, nums, ops)
         chunks = puzzle_to_chunks(puzzle)
-        # skip puzzles that result in answers that are too large
+
+        # Skip puzzles that result in answers that are too large
         if abs(int(chunks[-1])) > filter_num_size:
             continue
-        example = {
-            "input": chunks[:-1],
-            "output": chunks[-1]
-        }
-        dataset.append(example)
-    return dataset
+
+        example = (tuple(chunks[:-1]), chunks[-1])  # Make it hashable
+
+        if example not in dataset:
+            dataset.add(example)
+            last_unique_sample = 0
+            pbar.update(1)
+        else:
+            last_unique_sample += 1
+
+    pbar.close()
+
+    # Convert set back to list of dicts
+    dataset = [{"input": list(ex[0]), "output": ex[1]} for ex in dataset]
+
+    # Shuffle the dataset
+    random.shuffle(dataset)
+
+    # Split into train and test
+    split_index = int(0.8 * len(dataset))
+    train_data = dataset[:split_index]
+    test_data = dataset[split_index:]
+
+    return {"train": train_data, "test": test_data}
+
 
 def save_dataset(dataset: List[Dict], filename: str):
     with open(filename, 'w') as f:
         json.dump(dataset, f, indent=2)
+
 
 def upload_to_huggingface(dataset_name: str, dataset_files: Dict[str, str], readme: str):
     logging.info(f"Starting upload process for dataset: {dataset_name}")
@@ -204,21 +233,41 @@ def generate_output_histograms(source: Union[str, Dict[str, str]], is_local: boo
     # Load the dataset
     dataset = load_dataset_from_source(source, is_local)
 
+    # Calculate the number of rows and columns needed
+    num_splits = len(dataset)
+    num_cols = min(3, num_splits)  # Max 3 columns
+    num_rows = math.ceil(num_splits / num_cols)
+
     # Set up the plot
-    fig, axs = plt.subplots(2, 2, figsize=(20, 20))
+    fig, axs = plt.subplots(num_rows, num_cols, figsize=(8*num_cols, 6*num_rows))
     fig.suptitle('Output Frequency Histograms for Each Split', fontsize=16)
+
+    # Ensure axs is always a 2D array
+    if num_splits == 1:
+        axs = np.array([[axs]])
+    elif num_rows == 1:
+        axs = axs.reshape(1, -1)
 
     # Generate histograms for each split
     for idx, (split_name, split_data) in enumerate(dataset.items()):
         # Get the outputs for this split and convert to integers
         outputs = [int(x) for x in split_data['output']]
 
+        # Calculate row and column for the current subplot
+        row = idx // num_cols
+        col = idx % num_cols
+
         # Plot the histogram
-        row, col = divmod(idx, 2)
         axs[row, col].hist(outputs, bins=50, edgecolor='black')
         axs[row, col].set_title(f'{split_name} Output Frequency')
         axs[row, col].set_xlabel('Output Value')
         axs[row, col].set_ylabel('Frequency')
+
+    # Remove any unused subplots
+    for idx in range(num_splits, num_rows * num_cols):
+        row = idx // num_cols
+        col = idx % num_cols
+        fig.delaxes(axs[row, col])
 
     # Adjust the layout and display the plot
     plt.tight_layout()
@@ -255,10 +304,12 @@ Inputs are a list of strings representing variable assignments (`c=a+b`), and th
 
 Outputs are filtered to be between [-100, 100], and self-reference/looped dependencies are forbidden.
 
-Splits include:
+Splits are named like:
 
-- `train_small/test_small` which includes 10k total examples of puzzles with up to 10 variables.
-- `train_large/test_large` which includes 10k total examples of puzzles with up to 100 variables.
+- `train_N` 8k total examples of puzzles with N variables
+- `test_N` 2k more examples with N variables
+
+Train/test leakage is prevented: all training examples are filtered out of the test set.
 
 Conceptually the data looks like this:
 
@@ -290,13 +341,11 @@ In actuality it looks like this:
 from datasets import load_dataset
 
 # Load the entire dataset
-dataset = load_dataset("neurallambda/arithmetic_puzzles")
+dataset = load_dataset("neurallambda/arithmetic_dataset")
 
 # Load specific splits
-train_small = load_dataset("neurallambda/arithmetic_puzzles", split="train_small")
-test_small = load_dataset("neurallambda/arithmetic_puzzles", split="test_small")
-train_large = load_dataset("neurallambda/arithmetic_puzzles", split="train_large")
-test_large = load_dataset("neurallambda/arithmetic_puzzles", split="test_large")
+train_small = load_dataset("neurallambda/arithmetic_dataset", split="train_10")
+test_small = load_dataset("neurallambda/arithmetic_dataset", split="test_10")
 ```
 
 ### Preparing Inputs
@@ -339,7 +388,12 @@ Output: 3
 '''
 
 
-if False:
+
+
+if True:
+    SEED = 152
+    random.seed(SEED)
+
     dataset_name = "neurallambda/arithmetic_dataset"
 
     # Generate datasets
@@ -347,39 +401,42 @@ if False:
     ops = ['+', '-', '*']
 
     n_samples = 10_000
+    sizes = [2, 4, 6, 8, 10, 20, 30, 50, 100]
 
-    train_small = generate_dataset(n_samples, 10, nums, ops)
-    test_small = generate_dataset(n_samples, 10, nums, ops)
+    local_files = {}
 
-    train_large = generate_dataset(n_samples, 100, nums, ops)
-    test_large = generate_dataset(n_samples, 100, nums, ops)
+    for size in sizes:
+        print(f"\nGenerating dataset for {size} variables:")
+        dataset = generate_dataset(n_samples, size, nums, ops)
 
-    # Save datasets locally
-    save_dataset(train_small, 'arithmetic_train_small.json')
-    save_dataset(test_small, 'arithmetic_test_small.json')
-    save_dataset(train_large, 'arithmetic_train_large.json')
-    save_dataset(test_large, 'arithmetic_test_large.json')
+        # Save datasets locally
+        train_filename = f'arithmetic_train_{size}.json'
+        test_filename = f'arithmetic_test_{size}.json'
+
+        save_dataset(dataset['train'], train_filename)
+        save_dataset(dataset['test'], test_filename)
+
+        local_files[f'train_{size}'] = train_filename
+        local_files[f'test_{size}'] = test_filename
+
+        print(f"Train set size: {len(dataset['train'])}")
+        print(f"Test set size: {len(dataset['test'])}")
 
     print("\n" + "=" * 50 + "\n")
 
     # From local JSON files
     print("Loading from local JSON files:")
-    local_files = {
-        "train_small": "arithmetic_train_small.json",
-        "test_small": "arithmetic_test_small.json",
-        "train_large": "arithmetic_train_large.json",
-        "test_large": "arithmetic_test_large.json"
-    }
+    print(local_files)
 
     # # Visualize
     # demonstrate_dataset(local_files, is_local=True)
     # generate_output_histograms(local_files, is_local=True)
 
-    # # Save to HF Hub
-    # upload_to_huggingface(dataset_name, local_files, readme)
+    # Save to HF Hub
+    upload_to_huggingface(dataset_name, local_files, readme)
 
     # Load and inspect
 
-    # # From Hugging Face Hub
-    # print("Loading from Hugging Face Hub:")
-    # demonstrate_dataset("neurallambda/arithmetic_puzzles")
+    # From Hugging Face Hub
+    print("Loading from Hugging Face Hub:")
+    demonstrate_dataset("neurallambda/arithmetic_dataset")
