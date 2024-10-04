@@ -86,7 +86,7 @@ def preserve_rms_norm(W, V, x):
     return y
 
 
-def preserve_layernorm(W, V, x):
+def preserve_layernorm_trained(W, V, x):
     output_dim = W.shape[1]
 
     optimizer = torch.optim.Adam(layer_norm.parameters(), lr=1e-2)
@@ -108,6 +108,31 @@ def preserve_layernorm(W, V, x):
         y = layer_norm(y_combined)
 
     return y
+
+
+def preserve_rms_norm_trained(W, V, x):
+    output_dim = W.shape[1]
+
+    optimizer = torch.optim.Adam(rms_norm.parameters(), lr=1e-2)
+
+    # Train LayerNorm to reproduce x@W faithfully
+    for _ in tqdm(range(0)):
+        y_w = x @ W
+        y = rms_norm(y_w)
+        loss = F.mse_loss(y, y_w)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    # Combine with V
+    with torch.no_grad():
+        y_w = x @ W
+        y_v = x @ V
+        y_combined = y_w + y_v
+        y = rms_norm(y_combined)
+
+    return y
+
 
 # Initialization of Layernorm experiments:
 #   RESULTS: input_dim**0.5 is good init
@@ -146,5 +171,12 @@ layer_norm = nn.LayerNorm(output_dim)
 with torch.no_grad():
     layer_norm.weight[:] = torch.zeros_like(layer_norm.weight) + input_dim ** 0.5
     layer_norm.bias[:] = torch.zeros_like(layer_norm.bias)
-test_method("Preserve LayerNorm", preserve_layernorm, W, V, x)
+test_method("Preserve LayerNorm", preserve_layernorm_trained, W, V, x)
 print(layer_norm.weight.mean())
+
+rms_norm = nn.LayerNorm(output_dim)
+with torch.no_grad():
+    rms_norm.weight[:] = torch.zeros_like(rms_norm.weight) + input_dim ** 0.5
+    rms_norm.bias[:] = torch.zeros_like(rms_norm.bias)
+test_method("Preserve RMSNorm", preserve_rms_norm_trained, W, V, x)
+print(rms_norm.weight.mean())
