@@ -52,13 +52,12 @@ TODO FIX:
 - [ ] add correctness tests for lor stuff
   - [X] batch mode gives same output as non-batched
   - [X] parse ixs don't cause weirdness in non-parsed samples)
-  - [ ] ensure cache looks good (with test)
-- [ ] `generate` should use `forward_columns`
+  - [?] ensure cache looks good (with test)
+  - [ ] double check that lormodule init produces LRx=0 before any training, make it a test
+- [X] `generate` should use `forward_columns`
 - [ ] train RMSNorm separately, first?
 - [ ] trained model gets low loss, then outputs "^@Q" as next token?!
 - [ ] get test loss down
-- [ ] double check that lormodule init produces LRx=0 before any training, make it a test
-
 
 
 - [ ] loss_fn is currently unbatched
@@ -172,7 +171,7 @@ except NameError:
 
 
 SEED = 152
-torch.manual_seed(152)
+torch.manual_seed(SEED)
 random.seed(SEED)
 
 DEVICE = 'cuda:1'
@@ -386,6 +385,9 @@ def run_epoch(model, lor_models, dataloader, optimizer, device, train=True, debu
             B = batch_cols[0]['input_ids'].shape[0]
             device = model.device
 
+            #####
+            # Move to cuda
+
             # list of columns
             input_idss = [x['input_ids'].to(device) for x in batch_cols]
             attention_masks = [x['attention_mask'].to(device) for x in batch_cols]
@@ -399,6 +401,10 @@ def run_epoch(model, lor_models, dataloader, optimizer, device, train=True, debu
                 # v[0]: [layer, batch_size]; parse ixs, 1 (optional) index per layer for each sample
                 # v[1]: [layer, batch_size]
                 lor_ixss.append(lor_ixs)
+
+
+            #####
+            # Go
 
             lor_cache = empty_lors(model.config.num_hidden_layers)  # init lors for whole batch
             out_logits, cat_attention_mask, _, lor_cache = forward_columns(model, lor_models, lor_cache, input_idss, attention_masks, position_idss, lor_ixss)
@@ -484,8 +490,7 @@ except:
     print('Loading model')
     model = Q.Qwen2ForCausalLM.from_pretrained(
         model_name,
-        # torch_dtype="auto",
-        # torch_dtype=torch.bfloat16,
+        # torch_dtype=torch.bfloat16,  # HERE BE DRAGONS
         torch_dtype=torch.float32,
         device_map=DEVICE,
         _attn_implementation='eager',
@@ -544,7 +549,7 @@ except:
 # Layer index to target, hard coded
 LOR_LAYER = 14  # must be positive num (can't index bwd)
 
-WHICH_LOR = 2
+WHICH_LOR = 1
 
 ##########
 # Do QKVOGUD Lors
@@ -568,30 +573,38 @@ if WHICH_LOR == 1:
     # for blocks that don't contain any lors
     #   note: right now this assumes only a single layer is getting targeted, but someday could have separate values per index
     empty_lor_ixs = {
-        'lor_qs': (None, None),
-        'lor_ks': (None, None),
-        'lor_vs': (None, None),
-        'lor_os': (None, None),
-        'lor_gs': (None, None),
-        'lor_us': (None, None),
-        'lor_ds': (None, None),
+        'lor_qs': [None] * num_layers,
+        'lor_ks': [None] * num_layers,
+        'lor_vs': [None] * num_layers,
+        'lor_os': [None] * num_layers,
+        'lor_gs': [None] * num_layers,
+        'lor_us': [None] * num_layers,
+        'lor_ds': [None] * num_layers,
     }
 
     # where to parse to collect metaweights, tied to `lor_block`'s implementation.
     #
     # note: this might look shifted left, but consider "Q||". The token emitted
     #       after Q will be in location 0 and represent the first predicted |.
-    lor_ixs = {
-        'lor_qs': (0, 1),  # (left singular value, right singular value)
-        'lor_ks': (3, 4),
-        'lor_vs': (6, 7),
-        'lor_os': (9, 10),
-        'lor_gs': (12, 13),
-        'lor_us': (15, 16),
-        'lor_ds': (18, 19),
+    parse_lor_ixs = {
+        'lor_qs': [None] * num_layers,
+        'lor_ks': [None] * num_layers,
+        'lor_vs': [None] * num_layers,
+        'lor_os': [None] * num_layers,
+        'lor_gs': [None] * num_layers,
+        'lor_us': [None] * num_layers,
+        'lor_ds': [None] * num_layers,
     }
 
-    lor_ix_keys = set(lor_ixs.keys())
+    parse_lor_ixs['lor_qs'][LOR_LAYER] = (0, 1)  # (left singular value, right singular value)
+    parse_lor_ixs['lor_ks'][LOR_LAYER] = (3, 4)
+    parse_lor_ixs['lor_vs'][LOR_LAYER] = (6, 7)
+    parse_lor_ixs['lor_os'][LOR_LAYER] = (9, 10)
+    parse_lor_ixs['lor_gs'][LOR_LAYER] = (12, 13)
+    parse_lor_ixs['lor_us'][LOR_LAYER] = (15, 16)
+    parse_lor_ixs['lor_ds'][LOR_LAYER] = (18, 19)
+
+    lor_ix_keys = set(parse_lor_ixs.keys())
 
 
 ##########
@@ -638,15 +651,15 @@ elif WHICH_LOR == 2:
     lor_ix_keys = set(parse_lor_ixs.keys())
 
 
-####################
+##################################################
 # Data
 
-BATCH_SIZE = 64
+BATCH_SIZE = 32
 split = '_4'  # 4 variable version of dataset
 
 warnings.warn('training data is severely truncated during r&d')
-train_small = load_dataset("neurallambda/arithmetic_dataset", split=f"train{split}").select(range(BATCH_SIZE * 10))  # todo: rm, this truncates training
-test_small = load_dataset("neurallambda/arithmetic_dataset", split=f"test{split}").select(range(BATCH_SIZE * 1))
+train_small = load_dataset("neurallambda/arithmetic_dataset", split=f"train{split}").select(range(BATCH_SIZE * 80))  # todo: rm, this truncates training
+test_small = load_dataset("neurallambda/arithmetic_dataset", split=f"test{split}").select(range(BATCH_SIZE * 4))
 
 def process_row(row, lor_block, lor_mask):
     prepared_data = []
@@ -782,6 +795,26 @@ class SwiGLU(nn.Module):
 
 
 class LORProjection(nn.Module):
+    # Linear Layer
+    #   val loss bottomed around 0.81
+    def __init__(self, in_dim, out_dim, is_left_singular_value):
+        super().__init__()
+        self.is_left_singular_value = is_left_singular_value
+        self.f = nn.Linear(in_dim, out_dim, bias=False)
+        self.initialize_parameters()
+
+    def forward(self, x):
+        return self.f(x)
+
+    def initialize_parameters(self):
+        with torch.no_grad():
+            if self.is_left_singular_value:
+                self.f.weight[:] = torch.zeros_like(self.f.weight)
+
+
+class LORProjection(nn.Module):
+    # SwiGLU - RMSNorm - Linear
+    #   val loss bottomed around 0.31
     '''Project the LOR weights before using them.
 
     NOTE: this module should probably never have bias parameters. If it has
@@ -792,7 +825,7 @@ class LORProjection(nn.Module):
         self.f = nn.Sequential(
             # nn.LayerNorm(in_dim, bias=False),
             SwiGLU(in_dim, in_dim),
-            nn.LayerNorm(in_dim, bias=False),
+            nn.RMSNorm(in_dim),
             nn.Linear(in_dim, out_dim, bias=False),
             # nn.LayerNorm(out_dim, bias=False),
         )
@@ -810,7 +843,6 @@ class LORProjection(nn.Module):
             # linear
             self.f[linear_ix].weight[:] = torch.randn_like(self.f[linear_ix].weight) * 1e-3
             # self.f[linear_ix].weight[:] = torch.zeros_like(self.f[linear_ix].weight)
-
 
             # swiglu
             self.f[swiglu_ix].w1.weight[:] = torch.randn_like(self.f[swiglu_ix].w1.weight) * 1e-3
@@ -896,7 +928,7 @@ class LORModule(nn.Module):
         '''
 
         # warnings.warn('LOR IS TURNED OFF')
-        # return self.norm(original)
+        # return original
 
         if lor_cache is not None:
             lorl, lorr = lor_cache
@@ -1037,8 +1069,8 @@ def update_lors(
 #
 
 if True:
-    num_epochs = 100
-    lr = 1e-4
+    num_epochs = 50
+    lr = 1e-3
 
     # wd = 0
 
@@ -1128,7 +1160,7 @@ for param_group in optimizer.param_groups: param_group['lr'] = new_lr
         train_losses.append(train_loss)
         writer.add_scalars('loss', {'train': train_loss}, global_epoch)
 
-        if epoch % 5 == 0:
+        if epoch % 1 == 0:
             test_loss = run_epoch(model, lor_models, test_dl, optimizer, DEVICE, train=False)
             # test_loss = 0
             test_losses.append(test_loss)
@@ -1168,79 +1200,44 @@ if num_epochs > 0:
 def generate(model, lor_models, col_inputs, max_new_tokens):
     '''Recurrently process column blocks of ids, concatenating attention_mask and
     past_key_values across generations. Can generate new tokens if max_new_tokens > 0.'''
-    col_out_logits = []
-    past_key_values = None
-    attention_mask = None
     all_output_ids = []
     tokens_generated = 0
 
     lor_cache = empty_lors(model.config.num_hidden_layers)  # init lors for whole batch
 
-    # We need to keep the max position id because short batch items end with
-    # `-1` padding, but during inference we'll need the correct starting
-    # position. We also need to collect the last output token which will be the
-    # start of generation. Again, for short inputs, their last token would
-    # otherwise be predicted off a padding token.
-    max_position_ids = None  # shape=[batch]
-    last_token = None
+    #####
+    # Move to cuda
 
-    # Iterate over each column in the batch
-    for i, batch_column in enumerate(col_inputs):
-        input_ids = batch_column['input_ids']
-        new_attention_mask = batch_column['attention_mask']
-        position_ids = batch_column['position_ids']
-        device = input_ids.device
+    device = model.device
 
-        lor_ixs = {k: (v[0].to(device), v[1].to(device)) for k, v in batch_column.items() if k in lor_ix_keys}
+    # list of columns
+    input_idss = [x['input_ids'].to(device) for x in col_inputs]
+    attention_masks = [x['attention_mask'].to(device) for x in col_inputs]
+    position_idss = [x['position_ids'].to(device) for x in col_inputs]
 
-        # skip empty batches. this can happen because of padded blocks.
-        if input_ids.numel() == 0:
-            continue
+    # lor_ixs per column
+    lor_ixss = []
+    for col in col_inputs:
+        lor_ixs = {k: (v[0].to(device), v[1].to(device)) for k, v in col.items() if k in lor_ix_keys}
+        # v[0]: [layer, batch_size]; parse ixs, 1 (optional) index per layer for each sample
+        # v[1]: [layer, batch_size]
+        lor_ixss.append(lor_ixs)
 
-        # `attention_mask` will continue to grow as the entire sequence length
-        # seen so far (even though input_ids will only be new inputs, not past)
-        if attention_mask is not None:
-            attention_mask = torch.cat([attention_mask, new_attention_mask], dim=-1)
-        else:
-            attention_mask = new_attention_mask
 
-        lorm = partially_apply_models(lor_models, lor_cache)
+    #####
+    # Handle input columns
 
-        # run column
-        out = model(input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    past_key_values=past_key_values,
-                    return_dict=True,
-                    use_cache=True,
-                    position_ids=position_ids,
-                    output_hidden_states=True,  # OPTIM: we don't need this for non-lor blocks
-                    **lorm,
-                    )
-        col_out_logits.append(out.logits)
-        # all_output_ids.append(input_ids)
+    lor_cache = empty_lors(model.config.num_hidden_layers)  # init lors for whole batch
+    out_logits, cat_attention_mask, past_key_values, lor_cache = forward_columns(model, lor_models, lor_cache, input_idss, attention_masks, position_idss, lor_ixss)
 
-        past_key_values = out.past_key_values
-        assert past_key_values is not None, "past_key_values cannot be None. Typically `transformers` models won't return past_key_values during training, so, you need to modify the underlying model class."
+    max_position_ids = torch.cat([x['position_ids'] for x in col_inputs], dim=1).max(dim=1).values
+    last_token = get_last_attended_token(torch.cat(out_logits, dim=1).argmax(dim=-1), cat_attention_mask)
 
-        lor_cache = update_lors(lor_models, lor_cache, lor_ixs, out.hidden_states)
 
-        # Handle max_position_id and last_token, to be used by the
-        # autoregressive loop following
+    #####
+    # Continue successive tokens
 
-        # max positions
-        if max_position_ids is None:
-            max_position_ids = position_ids.max(dim=1).values
-        else:
-            max_position_ids = torch.cat([position_ids, max_position_ids.unsqueeze(1)], dim=1).max(dim=1).values
-
-        # last token
-        out_ids = out.logits.argmax(dim=-1)
-        last_token_ = get_last_attended_token(out_ids, attention_mask[:, -out_ids.shape[1]:])
-        if last_token is None:
-            last_token = last_token_
-        else:
-            last_token = torch.stack([last_token, last_token_], dim=1).max(dim=1).values  # if no token was seen yet, it'll be a -1
-
+    attention_mask = cat_attention_mask
 
     # Sample final prediction as first output token
     input_ids = last_token.unsqueeze(1)
@@ -1271,7 +1268,6 @@ def generate(model, lor_models, col_inputs, max_new_tokens):
                     )
 
         # TODO: lor updates aren't implemented during autoregression
-        col_out_logits.append(out.logits)
         past_key_values = out.past_key_values
 
         # sample the next token
@@ -1280,7 +1276,7 @@ def generate(model, lor_models, col_inputs, max_new_tokens):
 
         tokens_generated += 1
 
-    return col_out_logits, attention_mask, past_key_values, torch.cat(all_output_ids, dim=-1), lor_cache, position_ids, attention_mask
+    return torch.cat(all_output_ids, dim=-1), attention_mask, past_key_values, lor_cache, position_ids, attention_mask
 
 
 def t(x):
@@ -1299,53 +1295,38 @@ model.eval()
 with torch.no_grad():
 
     lor_ = w(lor_block, parse_lor_ixs)
-
-    if WHICH_LOR == 1:
-        tlor = {'content': lor_block,
-                'include_in_loss': True,
-                'loss_mask': [0, 0, 0] * 7,
-                'type': 'lor',
-                **parse_lor_ixs}
-
-    elif WHICH_LOR == 2:
-        tlor = {'content': lor_block,
-                'include_in_loss': True,
-                'loss_mask': [0, 0, 0] * 3,
-                'type': 'lor',
-                **parse_lor_ixs}
-
-    te = {'lor_ds': [None, None], 'lor_gs': [None, None], 'lor_ks': [None, None], 'lor_os': [None, None], 'lor_qs': [None, None], 'lor_us': [None, None], 'lor_vs': [None, None]}
+    le = empty_lor_ixs
 
     training_prob = [
-        {'content': 'var_0=-2', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
-        {'content': 'var_1=var_0', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
-        {'content': 'var_2=var_1', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
-        {'content': 'var_3=var_2', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
-        {'content': 'var_4=var_3', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
-        {'content': 'var_5=4 - 3', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
-        {'content': 'var_6=1', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
-        {'content': 'var_7=var_2', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
-        {'content': 'var_8=-4', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
-        {'content': 'var_9=var_0 * 8', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
-        {'content': 'solve(var_7)=', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
-        # {'content': '-', 'include_in_loss': True, 'loss_mask': None, 'type': 'text', **te}
-        # {'content': '-2', 'include_in_loss': True, 'loss_mask': None, 'type': 'text', **te}
+        {'content': 'var_0=-2', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **le}, lor_,
+        {'content': 'var_1=var_0', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **le}, lor_,
+        {'content': 'var_2=var_1', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **le}, lor_,
+        {'content': 'var_3=var_2', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **le}, lor_,
+        {'content': 'var_4=var_3', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **le}, lor_,
+        {'content': 'var_5=4 - 3', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **le}, lor_,
+        {'content': 'var_6=1', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **le}, lor_,
+        {'content': 'var_7=var_2', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **le}, lor_,
+        {'content': 'var_8=-4', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **le}, lor_,
+        {'content': 'var_9=var_0 * 8', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **le}, lor_,
+        {'content': 'solve(var_7)=', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **le},
+        # {'content': '-', 'include_in_loss': True, 'loss_mask': None, 'type': 'text', **le},
+        # {'content': '-2', 'include_in_loss': True, 'loss_mask': None, 'type': 'text', **le}
     ]
 
     training_prob_2 = [
-        {'content': 'var_0=9', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
-        {'content': 'var_1=var_0', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
-        {'content': 'var_2=1 - var_1', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
-        {'content': 'var_3=-1', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
-        {'content': 'var_4=-3', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
-        {'content': 'var_5=-7', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
-        {'content': 'var_6=7', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
-        {'content': 'var_7=-6 * var_4', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
-        {'content': 'var_8=var_1 + var_3', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
-        {'content': 'var_9=var_8', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
-        {'content': 'solve(var_5)=', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **te}, tlor,
-        # {'content': '-', 'include_in_loss': True, 'loss_mask': None, 'type': 'text', **te}
-        # {'content': '-7', 'include_in_loss': True, 'loss_mask': None, 'type': 'text', **te}
+        {'content': 'var_0=9', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **le}, lor_,
+        {'content': 'var_1=var_0', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **le}, lor_,
+        {'content': 'var_2=1 - var_1', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **le}, lor_,
+        {'content': 'var_3=-1', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **le}, lor_,
+        {'content': 'var_4=-3', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **le}, lor_,
+        {'content': 'var_5=-7', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **le}, lor_,
+        {'content': 'var_6=7', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **le}, lor_,
+        {'content': 'var_7=-6 * var_4', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **le}, lor_,
+        {'content': 'var_8=var_1 + var_3', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **le}, lor_,
+        {'content': 'var_9=var_8', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **le}, lor_,
+        {'content': 'solve(var_5)=', 'include_in_loss': False, 'loss_mask': None, 'type': 'text', **le},
+        # {'content': '-', 'include_in_loss': True, 'loss_mask': None, 'type': 'text', **le},
+        # {'content': '-7', 'include_in_loss': True, 'loss_mask': None, 'type': 'text', **le}
     ]
 
     test_prompts = [
@@ -1362,7 +1343,7 @@ with torch.no_grad():
 
     inputs = C.create_column_batch_inputs(test_prompts, num_layers, lor_ix_keys, tokenizer, device=DEVICE)
 
-    output_logits, col_attention_mask, col_past_key_values, output_ids, elor_cache, position_ids, attention_mask = generate(model, lor_models, inputs, max_new_tokens=10)
+    output_ids, col_attention_mask, col_past_key_values, elor_cache, position_ids, attention_mask = generate(model, lor_models, inputs, max_new_tokens=10)
     # for display add in col outputs
     outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=False)
     print('---------- gen results')
