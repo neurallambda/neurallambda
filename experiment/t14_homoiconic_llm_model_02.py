@@ -97,31 +97,6 @@ class Qwen2MLP(nn.Module):
 
         '''
 
-        # B, S, D = hidden_state.shape
-        # if lor_g is not None:
-        #     # left vecs, ie output
-        #     assert lor_g[0].shape[0] == B, f'{lor_g[0].shape[0]} should == {B}'
-        #     assert lor_g[0].shape[1] == self.intermediate_size, f'{lor_g[0].shape[1]} should == {self.intermediate_size}'
-        #     # right vecs, ie input
-        #     assert lor_g[1].shape[0] == B, f'{lor_g[1].shape[0]} should == {B}'
-        #     assert lor_g[1].shape[2] == D, f'{lor_g[1].shape[2]} should == {D}'
-
-        # if lor_u is not None:
-        #     # left vecs, ie output
-        #     assert lor_u[0].shape[0] == B, f'{lor_u[0].shape[0]} should == {B}'
-        #     assert lor_u[0].shape[1] == self.intermediate_size, f'{lor_u[0].shape[1]} should == {self.intermediate_size}'
-        #     # right vecs, ie input
-        #     assert lor_u[1].shape[0] == B, f'{lor_u[1].shape[0]} should == {B}'
-        #     assert lor_u[1].shape[2] == D, f'{lor_u[1].shape[2]} should == {D}'
-
-        # if lor_d is not None:
-        #     # left vecs, ie output
-        #     assert lor_d[0].shape[0] == B, f'{lor_d[0].shape[0]} should == {B}'
-        #     assert lor_d[0].shape[1] == D, f'{lor_d[0].shape[1]} should == {D}'
-        #     # right vecs, ie input
-        #     assert lor_d[1].shape[0] == B, f'{lor_d[1].shape[0]} should == {B}'
-        #     assert lor_d[1].shape[2] == self.intermediate_size, f'{lor_d[1].shape[2]} should == {self.intermediate_size}'
-
         # low rank gate_proj
         g = self.gate_proj(hidden_state)
         if lor_g is not None:
