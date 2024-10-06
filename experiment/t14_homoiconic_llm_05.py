@@ -42,8 +42,11 @@ NOTES:
 
 TODO FIX:
 
-
-
+- [ ] COMMON WEIGHT GENERATION
+  - [ ] remove causal mask?
+  - [ ] all parses go into one weight head together
+- [X] TEST that a lor module can have a KV stored, then queried back out
+- [X] loss_fn is currently unbatched
 - [X] need to iterate over list of per-layer ixs
 - [X] later, how to connect lor_cache with lor_model? in the model module, its now just passing in the module instead of the cache
 - [X] replace `lor` dep in model
@@ -53,21 +56,22 @@ TODO FIX:
   - [X] batch mode gives same output as non-batched
   - [X] parse ixs don't cause weirdness in non-parsed samples)
   - [?] ensure cache looks good (with test)
-  - [ ] double check that lormodule init produces LRx=0 before any training, make it a test
+  - [ ] double check that lormodule init produces LRx=0 before any training, make it a test. Actually LRx=0 isn't enough if a Norm follows.
 - [X] `generate` should use `forward_columns`
 - [ ] train RMSNorm separately, first?
 - [ ] trained model gets low loss, then outputs "^@Q" as next token?!
-- [ ] get test loss down
+- [ ] OFF BY ONE ERROR IN LOSS?!
+- [X] don't init lor projection to 0 (bc of rmsnorm)
+- [ ] non-parsed ixs could be masked out at cache, instead of projecting the 0s
+- [ ] MAP EVERYTHING OUT, like, how does `var\\_\\1` map attention to the right place? what should it be saving to the cache?
+- [ ] dont need norm after D lor
 
-
-- [ ] loss_fn is currently unbatched
 - [X] smaller dataset (fewer vars)
 - [X] only train gud for now
 - [X] overfit a single sample. If this doesn't work, test time training won't, nor teacher forcing.
-- [ ] LORModule weights not updating much
+- [X] LORModule weights not updating much
 - [ ] causal masking?
 - [ ] causal mask LOR blocks?
-- [ ] OFF BY ONE ERROR IN LOSS?!
 - [ ] new tokens (meta tokens) not updating, should they?
 - [ ] when training loss hits 0, @ inference it gets training probs wrong
 - [ ] lor_models weights not updating, but loss decreases (and they're the only params!?)
@@ -83,20 +87,19 @@ TODO FIX:
 
 
 TODO:
-- [ ] with torch.autograd.detect_anomaly():
 - [ ] teacher forcing by taking preceding clause, ex x=1, and setting QKVOGUD to relevant portions of that
 - [ ] teacher forcing (via training lor weights one step, then using those)
-- [X] aggregate LORs instead of replace
-- [X] if not training text tokens, consider tracing what the outputs actually are
 - [ ] implement LOR parsing during inference's autoregressive portion
 - [ ] lor_ixs makes lor_mask irrelevant? maybe not...
+- [X] aggregate LORs instead of replace
+- [X] if not training text tokens, consider tracing what the outputs actually are
 
+BATCH EFFECTS
+- non-parsed batch sample affected by being in a batch with some parsed samples. Means cache gets populated with 0 for non-parsed samples.
 
 OPTIM:
-- [ ] batch size QUICKLY eats up VRAM
-- [ ] is the way I'm unsqueezing/stacking dimensions of left/right lors ideal?
-- [ ] LOR projections (LORModule) could be cached (should be cached?)
 - [ ] multi-gpu
+- [ ] AMP mixed precision
 
 
 IDEAS:
@@ -332,6 +335,8 @@ def unfreeze_embeddings(grads, ixs):
     return out
 
 
+# START_BLOCK_7
+
 def loss_fn(
     col_batch_in: List[torch.Tensor],  # list of blocks of TOKENS IDS (dtype=int)
     col_batch_out: List[torch.Tensor],  # list of blocks of EMBEDDINGS (dtype=float)
@@ -346,13 +351,17 @@ def loss_fn(
     m = torch.cat(loss_mask, dim=1)[..., 1:].contiguous().view(-1)
 
     # Calculate masked loss
+    #
+    # NOTE: we're averaging per unmasked element here, bc that's efficient. An
+    # alternative might be averaging loss within samples, then averaging across
+    # samples. The difference shows up if samples have different counts of
+    # unmasked elements.
     loss = F.cross_entropy(logits[m], labels[m], reduction='mean')
-    breakpoint()
     return loss
 
 
 
-def loss_fn(
+def loss_fn_loop(
     col_batch_in: List[torch.Tensor],  # list of blocks of TOKENS IDS (dtype=int)
     col_batch_out: List[torch.Tensor],  # list of blocks of EMBEDDINGS (dtype=float)
     loss_mask: List[torch.Tensor]  # list of blocks of masks (dtype=bool)
@@ -372,6 +381,37 @@ def loss_fn(
 
     loss = loss / B
     return loss
+
+
+
+# @@@@@@@@@@
+# Test that the 2 loss functions are roughly equivalent (they're slightly different because of averaging per unmasked item vs averaging means across the entire batch).
+
+# Generate random input data
+batch_size = 2
+seq_length = 10
+vocab_size = 1000
+num_blocks = 3
+
+for _ in range(100):
+    col_batch_in = [torch.randint(0, vocab_size, (batch_size, seq_length)) for _ in range(num_blocks)]
+    col_batch_out = [torch.randn(batch_size, seq_length, vocab_size) for _ in range(num_blocks)]
+    loss_mask = [torch.randint(0, 2, (batch_size, seq_length)).bool() for _ in range(num_blocks)]
+
+    # Compute losses using both functions
+    loss_v1 = loss_fn(col_batch_in, col_batch_out, loss_mask)
+    loss_v2 = loss_fn_loop(col_batch_in, col_batch_out, loss_mask)
+
+    # Assert that the losses are equal (within a small tolerance)
+    tolerance = 1e-1
+    assert torch.isclose(loss_v1, loss_v2, atol=tolerance), f"Losses are not equal: {loss_v1} vs {loss_v2}"
+
+print("Test passed: Both loss functions produce the same result.")
+
+# @@@@@@@@@@
+
+# END_BLOCK_7
+
 
 
 
@@ -431,8 +471,8 @@ def run_epoch(model, lor_models, dataloader, optimizer, device, train=True, debu
                         model.model.embed_tokens.weight.grad[:] = unfreeze_embeddings(model.model.embed_tokens.weight.grad, new_token_ids)
 
                 # MAX_GRAD_NORM = 1.0
-                # nn.utils.clip_grad_norm_(model.parameters(), max_norm=MAX_GRAD_NORM)  # NOTE: nan fix?
-                # nn.utils.clip_grad_norm_(lor_models.parameters(), max_norm=MAX_GRAD_NORM)  # NOTE: nan fix?
+                # nn.utils.clip_grad_norm_(model.parameters(), max_norm=MAX_GRAD_NORM)
+                # nn.utils.clip_grad_norm_(lor_models.parameters(), max_norm=MAX_GRAD_NORM)
 
                 optimizer.step()
 
@@ -549,7 +589,7 @@ except:
 # Layer index to target, hard coded
 LOR_LAYER = 14  # must be positive num (can't index bwd)
 
-WHICH_LOR = 1
+WHICH_LOR = 2
 
 ##########
 # Do QKVOGUD Lors
@@ -814,7 +854,7 @@ class LORProjection(nn.Module):
 
 class LORProjection(nn.Module):
     # SwiGLU - RMSNorm - Linear
-    #   val loss bottomed around 0.31
+    #   val loss bottomed around 0.31, with RMSNorm and init of 0 for left singular values
     '''Project the LOR weights before using them.
 
     NOTE: this module should probably never have bias parameters. If it has
@@ -823,41 +863,59 @@ class LORProjection(nn.Module):
         super().__init__()
         self.is_left_singular_value = is_left_singular_value
         self.f = nn.Sequential(
-            # nn.LayerNorm(in_dim, bias=False),
             SwiGLU(in_dim, in_dim),
             nn.RMSNorm(in_dim),
             nn.Linear(in_dim, out_dim, bias=False),
-            # nn.LayerNorm(out_dim, bias=False),
         )
-        self.initialize_parameters()
+        # self.initialize_parameters()
 
     def forward(self, x):
         return self.f(x)
 
-    def initialize_parameters(self):
-        # linear layer
-        with torch.no_grad():
-            swiglu_ix = 0
-            linear_ix = 1
+    # def initialize_parameters(self):
+    #     # linear layer
+    #     with torch.no_grad():
+    #         swiglu_ix = 0
+    #         linear_ix = 1
 
-            # linear
-            self.f[linear_ix].weight[:] = torch.randn_like(self.f[linear_ix].weight) * 1e-3
-            # self.f[linear_ix].weight[:] = torch.zeros_like(self.f[linear_ix].weight)
+    #         # linear
+    #         self.f[linear_ix].weight[:] = torch.randn_like(self.f[linear_ix].weight) * 1e-3
+    #         # self.f[linear_ix].weight[:] = torch.zeros_like(self.f[linear_ix].weight)
 
-            # swiglu
-            self.f[swiglu_ix].w1.weight[:] = torch.randn_like(self.f[swiglu_ix].w1.weight) * 1e-3
-            self.f[swiglu_ix].w2.weight[:] = torch.randn_like(self.f[swiglu_ix].w2.weight) * 1e-3
+    #         # swiglu
+    #         self.f[swiglu_ix].w1.weight[:] = torch.randn_like(self.f[swiglu_ix].w1.weight) * 1e-3
+    #         self.f[swiglu_ix].w2.weight[:] = torch.randn_like(self.f[swiglu_ix].w2.weight) * 1e-3
 
 
-            if self.is_left_singular_value:
-                # # swiglu
-                # self.f[swiglu_ix].w1.weight[:] = torch.randn_like(self.f[swiglu_ix].w1.weight) * 1e-3
-                # self.f[swiglu_ix].w2.weight[:] = torch.randn_like(self.f[swiglu_ix].w2.weight) * 1e-3
+    #         if self.is_left_singular_value:
+    #             # # swiglu
+    #             # self.f[swiglu_ix].w1.weight[:] = torch.randn_like(self.f[swiglu_ix].w1.weight) * 1e-3
+    #             # self.f[swiglu_ix].w2.weight[:] = torch.randn_like(self.f[swiglu_ix].w2.weight) * 1e-3
 
-                # linear
-                # self.f[linear_ix].weight[:] = torch.randn_like(self.f[linear_ix].weight) * 1e-4
-                # self.f[linear_ix].weight[:] = torch.zeros_like(self.f[linear_ix].weight)
-                pass
+    #             # linear
+    #             # self.f[linear_ix].weight[:] = torch.randn_like(self.f[linear_ix].weight) * 1e-4
+    #             # self.f[linear_ix].weight[:] = torch.zeros_like(self.f[linear_ix].weight)
+    #             pass
+
+
+# START_BLOCK_6
+
+lp = LORProjection(128, 256, False)
+x = torch.randn(1, 128)
+z = torch.zeros(1, 128)
+
+assert lp(x).abs().sum() > 1e-1, 'LORProjection at init should have an effect'
+assert lp(z).abs().sum() < 1e-12, 'LORProjection at init should return 0 for 0-inputs'
+
+# uncover if say a bias had been init'd to 0, but after learning might have an effect on non-parsed blocks
+with torch.no_grad():
+    for p in lp.parameters():
+        p[:] = torch.randn_like(p)
+
+assert lp(x).abs().sum() > 1e-1, 'LORProjection after training should have an effect'
+assert lp(z).abs().sum() < 1e-12, 'LORProjection after training should still return 0 for 0-inputs'
+
+# END_BLOCK_6
 
 
 def apply_lor(x, lorl, lorr) -> torch.Tensor:
@@ -873,6 +931,7 @@ def apply_lor(x, lorl, lorr) -> torch.Tensor:
     x = torch.einsum('bsr, bdr -> bsd', x, lorl)
     return x
 
+# START_BLOCK_5
 
 class LORModule(nn.Module):
     '''.
@@ -904,8 +963,6 @@ class LORModule(nn.Module):
         self.left_proj = LORProjection(left_in_dim, left_out_dim, is_left_singular_value=True)  # left singular value
         self.right_proj = LORProjection(right_in_dim, right_out_dim, is_left_singular_value=False)  # right singular value
 
-
-        # TODO: test WITHOUT LoR that this is compatible with default model
         self.norm = nn.RMSNorm(left_out_dim)
 
         # TODO: initialize correctly
@@ -918,6 +975,9 @@ class LORModule(nn.Module):
         # corrupt this property. 0-valued lors (from samples without lor
         # parses) must produce 0-valued outputs here. Checking for biases is
         # not the whole solution, you must take care.
+        #
+        # This is not necessarily necessary. For instance, clever masking of
+        # non-parsed samples might obviate this.
         assert_no_biases(self)
 
     def forward(self, lor_cache, original, hidden_state):
@@ -926,9 +986,6 @@ class LORModule(nn.Module):
           original: model's original values of eg QKVOGUD within this layer
           hidden_state: hidden_state at this layer, that projects through this layer's associated linear QKVOGUD block, and will be used to project through the LoR version too.
         '''
-
-        # warnings.warn('LOR IS TURNED OFF')
-        # return original
 
         if lor_cache is not None:
             lorl, lorr = lor_cache
@@ -950,6 +1007,198 @@ class LORModule(nn.Module):
           emb: embedding parsed from the appropriate index from output hidden_state
         '''
         return self.right_proj(emb)
+
+
+# @@@@@@@@@@
+# Test for no batch effect
+
+B = 1
+S = 5
+emb_dim = 128
+in_dim = 128
+out_dim = 256
+rank = 3
+
+lm = LORModule(emb_dim, out_dim, emb_dim, in_dim)
+
+lorl_ = torch.randn(B, out_dim, rank)
+lorr_ = torch.randn(B, in_dim, rank)
+lor_cache = (lorl_, lorr_)
+zlor_cache = (0 * lorl_, 0 * lorr_)
+
+hidden_state = torch.randn(B, S, emb_dim)
+orig = torch.randn(B, S, out_dim)
+
+no_cache = lm(None, orig, hidden_state)
+zero_cache = lm(zlor_cache, orig, hidden_state)
+has_cache = lm(lor_cache, orig, hidden_state)
+
+assert torch.allclose(no_cache, zero_cache), 'None cache should have same effect as zero cache. max diff: {(no_cache - zero_cache).max().item()}'
+assert (no_cache - has_cache).abs().sum() > 1.0, 'lor cache should have an effect'
+
+# @@@@@@@@@@
+
+
+if False:
+    # @@@@@@@@@@
+    # Test that a LORModule can store and retrieve data
+
+    B = 1
+    S = 5
+    emb_dim = 128
+    in_dim = 128
+    out_dim = 256
+    rank = 3
+
+    lm = LORModule(emb_dim, out_dim, emb_dim, in_dim)
+
+    lorl_ = torch.randn(B, out_dim, rank)
+    lorr_ = torch.randn(B, in_dim, rank)
+    lor_cache = (lorl_, lorr_)
+    zlor_cache = (0 * lorl_, 0 * lorr_)
+
+    hidden_state = torch.randn(B, S, emb_dim)
+    orig = torch.randn(B, S, out_dim)
+
+
+
+
+    torch.manual_seed(152 + 1)
+
+    B = 1  # batch dim
+    idim = 1024  # input dim
+    hdim = 4096  # hidden dim
+
+    # MLP
+    U = torch.randn(hdim, idim)  # up projection
+    D = torch.randn(idim, hdim)  # down projection
+    norm = nn.RMSNorm(idim)
+
+    # Input
+    x = torch.randn(B, idim)
+
+    # Original Forward pass: down(up(x).relu())
+    h = torch.einsum('ji, bi -> bj', U, x)
+    y = norm(torch.einsum('ij, bj -> bi', D, h.relu()))
+
+    # A KV pair to store in the MLP
+    k = torch.randn(B, idim)
+    v = torch.randn(B, idim)
+
+    inter = torch.randn(B, hdim)
+
+    loru = torch.einsum('bi, bj -> bji', k, inter)
+    lord = torch.einsum('bj, bi -> bij', inter, v)
+
+    # low rank forward pass
+    h = torch.einsum('ji, bi -> bj', U, x)
+    lh = torch.einsum('bji, bi -> bj', loru, x)
+
+    y1 = torch.einsum('ij, bj -> bi', D, h.relu())
+    y2 = torch.einsum('bij, bj -> bi', lord, lh.relu())
+    ly = norm(y1 + y2)
+
+
+    print(y[:, :8])
+    print(ly[:, :8])
+    print(torch.cosine_similarity(y, ly, dim=1))
+    print(torch.cosine_similarity(ly, v, dim=1))
+
+
+
+
+
+
+
+
+
+
+    import matplotlib.pyplot as plt
+
+    def setup_mlp(idim, hdim):
+        return {
+            'U': torch.randn(hdim, idim),
+            'D': torch.randn(idim, hdim),
+            'norm': nn.RMSNorm(idim)
+        }
+
+    def original_forward(mlp, x):
+        h = torch.einsum('ji, bi -> bj', mlp['U'], x)
+        return mlp['norm'](torch.einsum('ij, bj -> bi', mlp['D'], h.relu()))
+
+    def low_rank_update(k, v, inter_dim):
+        inter = torch.randn(k.shape[0], inter_dim)
+        loru = torch.einsum('bi, bj -> bji', k, inter)
+        lord = torch.einsum('bj, bi -> bij', inter, v)
+        return loru, lord
+
+    def low_rank_forward(mlp, x, loru, lord):
+        h = torch.einsum('ji, bi -> bj', mlp['U'], x)
+        lh = torch.einsum('bji, bi -> bj', loru, x)
+        y1 = torch.einsum('ij, bj -> bi', mlp['D'], h.relu())
+        y2 = torch.einsum('bij, bj -> bi', lord, lh.relu())
+        return mlp['norm'](y1 + y2)
+
+    def run_experiment(B, idim, hdim, k_types=['random', 'orthogonal', 'identical'], num_trials=10):
+        mlp = setup_mlp(idim, hdim)
+        results = {k_type: {'y_ly_sim': [], 'ly_v_sim': []} for k_type in k_types}
+
+        for k_type in k_types:
+            for _ in range(num_trials):
+                x = torch.randn(B, idim)
+
+                if k_type == 'random':
+                    k = torch.randn(B, idim)
+                elif k_type == 'orthogonal':
+                    k = torch.randn(B, idim)
+                    k = k - torch.sum(k * x) * x / torch.sum(x * x)
+                elif k_type == 'identical':
+                    k = x.clone()
+
+                v = torch.randn(B, idim)
+
+                loru, lord = low_rank_update(k, v, hdim)
+
+                y = original_forward(mlp, x)
+                ly = low_rank_forward(mlp, x, loru, lord)
+
+                y_ly_sim = torch.cosine_similarity(y, ly, dim=1).item()
+                ly_v_sim = torch.cosine_similarity(ly, v, dim=1).item()
+
+                results[k_type]['y_ly_sim'].append(y_ly_sim)
+                results[k_type]['ly_v_sim'].append(ly_v_sim)
+
+        return results
+
+    def plot_results(results):
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 12))
+
+        for k_type, data in results.items():
+            trials = range(1, len(data['y_ly_sim']) + 1)
+            ax1.plot(trials, data['y_ly_sim'], label=f'{k_type} k')
+            ax2.plot(trials, data['ly_v_sim'], label=f'{k_type} k')
+
+        ax1.set_title('Cosine Similarity between y and ly')
+        ax1.set_xlabel('Trial')
+        ax1.set_ylabel('Cosine Similarity')
+        ax1.legend()
+        ax1.grid(True)
+
+        ax2.set_title('Cosine Similarity between ly and v')
+        ax2.set_xlabel('Trial')
+        ax2.set_ylabel('Cosine Similarity')
+        ax2.legend()
+        ax2.grid(True)
+
+        plt.tight_layout()
+        plt.show()
+
+    # Run the experiment and plot results
+    torch.manual_seed(153)
+    results = run_experiment(B=1, idim=1024, hdim=4096, num_trials=50)
+    plot_results(results)
+
+# END_BLOCK_5
 
 
 def select_ixs(x, indices):
@@ -1114,13 +1363,19 @@ if True:
     # input dimension of the matched linear weights. The 2nd dim of L is the
     # output dimension of the same linear layer.
 
-    # lor_models['lor_qs'][LOR_LAYER] = LORModule(dim, dim, dim, dim)
-    # lor_models['lor_ks'][LOR_LAYER] = LORModule(dim, k_dim, dim, k_dim)
-    # lor_models['lor_vs'][LOR_LAYER] = LORModule(dim, v_dim, dim, v_dim)
-    # lor_models['lor_os'][LOR_LAYER] = LORModule(dim, dim, dim, dim)
-    lor_models['lor_gs'][LOR_LAYER] = LORModule(dim, ff_dim, dim, dim)
-    lor_models['lor_us'][LOR_LAYER] = LORModule(dim, ff_dim, dim, dim)
-    lor_models['lor_ds'][LOR_LAYER] = LORModule(dim, dim, dim, ff_dim)
+    if WHICH_LOR == 1:
+        lor_models['lor_qs'][LOR_LAYER] = LORModule(dim, dim, dim, dim)
+        lor_models['lor_ks'][LOR_LAYER] = LORModule(dim, k_dim, dim, dim)
+        lor_models['lor_vs'][LOR_LAYER] = LORModule(dim, v_dim, dim, dim)
+        lor_models['lor_os'][LOR_LAYER] = LORModule(dim, dim, dim, dim)
+
+        lor_models['lor_gs'][LOR_LAYER] = LORModule(dim, ff_dim, dim, dim)
+        lor_models['lor_us'][LOR_LAYER] = LORModule(dim, ff_dim, dim, dim)
+        lor_models['lor_ds'][LOR_LAYER] = LORModule(dim, dim, dim, ff_dim)
+    elif WHICH_LOR == 2:
+        lor_models['lor_gs'][LOR_LAYER] = LORModule(dim, ff_dim, dim, dim)
+        lor_models['lor_us'][LOR_LAYER] = LORModule(dim, ff_dim, dim, dim)
+        lor_models['lor_ds'][LOR_LAYER] = LORModule(dim, dim, dim, ff_dim)
     lor_models = lor_models.to(DEVICE, dtype=model.dtype)
 
     # # All Params
