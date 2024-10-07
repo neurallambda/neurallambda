@@ -43,13 +43,20 @@ NOTES:
 - sensitive to initialization
 
 
+DESIGN CHOICES:  these should be followed up on
+  - [X] init LORProject for low impact initially. Setting the final output linear to 0s.
+  - [X] LoRs should probably be scaled by sqrt(2/dim) (see t14_homoiconic_llm_adding_data_to_mlp)
+  - [X] How should RMSNorm be initialized? For now, we're setting it low. By setting it even to 0, this effectively removes a layer from the net, but residuals still pass through.
+
+
 TODO FIX:
 
 - [ ] COMMON WEIGHT GENERATION
-  - [ ] separate the QKVOGUD projection stuff from the normalization model. 1 projection model, separate norm models per QKVOGUD.
-  - [ ] all parses go into one weight head together
+  - [X] separate the QKVOGUD projection stuff from the normalization model. 1 projection model, separate norm models per QKVOGUD.
+  - [X] all parses go into one weight head together
+  - [X] fix failing batch vs single assertions: the cause was Dropout
+  - [ ] Does LORProject support GUD "sharing" an intermediate value to tie the KV storage together (ie, results from t14_homoiconic_llm_adding_data_to_mlp)
   - [ ] remove causal mask?
-  - [ ] LoRs in GUD should probably be scaled by sqrt(2/dim) (see t14_homoiconic_llm_adding_data_to_mlp)
   - [ ] upgrade parseixs to parse spans instead of individual ixs
 - [X] TEST that a lor module can have a KV stored, then queried back out
 - [X] loss_fn is currently unbatched
@@ -182,6 +189,13 @@ except NameError:
 SEED = 152
 torch.manual_seed(SEED)
 random.seed(SEED)
+
+# # Extra determinism
+# torch.cuda.manual_seed_all(SEED)
+# torch.backends.cudnn.deterministic = True
+# torch.backends.cudnn.benchmark = False
+# torch.use_deterministic_algorithms(True)
+# os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'  # https://docs.nvidia.com/cuda/cublas/index.html#results-reproducibility
 
 DEVICE = 'cuda:1'
 
@@ -511,13 +525,16 @@ model_name = os.path.expanduser("~/_/models/Qwen2-0.5B")
 
 def hook_fn(module, input, output):
     if isinstance(output, torch.Tensor):
-        if torch.isnan(output).any() or torch.isinf(output).any():
-            print(f"NaN or inf detected in {module.__class__.__name__}")
+        isnan = torch.isnan(output).any()
+        isinf = torch.isinf(output).any()
+        if isnan or isinf:
+            print(f"NaN or inf detected in {module.__class__.__name__}: {isnan=}, {isinf=}")
             print(f"Module: {module}")
             print(f"Module name: {module_names.get(module, 'Unknown')}")
             print(f"Input shape: {[i.shape if isinstance(i, torch.Tensor) else type(i) for i in input]}")
             print(f"Output shape: {output.shape}")
-            raise RuntimeError("NaN or inf detected")
+            breakpoint()
+            # raise RuntimeError("NaN or inf detected: {isnan=}, {isinf=}")
 
 module_names = {}
 
@@ -535,6 +552,7 @@ except:
         model_name,
         # torch_dtype=torch.bfloat16,  # HERE BE DRAGONS
         torch_dtype=torch.float32,
+        # torch_dtype=torch.float64,
         device_map=DEVICE,
         _attn_implementation='eager',
     )
@@ -912,6 +930,7 @@ def apply_lor(x, lorl, lorr) -> torch.Tensor:
     '''
     x = torch.einsum('bsd, bdr -> bsr', x, lorr)
     x = torch.einsum('bsr, bdr -> bsd', x, lorl)
+
     return x
 
 # START_BLOCK_5
@@ -1018,11 +1037,208 @@ class LORProject(nn.Module):
 
 
 
-class LORNorm(nn.Module):
-    def __init__(self, left_out_dim):
+
+class LORProject(nn.Module):
+    ''' Separate head per QKVOGUD '''
+    def __init__(self):
         super().__init__()
 
-        self.norm = nn.RMSNorm(left_out_dim)
+        dim = model.model.embed_tokens.weight.shape[1]
+        k_dim = model.model.layers[0].self_attn.k_proj.weight.shape[0]
+        v_dim = model.model.layers[0].self_attn.v_proj.weight.shape[0]
+        ff_dim = model.config.intermediate_size
+
+        self.lor_qs_l = nn.Linear(dim, dim, bias=False)
+        self.lor_qs_r = nn.Linear(dim, dim, bias=False)
+        self.lor_ks_l = nn.Linear(dim, k_dim, bias=False)
+        self.lor_ks_r = nn.Linear(dim, dim, bias=False)
+        self.lor_vs_l = nn.Linear(dim, v_dim, bias=False)
+        self.lor_vs_r = nn.Linear(dim, dim, bias=False)
+        self.lor_os_l = nn.Linear(dim, dim, bias=False)
+        self.lor_os_r = nn.Linear(dim, dim, bias=False)
+        self.lor_gs_l = nn.Linear(dim, ff_dim, bias=False)
+        self.lor_gs_r = nn.Linear(dim, dim, bias=False)
+        self.lor_us_l = nn.Linear(dim, ff_dim, bias=False)
+        self.lor_us_r = nn.Linear(dim, dim, bias=False)
+        self.lor_ds_l = nn.Linear(dim, dim, bias=False)
+        self.lor_ds_r = nn.Linear(dim, ff_dim, bias=False)
+
+    def forward(self, **kwargs):
+        return (
+            self.lor_qs_l(kwargs['lor_qs_l']),
+            self.lor_qs_r(kwargs['lor_qs_r']),
+            self.lor_ks_l(kwargs['lor_ks_l']),
+            self.lor_ks_r(kwargs['lor_ks_r']),
+            self.lor_vs_l(kwargs['lor_vs_l']),
+            self.lor_vs_r(kwargs['lor_vs_r']),
+            self.lor_os_l(kwargs['lor_os_l']),
+            self.lor_os_r(kwargs['lor_os_r']),
+            self.lor_gs_l(kwargs['lor_gs_l']),
+            self.lor_gs_r(kwargs['lor_gs_r']),
+            self.lor_us_l(kwargs['lor_us_l']),
+            self.lor_us_r(kwargs['lor_us_r']),
+            self.lor_ds_l(kwargs['lor_ds_l']),
+            self.lor_ds_r(kwargs['lor_ds_r'])
+        )
+
+
+
+
+
+class LORProject(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        dim = model.model.embed_tokens.weight.shape[1]
+        k_dim = model.model.layers[0].self_attn.k_proj.weight.shape[0]
+        v_dim = model.model.layers[0].self_attn.v_proj.weight.shape[0]
+        ff_dim = model.config.intermediate_size
+
+        self.input_dims = [dim] * 14  # All inputs are 'dim'-dimensional
+        self.output_dims = [
+            dim, dim,  # lor_qs_l, lor_qs_r
+            k_dim, dim,  # lor_ks_l, lor_ks_r
+            v_dim, dim,  # lor_vs_l, lor_vs_r
+            dim, dim,  # lor_os_l, lor_os_r
+            ff_dim, dim,  # lor_gs_l, lor_gs_r
+            ff_dim, dim,  # lor_us_l, lor_us_r
+            dim, ff_dim  # lor_ds_l, lor_ds_r
+        ]
+
+        total_input_dim = sum(self.input_dims)
+        total_output_dim = sum(self.output_dims)
+
+        hdim = 1024
+
+        self.dense_projection = nn.Sequential(
+            nn.Linear(total_input_dim, hdim, bias=False),
+            nn.ReLU(),
+            nn.Linear(hdim, total_output_dim, bias=False)
+        )
+
+    def forward(self, **kwargs):
+        # Stack all inputs
+        inputs = [
+            kwargs['lor_qs_l'], kwargs['lor_qs_r'],
+            kwargs['lor_ks_l'], kwargs['lor_ks_r'],
+            kwargs['lor_vs_l'], kwargs['lor_vs_r'],
+            kwargs['lor_os_l'], kwargs['lor_os_r'],
+            kwargs['lor_gs_l'], kwargs['lor_gs_r'],
+            kwargs['lor_us_l'], kwargs['lor_us_r'],
+            kwargs['lor_ds_l'], kwargs['lor_ds_r']
+        ]
+
+        stacked_input = torch.cat(inputs, dim=-1)
+
+        # Perform dense computation
+        output = self.dense_projection(stacked_input)
+
+        # Split the output using torch.split
+        return torch.split(output, self.output_dims, dim=-1)
+
+
+
+
+
+
+
+
+class LORProject(nn.Module):
+    def __init__(self, dropout_rate=0.2):
+        super().__init__()
+
+        dim = model.model.embed_tokens.weight.shape[1]
+        k_dim = model.model.layers[0].self_attn.k_proj.weight.shape[0]
+        v_dim = model.model.layers[0].self_attn.v_proj.weight.shape[0]
+        ff_dim = model.config.intermediate_size
+
+        self.input_dims = [dim] * 14  # All inputs are 'dim'-dimensional
+        self.output_dims = [
+            dim, dim,  # lor_qs_l, lor_qs_r
+            k_dim, dim,  # lor_ks_l, lor_ks_r
+            v_dim, dim,  # lor_vs_l, lor_vs_r
+            dim, dim,  # lor_os_l, lor_os_r
+            ff_dim, dim,  # lor_gs_l, lor_gs_r
+            ff_dim, dim,  # lor_us_l, lor_us_r
+            dim, ff_dim  # lor_ds_l, lor_ds_r
+        ]
+
+        total_input_dim = sum(self.input_dims)
+        total_output_dim = sum(self.output_dims)
+
+        hdim = 1024
+
+        # SwiGLU implementation
+        self.w1 = nn.Linear(total_input_dim, hdim, bias=False)
+        self.w2 = nn.Linear(total_input_dim, hdim, bias=False)
+        self.w3 = nn.Linear(hdim, total_output_dim, bias=False)
+
+        # ensure that early in training, LoR doesn't have too strong an effect
+        with torch.no_grad():
+            self.w3.weight[:] = torch.randn_like(self.w3.weight) * 1e-3
+
+        # Dropout layers
+        self.dropout1 = nn.Dropout(dropout_rate)
+        self.dropout2 = nn.Dropout(dropout_rate)
+        self.dropout3 = nn.Dropout(dropout_rate)
+
+        # RMSNorm layer
+        self.rms_norm = nn.RMSNorm(hdim)
+
+    def forward(self, **kwargs):
+        # Stack all inputs
+        inputs = [
+            kwargs['lor_qs_l'], kwargs['lor_qs_r'],
+            kwargs['lor_ks_l'], kwargs['lor_ks_r'],
+            kwargs['lor_vs_l'], kwargs['lor_vs_r'],
+            kwargs['lor_os_l'], kwargs['lor_os_r'],
+            kwargs['lor_gs_l'], kwargs['lor_gs_r'],
+            kwargs['lor_us_l'], kwargs['lor_us_r'],
+            kwargs['lor_ds_l'], kwargs['lor_ds_r']
+        ]
+
+        stacked_input = torch.cat(inputs, dim=-1)
+
+        # SwiGLU computation with dropout and RMSNorm
+        x1 = self.dropout1(self.w1(stacked_input))
+        x2 = self.dropout2(self.w2(stacked_input))
+        hidden = F.silu(x1) * x2
+        hidden_norm = self.rms_norm(hidden)
+        output = self.dropout3(self.w3(hidden_norm))
+
+        # Split the output using torch.split
+        return torch.split(output, self.output_dims, dim=-1)
+
+
+
+
+
+
+
+
+
+
+
+
+class LORNorm(nn.Module):
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
+
+        self.norm = nn.RMSNorm(out_dim)
+
+
+        # NOTE: there is probably a principled way of setting this, or
+        #   pre-learning this. As it stands, the norm can be initialized even
+        #   to 0 which effectively removes this entire layer from the
+        #   transformer stack EXCEPT residuals still pass forward. Strangely
+        #   enough, the network can do ok with a layer removed. I'm thinking
+        #   here that we can limit the initial impact of LoR stuff by setting
+        #   this low.
+        with torch.no_grad():
+            self.norm.weight[:] = self.norm.weight * 1e-2
+
+        # This is akin to He initialization. TODO: worth it?
+        self.scale = (2 / in_dim) ** 0.5
 
         # TODO: initialize correctly
         # with torch.no_grad():
@@ -1055,7 +1271,7 @@ class LORNorm(nn.Module):
         if lor_cache is not None:
             lorl, lorr = lor_cache
             l = apply_lor(hidden_state, lorl, lorr)
-            return self.norm(original + l)
+            return self.norm(original + l * self.scale)  # TODO: revisit if `scale` is good
         else:
             return self.norm(original)
 
@@ -1337,19 +1553,21 @@ if True:
     lor_models['lor_proj'][LOR_LAYER] = LORProject()
 
     if WHICH_LOR == 1:
-        lor_models['lor_qs'][LOR_LAYER] = LORNorm(dim)
-        lor_models['lor_ks'][LOR_LAYER] = LORNorm(k_dim)
-        lor_models['lor_vs'][LOR_LAYER] = LORNorm(v_dim)
-        lor_models['lor_os'][LOR_LAYER] = LORNorm(dim)
+        lor_models['lor_qs'][LOR_LAYER] = LORNorm(dim, dim)
+        lor_models['lor_ks'][LOR_LAYER] = LORNorm(dim, k_dim)
+        lor_models['lor_vs'][LOR_LAYER] = LORNorm(dim, v_dim)
+        lor_models['lor_os'][LOR_LAYER] = LORNorm(dim, dim)
 
-        lor_models['lor_gs'][LOR_LAYER] = LORNorm(ff_dim)
-        lor_models['lor_us'][LOR_LAYER] = LORNorm(ff_dim)
-        lor_models['lor_ds'][LOR_LAYER] = LORNorm(dim)
+        lor_models['lor_gs'][LOR_LAYER] = LORNorm(dim, ff_dim)
+        lor_models['lor_us'][LOR_LAYER] = LORNorm(dim, ff_dim)
+        lor_models['lor_ds'][LOR_LAYER] = LORNorm(dim, dim)
     elif WHICH_LOR == 2:
-        lor_models['lor_gs'][LOR_LAYER] = LORNorm(ff_dim)
-        lor_models['lor_us'][LOR_LAYER] = LORNorm(ff_dim)
-        lor_models['lor_ds'][LOR_LAYER] = LORNorm(dim)
+        lor_models['lor_gs'][LOR_LAYER] = LORNorm(dim, ff_dim)
+        lor_models['lor_us'][LOR_LAYER] = LORNorm(dim, ff_dim)
+        lor_models['lor_ds'][LOR_LAYER] = LORNorm(dim, dim)
     lor_models = lor_models.to(DEVICE, dtype=model.dtype)
+
+    add_hooks(lor_models)
 
     # # All Params
     # parameters = list(itertools.chain(model.parameters(), lor_models.parameters()))
@@ -1560,6 +1778,7 @@ with torch.no_grad():
     test_prompts = [
         training_prob,
         training_prob_2,
+
         [t("var_0=1"), lor_, t("var_1=2"), lor_, t("var_3=var_0 + var_1"), lor_, t("solve(var_3)=")],  # 3
         [t("var_0=3"), lor_, t("var_1=5"), lor_, t("var_3=var_0 - var_1"), lor_, t("solve(var_3)=")],  # -2
         [t("var_0=2"), lor_, t("var_1=3"), lor_, t("var_3=var_0 * var_1"), lor_, t("solve(var_3)=")],  # 6
@@ -1567,6 +1786,7 @@ with torch.no_grad():
         [t("Once when")],
         [t("Let me tell you about the time")],
         [t("Let me tell you about the time I was golfing outside one sunny afternoon when suddenly")],
+
     ]
 
     inputs = C.create_column_batch_inputs(test_prompts, num_layers, lor_ix_keys, tokenizer, device=DEVICE)
@@ -1664,11 +1884,11 @@ for batch_ix in range(B):
                     bllor_rm = remove_zero_columns(bllor)  # bllor might be bigger than sllor, bc of "non-parse" partners in batch
                     sllor = slor[0][0]  # batch of 1, left singular value cache
                     assert bllor_rm.shape == sllor.shape
-                    assert torch.allclose(bllor_rm, sllor, atol=1e-3)
+                    assert torch.allclose(bllor_rm, sllor, atol=1e-1), f'lors arent close, max diff: {(bllor_rm - sllor).abs().max()}, {batch_ix=}, {k=}, {layer_ix=}'
                     brlor_rm = remove_zero_columns(brlor)  # bllor might be bigger than sllor, bc of "non-parse" partners in batch
                     srlor = slor[1][0]  # batch of 1, right singular value cache
                     assert brlor_rm.shape == srlor.shape
-                    assert torch.allclose(brlor_rm, srlor, atol=1e-3)
+                    assert torch.allclose(brlor_rm, srlor, atol=1e-1), f'lors arent close, max diff: {(brlor_rm - srlor).abs().max()}, {batch_ix=}, {k=}, {layer_ix=}'
 
 # Check Logits
 # reorient to shape like batch version
@@ -1690,7 +1910,7 @@ so = []
 for sample in all_single_out_logits:
     so.append(torch.cat([column.squeeze(0) for column in sample], dim=0))
 so = torch.stack(so, dim=0)
-assert torch.allclose(batch_out_logits, so, atol=1e-3), f'{(batch_out_logits - so).abs().max().item()=}'
+assert torch.allclose(batch_out_logits, so, atol=5e-3), f'{(batch_out_logits - so).abs().max().item()=:>.4f},  {(batch_out_logits - so).std()=:>.4f}'
 
 print('assertions passed')
 

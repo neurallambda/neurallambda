@@ -63,8 +63,6 @@ from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
 
-warnings.warn('TODO: LoR updates from model_02 havent been applied to QKVO yet')
-
 class Qwen2MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
