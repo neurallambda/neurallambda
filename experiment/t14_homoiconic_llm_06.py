@@ -2,8 +2,8 @@
 
 Apply Metalearning-Hypernet stuff to Transformer arch
 
-This version ties all QKVOGUD lor metaweights together in one generating
-module. The motivation is from observations in
+This version ties all QKVOGUD lor metaweights together in one generating module
+and adds uncausal masking to them. The motivation is from observations in
 t14_homoiconic_llm_adding_data_to_mlp. For KV data to be added to the MLP, both
 lor weights must share an intermediate vector that they're both outer-product'd
 with. With separate lor heads, this cannot be directly done. Results in the
@@ -19,16 +19,13 @@ NaN CAUSES:
 - ragged batch sizes
 - bfloat16?
 - clip grads?
-- layer norm?
-- lor module init?
-- if loss_mask is all False = NaN (ie cross_entropy gets empty tensors)
 
 
 TODO: STABILIZE TRAINING
-- [ ] curriculum learning (simpler data (fewer variable indirections), for starters)
 - [ ] teacher forcing
 - [ ] test time training
 - [ ] init lormodules to output top eigenvectors of matched linear layers?
+- [X] curriculum learning (simpler data (fewer variable indirections), for starters)
 - [X] increasing dataset size helped, there's seems to be a minimal count necessary
 - [X] adding problem text to loss seems to stabilize training, and it appears
       to still be able to overfit training. I suspect an issue with this though,
@@ -37,16 +34,32 @@ TODO: STABILIZE TRAINING
 
 NOTES:
 - LayerNorm on end of LORModule encouraged weights to move more, without, they imperceptibly moved (also used high lr (1e-2))
-- Biases in LORModule can cause non-lor layers, which receive 0 values, to suddenly have values, and corrupt performance. LORModules should have the property that they cannot alter non-LOR'd samples.
+- Biases in LORModule can cause non-lor layers (batch effect), which receive 0 values, to suddenly have values, and corrupt performance. LORModules should have the property that they cannot alter non-LOR'd samples.
 - swiglu lor modules seem more stable to train than linear-only, and better val loss
-- sensitive to lr. 1e-5 seems ok, 1e-4 even might be too high. Even with lor-module params only training, 1e-3 diverges.
-- sensitive to initialization
 
 
 DESIGN CHOICES:  these should be followed up on
   - [X] init LORProject for low impact initially. Setting the final output linear to 0s.
   - [X] LoRs should probably be scaled by sqrt(2/dim) (see t14_homoiconic_llm_adding_data_to_mlp)
   - [X] How should RMSNorm be initialized? For now, we're setting it low. By setting it even to 0, this effectively removes a layer from the net, but residuals still pass through.
+  - [ ] uncausal masking of metatokens?
+  - [ ] position encodings on metatokens?
+
+
+POSSIBLE BUGS:
+  - [ ] Test uncausal masking in `model`, that it's not buggy, or off by 1. Has complexity with cache_position, position_ids, past_key_values, and attention_mask.
+  - [ ] Test uncausal masking data generation side
+  - [ ] dbl check loss_mask, and off-by-one, and include_in_loss
+  - [ ] dbl check off-by-one shifts in data/parsing lors/loss
+
+QUESTIONS
+  - [ ] How does a metatoken/metaweight know what to focus on, to succeed?
+  - [ ] Separate loss for metatokens/metaweights? (IE train-time inner-loop SGD to construct part of the dataset on-the-go?)
+
+
+LIBRARIFY
+  - [ ] dataset construction tools
+  - [ ] good test suite
 
 
 TODO FIX:
@@ -55,8 +68,14 @@ TODO FIX:
   - [X] separate the QKVOGUD projection stuff from the normalization model. 1 projection model, separate norm models per QKVOGUD.
   - [X] all parses go into one weight head together
   - [X] fix failing batch vs single assertions: the cause was Dropout
+  - [X] make lorproject mlpmixer
+  - [X] different LRs per parameter
+  - [X] lorproject has to be causally unmasked
+  - [X] save and restore models
+  - [ ] columnwise_collate_fn: ix parse keys have wrong representation (should be list, num_layers long)
+  - [ ] should metatokens have position encodings?
+  - [ ] separate loss for metatokens?
   - [ ] Does LORProject support GUD "sharing" an intermediate value to tie the KV storage together (ie, results from t14_homoiconic_llm_adding_data_to_mlp)
-  - [ ] remove causal mask?
   - [ ] upgrade parseixs to parse spans instead of individual ixs
 - [X] TEST that a lor module can have a KV stored, then queried back out
 - [X] loss_fn is currently unbatched
@@ -83,15 +102,7 @@ TODO FIX:
 - [X] only train gud for now
 - [X] overfit a single sample. If this doesn't work, test time training won't, nor teacher forcing.
 - [X] LORModule weights not updating much
-- [ ] causal masking?
-- [ ] causal mask LOR blocks?
-- [ ] new tokens (meta tokens) not updating, should they?
 - [ ] when training loss hits 0, @ inference it gets training probs wrong
-- [ ] lor_models weights not updating, but loss decreases (and they're the only params!?)
-  - lor modules in ParameterDict?
-  - forward_lor mutates dict?
-- [ ] dbl check loss_mask, and off-by-one, and include_in_loss
-- [ ] dbl check off-by-one shifts in data/parsing lors/loss
 - [X] right singular vectors not updating
 - [X] make use of lor_qkvo in model
 - [X] replace F.interpolate with a Linear Forward in LORModule
@@ -128,6 +139,7 @@ IDEAS:
 import os
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'  # let cuda give debug info
 
+import re
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -177,13 +189,13 @@ try:
     importlib.reload(C)
     print('RELOADING C')
 except NameError:
-    import t14_homoiconic_llm_columnize_05 as C
+    import t14_homoiconic_llm_columnize_06 as C
 
 try:
     importlib.reload(Q)
     print('RELOADING Q')
 except NameError:
-    import t14_homoiconic_llm_model_02 as Q
+    import t14_homoiconic_llm_model_03 as Q
 
 
 SEED = 152
@@ -198,6 +210,53 @@ random.seed(SEED)
 # os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'  # https://docs.nvidia.com/cuda/cublas/index.html#results-reproducibility
 
 DEVICE = 'cuda:1'
+
+
+##################################################
+# Saving/Loading
+
+save_path = 't14_homoiconic_llm_06'
+
+def get_next_run_number(save_path):
+    files = os.listdir(save_path)
+    run_numbers = [int(re.search(r'run(\d+)', f).group(1)) for f in files if re.search(r'run(\d+)', f)]
+    return max(run_numbers, default=0) + 1
+
+
+def save_model(name, run_number, model, save_path, val_loss, epoch):
+    os.makedirs(save_path, exist_ok=True)
+    filename = f'model_run{run_number}_{name}_epoch{epoch}_valloss{val_loss:.4f}.pth'
+    full_path = os.path.join(save_path, filename)
+
+    save_dict = {
+        'model_state_dict': model.state_dict(),
+        'architecture': str(model),  # Save architecture as string
+        'val_loss': val_loss,
+        'epoch': epoch,
+        'run_number': run_number
+    }
+
+    torch.save(save_dict, full_path)
+    print(f"Model saved to {full_path}")
+
+def load_model(model, load_path):
+    checkpoint = torch.load(load_path)
+
+    # Check if architecture matches
+    if str(model) != checkpoint['architecture']:
+        print("Warning: Current model architecture does not match saved architecture.")
+        print(f"Saved architecture: {checkpoint['architecture']}")
+        print(f"Current architecture: {str(model)}")
+
+        user_input = input("Do you want to proceed with loading? (y/n): ")
+        if user_input.lower() != 'y':
+            print("Model loading aborted.")
+            return
+
+    model.load_state_dict(checkpoint['model_state_dict'])
+    print(f"Model loaded from {load_path}")
+    print(f"Validation loss: {checkpoint['val_loss']:.4f}, Epoch: {checkpoint['epoch']}")
+    return checkpoint['epoch']
 
 
 ##################################################
@@ -283,15 +342,16 @@ reference the current lor cache. This is where they get it from.'''
     return fs
 
 
-def forward_columns(model, lor_models, lor_cache, input_idss, attention_masks, position_idss, lor_ixss):
+def forward_columns(model, lor_models, lor_cache, input_idss, attention_masks, position_idss, lor_ixss, uncausal_masks):
     '''Recurrently process column blocks of ids, concatenating attention_mask and
 past_key_values across generations. '''
     col_out_logits = []
     past_key_values = None
     attention_mask = None
+    uncausal_mask = None
 
     # Iterate over each column in the batch
-    for i, (input_ids, new_attention_mask, position_ids, lor_ixs) in enumerate(zip(input_idss, attention_masks, position_idss, lor_ixss)):
+    for i, (input_ids, new_attention_mask, position_ids, lor_ixs, new_uncausal_mask) in enumerate(zip(input_idss, attention_masks, position_idss, lor_ixss, uncausal_masks)):
 
         # skip empty batches. this can happen because of padded blocks.
         if input_ids.numel() == 0:
@@ -304,6 +364,13 @@ past_key_values across generations. '''
         else:
             attention_mask = new_attention_mask
 
+        # `uncausal_mask` will continue to grow as the entire sequence length
+        # seen so far (even though input_ids will only be new inputs, not past)
+        if uncausal_mask is not None:
+            uncausal_mask = torch.cat([uncausal_mask, new_uncausal_mask], dim=-1)
+        else:
+            uncausal_mask = new_uncausal_mask
+
         # give the lor models the current cache
         lorm = partially_apply_models(lor_models, lor_cache)
 
@@ -315,6 +382,7 @@ past_key_values across generations. '''
                     use_cache=True,
                     position_ids=position_ids,
                     output_hidden_states=True,  # OPTIM: we don't need this for non-lor blocks
+                    uncausal_mask=uncausal_mask,
                     **lorm,
                     )
         col_out_logits.append(out.logits)
@@ -450,6 +518,7 @@ def run_epoch(model, lor_models, dataloader, optimizer, device, train=True, debu
             attention_masks = [x['attention_mask'].to(device) for x in batch_cols]
             position_idss = [x['position_ids'].to(device) for x in batch_cols]
             loss_masks = [x['loss_mask'].to(device) for x in batch_cols]
+            uncausal_masks = [x['uncausal_mask'].to(device) for x in batch_cols]
 
             # lor_ixs per column
             lor_ixss = []
@@ -464,7 +533,7 @@ def run_epoch(model, lor_models, dataloader, optimizer, device, train=True, debu
             # Go
 
             lor_cache = empty_lors(model.config.num_hidden_layers)  # init lors for whole batch
-            out_logits, cat_attention_mask, _, lor_cache = forward_columns(model, lor_models, lor_cache, input_idss, attention_masks, position_idss, lor_ixss)
+            out_logits, cat_attention_mask, _, lor_cache = forward_columns(model, lor_models, lor_cache, input_idss, attention_masks, position_idss, lor_ixss, uncausal_masks)
 
             loss = loss_fn(input_idss,
                            out_logits,
@@ -487,9 +556,15 @@ def run_epoch(model, lor_models, dataloader, optimizer, device, train=True, debu
                     with torch.no_grad():
                         model.model.embed_tokens.weight.grad[:] = unfreeze_embeddings(model.model.embed_tokens.weight.grad, new_token_ids)
 
-                # MAX_GRAD_NORM = 1.0
-                # nn.utils.clip_grad_norm_(model.parameters(), max_norm=MAX_GRAD_NORM)
-                # nn.utils.clip_grad_norm_(lor_models.parameters(), max_norm=MAX_GRAD_NORM)
+                MAX_GRAD_NORM = 1.0
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=MAX_GRAD_NORM)
+                nn.utils.clip_grad_norm_(lor_models.parameters(), max_norm=MAX_GRAD_NORM)
+
+                # # TODO: why are these grads so small?! this is such a hack
+                # with torch.no_grad():
+                #     lor_models['lor_proj'][LOR_LAYER].w1.weight.grad[:] *= 10_000
+                #     lor_models['lor_proj'][LOR_LAYER].w2.weight.grad[:] *= 10_000
+                #     lor_models['lor_proj'][LOR_LAYER].w3.weight.grad[:] *= 10_000
 
                 optimizer.step()
 
@@ -719,8 +794,13 @@ BATCH_SIZE = 32
 split = '_4'  # 4 variable version of dataset
 
 warnings.warn('training data is severely truncated during r&d')
+
 train_small = load_dataset("neurallambda/arithmetic_dataset", split=f"train{split}").select(range(BATCH_SIZE * 80))  # todo: rm, this truncates training
 test_small = load_dataset("neurallambda/arithmetic_dataset", split=f"test{split}").select(range(BATCH_SIZE * 4))
+
+# train_small = load_dataset("neurallambda/arithmetic_dataset", split=f"train{split}").select(range(BATCH_SIZE * 5))  # todo: rm, this truncates training
+# test_small = load_dataset("neurallambda/arithmetic_dataset", split=f"test{split}").select(range(BATCH_SIZE * 1))
+
 
 def process_row(row, lor_block, lor_mask):
     prepared_data = []
@@ -762,12 +842,15 @@ for example in train_small.select(range(2)):  # Show first 5 examples
 
 '''
 
+USE_UNCAUSAL_METATOKENS = True
+
 train_dl = C.create_dataloader(
     dataset=train_small,
     num_layers=num_layers,
     lor_ix_keys=lor_ix_keys,
     batch_size=BATCH_SIZE,
     tokenizer=tokenizer,
+    use_uncausal_metatokens=USE_UNCAUSAL_METATOKENS,
     device='cpu',
     shuffle=False,
     num_workers=0
@@ -786,6 +869,7 @@ test_dl = C.create_dataloader(
     lor_ix_keys=lor_ix_keys,
     batch_size=BATCH_SIZE,
     tokenizer=tokenizer,
+    use_uncausal_metatokens=USE_UNCAUSAL_METATOKENS,
     device='cpu',
     shuffle=False,
     num_workers=0
@@ -1173,14 +1257,20 @@ class LORProject(nn.Module):
         self.w2 = nn.Linear(total_input_dim, hdim, bias=False)
         self.w3 = nn.Linear(hdim, total_output_dim, bias=False)
 
-        # ensure that early in training, LoR doesn't have too strong an effect
-        with torch.no_grad():
-            self.w3.weight[:] = torch.randn_like(self.w3.weight) * 1e-3
+        # with torch.no_grad():
+        #     self.w1.weight[:] = self.w1.weight[:] * 100
+        #     self.w2.weight[:] = self.w2.weight[:] * 100
+        #     self.w3.weight[:] = self.w3.weight[:] * 100
+
+
+        # # ensure that early in training, LoR doesn't have too strong an effect
+        # with torch.no_grad():
+        #     self.w3.weight[:] = torch.randn_like(self.w3.weight) * 1e-3
 
         # Dropout layers
-        self.dropout1 = nn.Dropout(dropout_rate)
-        self.dropout2 = nn.Dropout(dropout_rate)
-        self.dropout3 = nn.Dropout(dropout_rate)
+        self.dropout1 = nn.Dropout(dropout_rate) if dropout_rate > 1e-6 else lambda x: x
+        self.dropout2 = nn.Dropout(dropout_rate) if dropout_rate > 1e-6 else lambda x: x
+        self.dropout3 = nn.Dropout(dropout_rate) if dropout_rate > 1e-6 else lambda x: x
 
         # RMSNorm layer
         self.rms_norm = nn.RMSNorm(hdim)
@@ -1203,6 +1293,9 @@ class LORProject(nn.Module):
         x1 = self.dropout1(self.w1(stacked_input))
         x2 = self.dropout2(self.w2(stacked_input))
         hidden = F.silu(x1) * x2
+
+        # output = self.dropout3(self.w3(hidden))
+
         hidden_norm = self.rms_norm(hidden)
         output = self.dropout3(self.w3(hidden_norm))
 
@@ -1220,12 +1313,146 @@ class LORProject(nn.Module):
 
 
 
+
+class LORProject(nn.Module):
+    '''
+    LOR weights need to be projected to fit the shapes of the underlying
+    Linear layers they're matching. These LORModules solve this, and there
+    are 2 modules per target linear layer, (left singular values, right
+    singular values). They multiply like: out=LRx, to match the usual out=Wx,
+    so the new calculation becomes out=Wx + LRx.
+
+    R are the input vectors, and L are the output vectors. The first
+    dimension of the LORModules must match the embedding that we're
+    projecting, so the 1st values are all `dim`. The 2nd dim of R is the
+    input dimension of the matched linear weights. The 2nd dim of L is the
+    output dimension of the same linear layer.
+    '''
+    def __init__(self, dropout_rate=0.2):
+        super().__init__()
+
+        dim = model.model.embed_tokens.weight.shape[1]  # embedding dimension
+        k_dim = model.model.layers[0].self_attn.k_proj.weight.shape[0]
+        v_dim = model.model.layers[0].self_attn.v_proj.weight.shape[0]
+        ff_dim = model.config.intermediate_size
+
+        self.input_dims = [dim] * 14  # All inputs are 'dim'-dimensional
+        self.output_dims = [
+            dim, dim,  # lor_qs_l, lor_qs_r
+            k_dim, dim,  # lor_ks_l, lor_ks_r
+            v_dim, dim,  # lor_vs_l, lor_vs_r
+            dim, dim,  # lor_os_l, lor_os_r
+            ff_dim, dim,  # lor_gs_l, lor_gs_r
+            ff_dim, dim,  # lor_us_l, lor_us_r
+            dim, ff_dim  # lor_ds_l, lor_ds_r
+        ]
+
+        self.token_mixing_dim = 128
+        self.channel_mixing_dim = 128
+
+        # Token-mixing MLP
+        self.token_mixing_mlp = nn.Sequential(
+            nn.RMSNorm(14),
+            nn.Linear(14, self.token_mixing_dim, bias=False),
+            nn.GELU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(self.token_mixing_dim, 14, bias=False),
+            nn.Dropout(dropout_rate)
+        )
+
+        # Channel-mixing MLP (same for all inputs)
+        self.channel_mixing_mlp = nn.Sequential(
+            nn.RMSNorm(dim),
+            nn.Linear(dim, self.channel_mixing_dim, bias=False),
+            nn.GELU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(self.channel_mixing_dim, dim, bias=False),
+            nn.Dropout(dropout_rate)
+        )
+
+        # Final projection layers
+        self.final_projections = nn.ModuleDict({
+            'lor_qs_l': nn.Linear(dim, dim, bias=False),
+            'lor_qs_r': nn.Linear(dim, dim, bias=False),
+            'lor_ks_l': nn.Linear(dim, k_dim, bias=False),
+            'lor_ks_r': nn.Linear(dim, dim, bias=False),
+            'lor_vs_l': nn.Linear(dim, v_dim, bias=False),
+            'lor_vs_r': nn.Linear(dim, dim, bias=False),
+            'lor_os_l': nn.Linear(dim, dim, bias=False),
+            'lor_os_r': nn.Linear(dim, dim, bias=False),
+            'lor_gs_l': nn.Linear(dim, ff_dim, bias=False),
+            'lor_gs_r': nn.Linear(dim, dim, bias=False),
+            'lor_us_l': nn.Linear(dim, ff_dim, bias=False),
+            'lor_us_r': nn.Linear(dim, dim, bias=False),
+            'lor_ds_l': nn.Linear(dim, dim, bias=False),
+            'lor_ds_r': nn.Linear(dim, ff_dim, bias=False),
+        })
+
+
+        # LORModule must play nicely in a batch situation, where some samples
+        # of the batch imply lor parses and others don't. Non LoR'd samples
+        # should not be affected by sharing a batch with LoR'd samples. Biases
+        # corrupt this property. 0-valued lors (from samples without lor
+        # parses) must produce 0-valued outputs here. Checking for biases is
+        # not the whole solution, you must take care.
+        #
+        # This is not necessarily necessary. For instance, clever masking of
+        # non-parsed samples might obviate this.
+        assert_no_biases(self)
+
+
+    def forward(self, **kwargs):
+        # Stack all inputs
+        inputs = [
+            kwargs['lor_qs_l'], kwargs['lor_qs_r'],
+            kwargs['lor_ks_l'], kwargs['lor_ks_r'],
+            kwargs['lor_vs_l'], kwargs['lor_vs_r'],
+            kwargs['lor_os_l'], kwargs['lor_os_r'],
+            kwargs['lor_gs_l'], kwargs['lor_gs_r'],
+            kwargs['lor_us_l'], kwargs['lor_us_r'],
+            kwargs['lor_ds_l'], kwargs['lor_ds_r']
+        ]
+        # x shape: [batch, 14, dim]
+        x = torch.stack(inputs, dim=1)
+
+        # Token-mixing
+        residual = x
+        # x_token shape: [batch, dim, 14]
+        x_token = x.transpose(1, 2)
+        # Normalize across token dimension
+        x_token = self.token_mixing_mlp(x_token)
+        x_token = x_token.transpose(1, 2)  # [batch, 14, dim]
+        x = residual + x_token
+
+        # Channel-mixing
+        residual = x
+        x = self.channel_mixing_mlp(x)
+        x = residual + x
+
+        # Final projections to adjust dimensions
+        outputs = []
+        for i, proj in enumerate(self.final_projections.values()):
+            outputs.append(proj(x[:, i, :]))
+
+        return outputs
+
+
+
+
+
+
+
+
+
+
+
+
+
 class LORNorm(nn.Module):
     def __init__(self, in_dim, out_dim):
         super().__init__()
 
         self.norm = nn.RMSNorm(out_dim)
-
 
         # NOTE: there is probably a principled way of setting this, or
         #   pre-learning this. As it stands, the norm can be initialized even
@@ -1271,7 +1498,8 @@ class LORNorm(nn.Module):
         if lor_cache is not None:
             lorl, lorr = lor_cache
             l = apply_lor(hidden_state, lorl, lorr)
-            return self.norm(original + l * self.scale)  # TODO: revisit if `scale` is good
+            # return self.norm(original + l * self.scale)  # TODO: revisit if `scale` is good
+            return self.norm(original + l)
         else:
             return self.norm(original)
 
@@ -1501,12 +1729,6 @@ def update_lors(
 
 if True:
     num_epochs = 50
-    lr = 1e-3
-
-    # wd = 0
-
-    warnings.warn('WEIGHT DECAY turned on')
-    wd = 1e-2
 
     # LOR Models: same structure as LORs
     dim = model.model.embed_tokens.weight.shape[1]
@@ -1538,18 +1760,6 @@ if True:
         }
     )
 
-    # LOR weights need to be projected to fit the shapes of the underlying
-    # Linear layers they're matching. These LORModules solve this, and there
-    # are 2 modules per target linear layer, (left singular values, right
-    # singular values). They multiply like: out=LRx, to match the usual out=Wx,
-    # so the new calculation becomes out=Wx + LRx.
-    #
-    # R are the input vectors, and L are the output vectors. The first
-    # dimension of the LORModules must match the embedding that we're
-    # projecting, so the 1st values are all `dim`. The 2nd dim of R is the
-    # input dimension of the matched linear weights. The 2nd dim of L is the
-    # output dimension of the same linear layer.
-
     lor_models['lor_proj'][LOR_LAYER] = LORProject()
 
     if WHICH_LOR == 1:
@@ -1567,17 +1777,148 @@ if True:
         lor_models['lor_ds'][LOR_LAYER] = LORNorm(dim, dim)
     lor_models = lor_models.to(DEVICE, dtype=model.dtype)
 
+
+    print_model_info(lor_models)
     add_hooks(lor_models)
 
+
+    ##########
+    # Load state
+
+    LOAD_MODEL = False
+
+    if LOAD_MODEL:
+        lor_path = "t14_homoiconic_llm_06/model_run1_lor_models_epoch19_valloss0.4399.pth"
+        emb_path = "t14_homoiconic_llm_06/model_run1_embed_tokens_epoch19_valloss0.4399.pth"
+
+        global_epoch = load_model(lor_models, lor_path)
+        _ = load_model(model.model.embed_tokens, emb_path)
+    else:
+        global_epoch = 0
+
     # # All Params
-    # parameters = list(itertools.chain(model.parameters(), lor_models.parameters()))
+    # main_parameters = model.named_parameters()
 
-    # LOR Params Only
-    parameters = list(lor_models.parameters())
-    # Embeddings. Add all, and then zero out grads (in run_epoch) to target just the new tokens
-    parameters = parameters + list(model.model.embed_tokens.parameters())
+    # # LOR Params Only
+    # parameters = list(lor_models.named_parameters())
 
-    optimizer = optim.AdamW(parameters, lr=lr, weight_decay=wd)
+    # # # Embeddings. Add all, and then zero out grads (in run_epoch) to target just the new tokens
+    # # parameters = parameters + list(model.model.embed_tokens.named_parameters())
+
+
+    # ##########
+    # # different lrs
+    # highs = [
+    #     'lor_proj.14.token_mixing_mlp.0.weight',
+    #     'lor_proj.14.token_mixing_mlp.1.weight',
+    #     'lor_proj.14.token_mixing_mlp.4.weight',
+    #     'lor_proj.14.channel_mixing_mlp.0.weight',
+    #     'lor_proj.14.channel_mixing_mlp.1.weight',
+    #     'lor_proj.14.channel_mixing_mlp.4.weight',
+    #     'lor_proj.14.final_projections.lor_qs_l.weight',
+    #     'lor_proj.14.final_projections.lor_qs_r.weight',
+    #     'lor_proj.14.final_projections.lor_ks_l.weight',
+    #     'lor_proj.14.final_projections.lor_ks_r.weight',
+    #     'lor_proj.14.final_projections.lor_vs_l.weight',
+    #     'lor_proj.14.final_projections.lor_vs_r.weight',
+    #     'lor_proj.14.final_projections.lor_os_l.weight',
+    #     'lor_proj.14.final_projections.lor_os_r.weight',
+    #     'lor_proj.14.final_projections.lor_gs_l.weight',
+    #     'lor_proj.14.final_projections.lor_gs_r.weight',
+    #     'lor_proj.14.final_projections.lor_us_l.weight',
+    #     'lor_proj.14.final_projections.lor_us_r.weight',
+    #     'lor_proj.14.final_projections.lor_ds_l.weight',
+    #     'lor_proj.14.final_projections.lor_ds_r.weight',
+    # ]
+
+    # params_std_lr = []
+    # params_high_lr = []
+
+    # for name, param in parameters:
+    #     if name in highs:
+    #         params_high_lr.append(param)
+    #     else:
+    #         params_std_lr.append(param)
+
+    # optimizer = optim.AdamW([
+    #     {'params': params_std_lr, 'lr': lr},
+    #     {'params': params_high_lr, 'lr': high_lr, 'weight_decay': 1e-2},
+    #     {'params': main_parameters, 'lr': main_lr}
+    # ], lr=lr, weight_decay=0)
+
+
+
+    fast_params = [
+        'lor_proj.14.token_mixing_mlp.0.weight',
+        'lor_proj.14.token_mixing_mlp.1.weight',
+        'lor_proj.14.token_mixing_mlp.4.weight',
+        'lor_proj.14.channel_mixing_mlp.0.weight',
+        'lor_proj.14.channel_mixing_mlp.1.weight',
+        'lor_proj.14.channel_mixing_mlp.4.weight',
+        'lor_proj.14.final_projections.lor_qs_l.weight',
+        'lor_proj.14.final_projections.lor_qs_r.weight',
+        'lor_proj.14.final_projections.lor_ks_l.weight',
+        'lor_proj.14.final_projections.lor_ks_r.weight',
+        'lor_proj.14.final_projections.lor_vs_l.weight',
+        'lor_proj.14.final_projections.lor_vs_r.weight',
+        'lor_proj.14.final_projections.lor_os_l.weight',
+        'lor_proj.14.final_projections.lor_os_r.weight',
+        'lor_proj.14.final_projections.lor_gs_l.weight',
+        'lor_proj.14.final_projections.lor_gs_r.weight',
+        'lor_proj.14.final_projections.lor_us_l.weight',
+        'lor_proj.14.final_projections.lor_us_r.weight',
+        'lor_proj.14.final_projections.lor_ds_l.weight',
+        'lor_proj.14.final_projections.lor_ds_r.weight',
+    ]
+
+    models = {
+        'main': model,
+        'lor': lor_models,
+    }
+
+    param_groups = [
+        {
+            'name': 'main_model',
+            'model': 'main',
+            'lr': 1e-5,
+            'weight_decay': 0,
+        },
+        {
+            'name': 'lor_standard',
+            'model': 'lor',
+            'lr': 1e-3,
+            'weight_decay': 1e-2,
+            'exclude': fast_params,
+        },
+        {
+            'name': 'lor_high',
+            'model': 'lor',
+            'lr': 1e-3,
+            'weight_decay': 1e-2,
+            'include': fast_params,
+        },
+    ]
+
+    optimizer_param_groups = []
+
+    for group in param_groups:
+        params = []
+        for name, param in models[group['model']].named_parameters():
+            if 'include' in group and name in group['include']:
+                params.append(param)
+            elif 'exclude' in group and name not in group['exclude']:
+                params.append(param)
+            elif 'include' not in group and 'exclude' not in group:
+                params.append(param)
+
+        if params:
+            optimizer_param_groups.append({
+                'params': params,
+                'lr': group['lr'],
+                'weight_decay': group.get('weight_decay', 0)
+            })
+
+    optimizer = optim.AdamW(optimizer_param_groups)
 
     '''
 
@@ -1594,8 +1935,9 @@ for param_group in optimizer.param_groups: param_group['lr'] = new_lr
 
     train_losses = []
     test_losses = []
+    best_loss = float('inf')
 
-    global_epoch = 0
+    run_number = get_next_run_number(save_path)
 
     # START_BLOCK_2
 
@@ -1612,6 +1954,18 @@ for param_group in optimizer.param_groups: param_group['lr'] = new_lr
             test_losses.append(test_loss)
             writer.add_scalars('loss', {'test': test_loss}, global_epoch)
             print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss:.4f}, Test Loss: {test_loss:.4f}")
+
+            if test_loss < best_loss:
+                best_loss = test_loss
+                try:
+                    save_model('lor_models', run_number, lor_models, save_path, test_loss, global_epoch)
+                    save_model('embed_tokens', run_number, model.model.embed_tokens, save_path, test_loss, global_epoch)
+                except Exception as e:
+                    print(f'EXCEPTION SAVING: {e}')
+                    breakpoint()
+                    save_model('lor_models', run_number, lor_models, save_path, test_loss, global_epoch)
+                    save_model('embed_tokens', run_number, model.model.embed_tokens, save_path, test_loss, global_epoch)
+
         else:
             print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss:.4f}")
 
@@ -1789,7 +2143,7 @@ with torch.no_grad():
 
     ]
 
-    inputs = C.create_column_batch_inputs(test_prompts, num_layers, lor_ix_keys, tokenizer, device=DEVICE)
+    inputs = C.create_column_batch_inputs(test_prompts, num_layers, lor_ix_keys, tokenizer, USE_UNCAUSAL_METATOKENS, device=DEVICE)
 
     output_ids, col_attention_mask, col_past_key_values, elor_cache, position_ids, attention_mask = generate(model, lor_models, inputs, max_new_tokens=10)
     # for display add in col outputs
@@ -1809,110 +2163,111 @@ with torch.no_grad():
 
 # START_BLOCK_4
 
-def remove_zero_columns(matrix):
-    column_sums = matrix.abs().sum(dim=0)
-    non_zero_mask = column_sums >= 1e-8
-    result = matrix[:, non_zero_mask]
-    return result
+if False:
+    def remove_zero_columns(matrix):
+        column_sums = matrix.abs().sum(dim=0)
+        non_zero_mask = column_sums >= 1e-8
+        result = matrix[:, non_zero_mask]
+        return result
 
-def get_single_sample(inputs, ix):
-    ''' out of a list of columns of batches '''
-    one_sample = []
-    for column in inputs:
-        new_column = {}
-        for k in column.keys():
-            if isinstance(column[k], tuple):  # eg parse lor ixs
-                tup = []
-                for t in column[k]:
-                    tup.append(t[:, ix:ix + 1])  # shape=[layer, batch]
-                new_column[k] = tuple(tup)
-            else:
-                new_column[k] = column[k][ix:ix + 1]  # preserve shape
-        one_sample.append(new_column)
-    return one_sample
+    def get_single_sample(inputs, ix):
+        ''' out of a list of columns of batches '''
+        one_sample = []
+        for column in inputs:
+            new_column = {}
+            for k in column.keys():
+                if isinstance(column[k], tuple):  # eg parse lor ixs
+                    tup = []
+                    for t in column[k]:
+                        tup.append(t[:, ix:ix + 1])  # shape=[layer, batch]
+                    new_column[k] = tuple(tup)
+                else:
+                    new_column[k] = column[k][ix:ix + 1]  # preserve shape
+            one_sample.append(new_column)
+        return one_sample
 
-inputs = C.create_column_batch_inputs(test_prompts, num_layers, lor_ix_keys, tokenizer, device=DEVICE)
-for inp in inputs:
-    inp['loss_mask'] = torch.ones_like(inp['loss_mask'])
+    inputs = C.create_column_batch_inputs(test_prompts, num_layers, lor_ix_keys, tokenizer, USE_UNCAUSAL_METATOKENS, device=DEVICE)
+    for inp in inputs:
+        inp['loss_mask'] = torch.ones_like(inp['loss_mask'])
 
 
-# Run batch mode
-batch_avg_loss, batch_out_logits, batch_cat_attention_mask, batch_lors = run_epoch(model, lor_models, [inputs], optimizer=None, device=DEVICE, train=False, debug=True)
-batch_out_logits = torch.cat(batch_out_logits, dim=1)
+    # Run batch mode
+    batch_avg_loss, batch_out_logits, batch_cat_attention_mask, batch_lors = run_epoch(model, lor_models, [inputs], optimizer=None, device=DEVICE, train=False, debug=True)
+    batch_out_logits = torch.cat(batch_out_logits, dim=1)
 
-# Collect results for each sample individually
-all_single_avg_loss = []
-all_single_out_logits = []
-all_single_cat_attention_mask = []
-all_single_lors = []
-B = inputs[0]['input_ids'].shape[0]  # batch size
-for ix in range(B):
-    one_sample = get_single_sample(inputs, ix)
-    single_avg_loss, single_out_logits, single_cat_attention_mask, single_lors = run_epoch(model, lor_models, [one_sample], optimizer=None, device=DEVICE, train=False, debug=True)
-    all_single_avg_loss.append(single_avg_loss)
-    all_single_out_logits.append(single_out_logits)
-    all_single_cat_attention_mask.append(single_cat_attention_mask)
-    all_single_lors.append(single_lors)
+    # Collect results for each sample individually
+    all_single_avg_loss = []
+    all_single_out_logits = []
+    all_single_cat_attention_mask = []
+    all_single_lors = []
+    B = inputs[0]['input_ids'].shape[0]  # batch size
+    for ix in range(B):
+        one_sample = get_single_sample(inputs, ix)
+        single_avg_loss, single_out_logits, single_cat_attention_mask, single_lors = run_epoch(model, lor_models, [one_sample], optimizer=None, device=DEVICE, train=False, debug=True)
+        all_single_avg_loss.append(single_avg_loss)
+        all_single_out_logits.append(single_out_logits)
+        all_single_cat_attention_mask.append(single_cat_attention_mask)
+        all_single_lors.append(single_lors)
 
-# Check Losses
-bl = torch.tensor(batch_avg_loss)
-sl = torch.tensor(all_single_avg_loss).mean()
-assert torch.allclose(bl, sl, atol=1e-1), f'batch loss = {bl:>3f}, single loss = {sl:>3f}'
+    # Check Losses
+    bl = torch.tensor(batch_avg_loss)
+    sl = torch.tensor(all_single_avg_loss).mean()
+    assert torch.allclose(bl, sl, atol=1e-1), f'batch loss = {bl:>3f}, single loss = {sl:>3f}'
 
-# Check attention masks
-sa = torch.cat(all_single_cat_attention_mask, dim=0)
-assert torch.allclose(batch_cat_attention_mask, sa)
+    # Check attention masks
+    sa = torch.cat(all_single_cat_attention_mask, dim=0)
+    assert torch.allclose(batch_cat_attention_mask, sa)
 
-# Check LoRs
-lors_same = True
-for batch_ix in range(B):
-    for k in lor_ix_keys:
-        for layer_ix in range(num_layers):
-            blor = batch_lors[k][layer_ix]
-            slor = all_single_lors[batch_ix][k][layer_ix]
-            if blor is None:
-                assert slor is None
-            else:
-                bllor = blor[0][batch_ix]  # left singular value cache
-                brlor = blor[1][batch_ix]  # right singular value cache
-                is_zero = bllor.abs().sum() < 1e-8
-                if is_zero:
-                    # right values are zero too
-                    assert brlor.abs().sum() < 1e-8
+    # Check LoRs
+    lors_same = True
+    for batch_ix in range(B):
+        for k in lor_ix_keys:
+            for layer_ix in range(num_layers):
+                blor = batch_lors[k][layer_ix]
+                slor = all_single_lors[batch_ix][k][layer_ix]
+                if blor is None:
                     assert slor is None
                 else:
-                    bllor_rm = remove_zero_columns(bllor)  # bllor might be bigger than sllor, bc of "non-parse" partners in batch
-                    sllor = slor[0][0]  # batch of 1, left singular value cache
-                    assert bllor_rm.shape == sllor.shape
-                    assert torch.allclose(bllor_rm, sllor, atol=1e-1), f'lors arent close, max diff: {(bllor_rm - sllor).abs().max()}, {batch_ix=}, {k=}, {layer_ix=}'
-                    brlor_rm = remove_zero_columns(brlor)  # bllor might be bigger than sllor, bc of "non-parse" partners in batch
-                    srlor = slor[1][0]  # batch of 1, right singular value cache
-                    assert brlor_rm.shape == srlor.shape
-                    assert torch.allclose(brlor_rm, srlor, atol=1e-1), f'lors arent close, max diff: {(brlor_rm - srlor).abs().max()}, {batch_ix=}, {k=}, {layer_ix=}'
+                    bllor = blor[0][batch_ix]  # left singular value cache
+                    brlor = blor[1][batch_ix]  # right singular value cache
+                    is_zero = bllor.abs().sum() < 1e-8
+                    if is_zero:
+                        # right values are zero too
+                        assert brlor.abs().sum() < 1e-8
+                        assert slor is None
+                    else:
+                        bllor_rm = remove_zero_columns(bllor)  # bllor might be bigger than sllor, bc of "non-parse" partners in batch
+                        sllor = slor[0][0]  # batch of 1, left singular value cache
+                        assert bllor_rm.shape == sllor.shape
+                        assert torch.allclose(bllor_rm, sllor, atol=1e-1), f'lors arent close, max diff: {(bllor_rm - sllor).abs().max()}, {batch_ix=}, {k=}, {layer_ix=}'
+                        brlor_rm = remove_zero_columns(brlor)  # bllor might be bigger than sllor, bc of "non-parse" partners in batch
+                        srlor = slor[1][0]  # batch of 1, right singular value cache
+                        assert brlor_rm.shape == srlor.shape
+                        assert torch.allclose(brlor_rm, srlor, atol=1e-1), f'lors arent close, max diff: {(brlor_rm - srlor).abs().max()}, {batch_ix=}, {k=}, {layer_ix=}'
 
-# Check Logits
-# reorient to shape like batch version
+    # Check Logits
+    # reorient to shape like batch version
 
-# len(all_single_out_logits)
-# 8  # batch size
-# >>> len(all_single_out_logits[0])
-# 22  # column count
-# >>> all_single_out_logits[0][0].shape
-# torch.Size([1, 17, 151936])  # [1, sequence, dim]
+    # len(all_single_out_logits)
+    # 8  # batch size
+    # >>> len(all_single_out_logits[0])
+    # 22  # column count
+    # >>> all_single_out_logits[0][0].shape
+    # torch.Size([1, 17, 151936])  # [1, sequence, dim]
 
-# transposed = zip(*all_single_out_logits)
-# so = torch.cat([  # cat along sequence dim
-#     torch.cat(x, dim=0)  # cat along batch dim
-#     for x in transposed
-# ], dim=1)
+    # transposed = zip(*all_single_out_logits)
+    # so = torch.cat([  # cat along sequence dim
+    #     torch.cat(x, dim=0)  # cat along batch dim
+    #     for x in transposed
+    # ], dim=1)
 
-so = []
-for sample in all_single_out_logits:
-    so.append(torch.cat([column.squeeze(0) for column in sample], dim=0))
-so = torch.stack(so, dim=0)
-assert torch.allclose(batch_out_logits, so, atol=5e-3), f'{(batch_out_logits - so).abs().max().item()=:>.4f},  {(batch_out_logits - so).std()=:>.4f}'
+    so = []
+    for sample in all_single_out_logits:
+        so.append(torch.cat([column.squeeze(0) for column in sample], dim=0))
+    so = torch.stack(so, dim=0)
+    assert torch.allclose(batch_out_logits, so, atol=5e-3), f'{(batch_out_logits - so).abs().max().item()=:>.4f},  {(batch_out_logits - so).std()=:>.4f}'
 
-print('assertions passed')
+    print('assertions passed')
 
 
 # END_BLOCK_4
