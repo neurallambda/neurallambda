@@ -1796,57 +1796,6 @@ if True:
     else:
         global_epoch = 0
 
-    # # All Params
-    # main_parameters = model.named_parameters()
-
-    # # LOR Params Only
-    # parameters = list(lor_models.named_parameters())
-
-    # # # Embeddings. Add all, and then zero out grads (in run_epoch) to target just the new tokens
-    # # parameters = parameters + list(model.model.embed_tokens.named_parameters())
-
-
-    # ##########
-    # # different lrs
-    # highs = [
-    #     'lor_proj.14.token_mixing_mlp.0.weight',
-    #     'lor_proj.14.token_mixing_mlp.1.weight',
-    #     'lor_proj.14.token_mixing_mlp.4.weight',
-    #     'lor_proj.14.channel_mixing_mlp.0.weight',
-    #     'lor_proj.14.channel_mixing_mlp.1.weight',
-    #     'lor_proj.14.channel_mixing_mlp.4.weight',
-    #     'lor_proj.14.final_projections.lor_qs_l.weight',
-    #     'lor_proj.14.final_projections.lor_qs_r.weight',
-    #     'lor_proj.14.final_projections.lor_ks_l.weight',
-    #     'lor_proj.14.final_projections.lor_ks_r.weight',
-    #     'lor_proj.14.final_projections.lor_vs_l.weight',
-    #     'lor_proj.14.final_projections.lor_vs_r.weight',
-    #     'lor_proj.14.final_projections.lor_os_l.weight',
-    #     'lor_proj.14.final_projections.lor_os_r.weight',
-    #     'lor_proj.14.final_projections.lor_gs_l.weight',
-    #     'lor_proj.14.final_projections.lor_gs_r.weight',
-    #     'lor_proj.14.final_projections.lor_us_l.weight',
-    #     'lor_proj.14.final_projections.lor_us_r.weight',
-    #     'lor_proj.14.final_projections.lor_ds_l.weight',
-    #     'lor_proj.14.final_projections.lor_ds_r.weight',
-    # ]
-
-    # params_std_lr = []
-    # params_high_lr = []
-
-    # for name, param in parameters:
-    #     if name in highs:
-    #         params_high_lr.append(param)
-    #     else:
-    #         params_std_lr.append(param)
-
-    # optimizer = optim.AdamW([
-    #     {'params': params_std_lr, 'lr': lr},
-    #     {'params': params_high_lr, 'lr': high_lr, 'weight_decay': 1e-2},
-    #     {'params': main_parameters, 'lr': main_lr}
-    # ], lr=lr, weight_decay=0)
-
-
 
     fast_params = [
         'lor_proj.14.token_mixing_mlp.0.weight',

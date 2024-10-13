@@ -229,7 +229,7 @@ DEVICE = 'cuda:1'
 ##################################################
 # Saving/Loading
 
-save_path = 't14_homoiconic_llm_06'
+save_path = 't14_homoiconic_llm_07'
 
 def get_next_run_number(save_path):
     files = os.listdir(save_path)
