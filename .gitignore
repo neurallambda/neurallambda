@@ -22,7 +22,10 @@ dist-newstyle/
 
 # Experiments
 experiment/runs
+experiment/qwen_vocab
 mnist_data/
+t14_homoiconic_llm_06/
+t14_homoiconic_llm_07/
 
 # arc
 arc/arc_1d

@@ -494,6 +494,10 @@ if DO_TEST:
 
 
 class SelfAttention(Module):
+    '''Self-attention with a custom (but equivalent) backward pass. This was for
+work on TTT, but really this should all be calculated by torch's graph-tracking
+abilities.'''
+
     def __init__(self, embed_dim, num_heads, bias=True, batch_first=False):
         super().__init__()
         self.embed_dim = embed_dim

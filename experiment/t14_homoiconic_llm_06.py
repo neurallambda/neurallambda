@@ -145,7 +145,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 from transformers.cache_utils import Cache
 
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast, SequenceClassifierOutputWithPast
