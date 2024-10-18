@@ -540,12 +540,13 @@ class Qwen2Model(Q.Qwen2PreTrainedModel):
         #   (Pdb) causal_mask.shape
         #   torch.Size([32, 1, 21, 27])
 
-        uncausal_mask = convert_uncausal_mask_to_4d(uncausal_mask)[:, :, past_seen_tokens:, :]
+        if uncausal_mask is not None:
+            uncausal_mask = convert_uncausal_mask_to_4d(uncausal_mask)[:, :, past_seen_tokens:, :]
 
-        # causal_mask has "-inf" (floats) and 0s. Use the uncausal_mask to
-        # multiply those -infs by 0, where unmasked (not nan, bc -inf is a
-        # float)
-        causal_mask = torch.logical_not(uncausal_mask.to(dtype=causal_mask.dtype)) * causal_mask
+            # causal_mask has "-inf" (floats) and 0s. Use the uncausal_mask to
+            # multiply those -infs by 0, where unmasked (not nan, bc -inf is a
+            # float)
+            causal_mask = torch.logical_not(uncausal_mask.to(dtype=causal_mask.dtype)) * causal_mask
 
         hidden_states = inputs_embeds
 
