@@ -1,8 +1,31 @@
 '''
 
+"Functionalize" Optimizers that are end-to-end differentiable for use with metalearning.
+
+1. Test backpropability of optimizers
+2. Test performance on XOR (no metalearning)
+3. Test performance on XOR (with metalearning inits)
+
+
 NOTE: you could automate module functionalization, and have differentiable optimizers:
   - "functionalizing" a nn.Module: https://gist.github.com/apaszke/4c8ead6f17a781d589f6655692e7f6f0
   - meta `higher`: https://github.com/facebookresearch/higher/
+
+NOTE: Keys for Metalearning to Work With Pytorch
+
+Typically a pytorch model will optimize layers as static parameters within a model. For metalearning to work, we do not use static parameters, but parameters that are generated online, and for the inner loop of optimization, they are only trained in context. These "online" parameters *can* however be initialized from normal model parameters. In order for them to be trained online, a few things must happen:
+
+    1. You must maintain more control over weights than the pytorch `nn` library usually provides. You accomplish this by only using the functional api, `torch.nn.functional`, and providing all the weights yourself. For instance, instead of using `nn.Linear`, you must handle your weight/bias tensors yourself and use `F.linear(x, weight, bias)`.
+
+    1. You must create an node in pytorch's computation graph, simply by adding 0 to the parameters.
+
+    2. This new variant must be made capable of optimization by using `requires_grad_()`
+
+    3. In the inner loop, we must enable gradient calculation by using `with torch.enable_grad():`
+
+    4. gradients can be calculated during the inner loop using something like: `grads = torch.autograd.grad(loss, flat_params, create_graph=True)`
+
+    5. Use a functional version of an optimizer, from `functional_optimizers.py` to apply the gradients during the inner loop.
 
 '''
 
@@ -12,8 +35,12 @@ import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 
+
 ##################################################
 # Functional Optimizers
+#
+#   Differentiable variants of: SGD, SGD-Momentum, RMSProp, Adam
+
 
 ##########
 # SGD
@@ -82,15 +109,16 @@ def adam(params, grads, m, v, t, lr=0.001, betas=(0.9, 0.999), eps=1e-8):
 
 
 ##################################################
-# Test backpropability of optimizer by testing the outer loop separate from the
-# inner loop.
+# Test differentiability/backpropability of optimizer by testing the outer loop
+# separate from the inner loop.
 #
-# The test is given input x, the model must also output x. The only parameter
-# is a single element bias term. This can be metalearned per batch sample, but
-# the model ofc only has a single bias term that gets replicated per batch
-# sample. This single bias term will be initialized poorly, so the outer-loop
-# will be tasked with basically finding the data mean, to provide the ideal
-# starting point for metalearning to continue from.
+# The test is given a random input-output pair, and must predict the output from
+# the input. The only parameter is a single element bias term. This can be
+# metalearned per batch sample, but the model of course only has a single bias
+# term that gets replicated per batch sample. This single bias term will be
+# initialized poorly, so the outer-loop will be tasked with basically finding
+# the data mean, to provide the ideal starting point for metalearning to
+# continue from.
 
 
 # START_BLOCK_1
@@ -238,7 +266,7 @@ plt.show()
 
 
 ##################################################
-# Test various lrs and optimizers, plot results (Not metalearning, just, see how they do)
+# Test various lrs and optimizers, plot results (Not metalearning, just, see how they perform)
 
 
 # START_BLOCK_2
