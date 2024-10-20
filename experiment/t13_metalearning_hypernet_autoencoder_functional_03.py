@@ -65,6 +65,7 @@ def batch_conv_transpose2d_loop(input, weight, bias=None, stride=1, padding=0, o
 # Non-for-loop version
 
 def batch_conv2d(x, weights, biases=None, stride=1, padding=0, dilation=1, groups=1):
+    ''' F.conv2d, but where using weights/biases *per batch item* (ie not shared from module) '''
     b, n_in, h, w = x.size()
     b, n_out, n_in, kh, kw = weights.size()
 
@@ -87,6 +88,7 @@ def batch_conv2d(x, weights, biases=None, stride=1, padding=0, dilation=1, group
     return output.view(b, n_out, h, w)
 
 def batch_conv_transpose2d(x, weights, biases=None, stride=1, padding=0, output_padding=0, groups=1, dilation=1):
+    ''' F.conv_transpose2d, but where using weights/biases *per batch item* (ie not shared from module) '''
     b, n_in, h, w = x.size()
     b, n_out, n_in, kh, kw = weights.size()
 
