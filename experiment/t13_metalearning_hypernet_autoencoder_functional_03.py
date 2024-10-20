@@ -38,7 +38,7 @@ def batch_linear(input, weight, bias=None):
 ##################################################
 # For-loop version, can sometimes be faster?
 
-def batch_conv2d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
+def batch_conv2d_loop(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
     batch_size, _, _, _ = input.shape
     out_channels, _, kernel_height, kernel_width = weight.shape[1:]
 
@@ -49,7 +49,7 @@ def batch_conv2d(input, weight, bias=None, stride=1, padding=0, dilation=1, grou
     ])
     return output
 
-def batch_conv_transpose2d(input, weight, bias=None, stride=1, padding=0, output_padding=0, groups=1, dilation=1):
+def batch_conv_transpose2d_loop(input, weight, bias=None, stride=1, padding=0, output_padding=0, groups=1, dilation=1):
     batch_size, _, _, _ = input.shape
     _, in_channels, kernel_height, kernel_width = weight.shape[1:]
 

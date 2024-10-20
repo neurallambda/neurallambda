@@ -119,17 +119,21 @@ Syriac_(Estrangelo)
 Tagalog
 Tifinagh
 
-
 '''
 
 
 import torch
 from datasets import load_dataset
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, IterableDataset
 import matplotlib.pyplot as plt
 import numpy as np
-from typing import List
-from torchvision.transforms import Resize
+from typing import List, Tuple
+from torchvision import transforms
+import random
+
+
+##################################################
+# Omniglot
 
 ALPHABET_DICT = {
     0: "Alphabet_of_the_Magi",
@@ -190,7 +194,7 @@ ALPHABET_NAME_TO_ID = {v: k for k, v in ALPHABET_DICT.items()}
 class OmniglotDataset(Dataset):
     def __init__(self, hf_dataset, image_size=28):
         self.dataset = hf_dataset
-        self.resize = Resize((image_size, image_size))
+        self.resize = transforms.Resize((image_size, image_size))
 
     def __len__(self):
         return len(self.dataset)
@@ -206,7 +210,7 @@ class OmniglotDataset(Dataset):
         return image.squeeze(0), item['alphabet'], item['label']
 
 
-def omniglot_dataloader(train_alphabets: List[str], test_alphabets: List[str], image_size: int, batch_size: int = 32):
+def omniglot_datasets(train_alphabets: List[str], test_alphabets: List[str], image_size: int, batch_size: int = 32):
     # Load the dataset
     dataset = load_dataset("dpdl-benchmark/omniglot")
 
@@ -230,27 +234,33 @@ def omniglot_dataloader(train_alphabets: List[str], test_alphabets: List[str], i
         input_columns=['alphabet']
     )
 
-    # Print diagnostics for train dataset
-    print("\nTrain Dataset Diagnostics:")
-    print(f"Number of samples: {len(train_dataset)}")
-    print(f"Number of batches: {len(train_dataset) // batch_size + (1 if len(train_dataset) % batch_size else 0)}")
-    print(f"Size of first batch: {min(batch_size, len(train_dataset))}")
-    print(f"Number of unique image labels: {len(set(train_dataset['label']))}")
-    print(f"Alphabets included: {', '.join([ALPHABET_DICT[id] for id in train_alphabet_ids])}")
+    if False:
+        # Print diagnostics for train dataset
+        print("\nTrain Dataset Diagnostics:")
+        print(f"Number of samples: {len(train_dataset)}")
+        print(f"Number of batches: {len(train_dataset) // batch_size + (1 if len(train_dataset) % batch_size else 0)}")
+        print(f"Size of first batch: {min(batch_size, len(train_dataset))}")
+        print(f"Number of unique image labels: {len(set(train_dataset['label']))}")
+        print(f"Alphabets included: {', '.join([ALPHABET_DICT[id] for id in train_alphabet_ids])}")
 
-    # Print diagnostics for test dataset
-    print("\nTest Dataset Diagnostics:")
-    print(f"Number of samples: {len(test_dataset)}")
-    print(f"Number of batches: {len(test_dataset) // batch_size + (1 if len(test_dataset) % batch_size else 0)}")
-    print(f"Size of first batch: {min(batch_size, len(test_dataset))}")
-    print(f"Number of unique image labels: {len(set(test_dataset['label']))}")
-    print(f"Alphabets included: {', '.join([ALPHABET_DICT[id] for id in test_alphabet_ids])}")
+        # Print diagnostics for test dataset
+        print("\nTest Dataset Diagnostics:")
+        print(f"Number of samples: {len(test_dataset)}")
+        print(f"Number of batches: {len(test_dataset) // batch_size + (1 if len(test_dataset) % batch_size else 0)}")
+        print(f"Size of first batch: {min(batch_size, len(test_dataset))}")
+        print(f"Number of unique image labels: {len(set(test_dataset['label']))}")
+        print(f"Alphabets included: {', '.join([ALPHABET_DICT[id] for id in test_alphabet_ids])}")
 
     # Convert to OmniglotDataset
     train_dataset = OmniglotDataset(train_dataset, image_size)
     test_dataset = OmniglotDataset(test_dataset, image_size)
 
-    # Create DataLoaders
+    return train_dataset, test_dataset
+
+
+def omniglot_dataloader(train_alphabets: List[str], test_alphabets: List[str], image_size: int, batch_size: int = 32):
+    train_dataset, test_dataset = omniglot_datasets(train_alphabets, test_alphabets, image_size, batch_size)
+
     train_dl = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     test_dl = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
@@ -294,6 +304,264 @@ if False:
     # Visualize samples from the train loader
     print("Visualizing samples from the train loader:")
     visualize_samples(train_loader)
+
+    # Visualize samples from the test loader
+    print("Visualizing samples from the test loader:")
+    visualize_samples(test_loader)
+
+
+##############################
+
+class NShotTaskSampler(IterableDataset):
+    """
+    A sampler that creates N-way K-shot tasks for few-shot learning.
+
+    Args:
+        dataset (Dataset): The dataset to sample from.
+        n_way (int): Number of classes per task.
+        k_shot (int): Number of support examples per class.
+        q_query (int): Number of query examples per class.
+        num_tasks (int): Number of tasks to generate.
+    """
+
+    def __init__(self, dataset, n_way, k_shot, q_query, num_tasks):
+        self.dataset = dataset
+        self.n_way = n_way
+        self.k_shot = k_shot
+        self.q_query = q_query
+        self.num_tasks = num_tasks
+        self.labels = [item['label'] for item in dataset.dataset]
+
+    def __iter__(self):
+        for _ in range(self.num_tasks):
+            yield self.sample_task()
+
+    def sample_task(self) -> Tuple[List, List]:
+        """
+        Sample a single N-way K-shot task.
+
+        Returns:
+            Tuple containing support set and query set.
+        """
+        classes = random.sample(list(set(self.labels)), self.n_way)
+
+        support_set = []
+        query_set = []
+        for class_idx, class_label in enumerate(classes):
+            class_instances = [i for i, label in enumerate(self.labels) if label == class_label]
+            selected_instances = random.sample(class_instances, self.k_shot + self.q_query)
+
+            support_set.extend((self.dataset[i][0], class_idx) for i in selected_instances[:self.k_shot])
+            query_set.extend((self.dataset[i][0], class_idx) for i in selected_instances[self.k_shot:])
+
+        random.shuffle(query_set)
+        return support_set, query_set
+
+
+def omniglot_n_way_k_shot(
+    train_alphabets: List[str],
+    test_alphabets: List[str],
+    n_way: int,
+    k_shot: int,
+    q_query: int,
+    num_tasks: int,
+    image_size: int,
+    batch_size: int
+) -> Tuple[DataLoader, DataLoader]:
+    """
+    Create DataLoaders for N-way K-shot tasks on the Omniglot dataset.
+
+    Args:
+        train_alphabets (List[str]): List of alphabets to use for training.
+        test_alphabets (List[str]): List of alphabets to use for testing.
+        n_way (int): Number of classes per task.
+        k_shot (int): Number of support examples per class.
+        q_query (int): Number of query examples per class.
+        num_tasks (int): Number of tasks to generate.
+        image_size (int): Size to resize images to.
+        batch_size (int): Batch size for the DataLoader.
+
+    Returns:
+        Tuple of train and test DataLoaders.
+
+        A batch off the train/test DataLoader looks like:
+
+            List[Tuple[torch.Tensor (img),
+                       torch.Tensor (label)]]
+
+        IE a list of N*k tuples, each containing (batched_image, batched_label) for support examples.
+
+    """
+    train_dataset, test_dataset = omniglot_datasets(train_alphabets, test_alphabets, image_size)
+
+    train_sampler = NShotTaskSampler(train_dataset, n_way, k_shot, q_query, num_tasks)
+    test_sampler = NShotTaskSampler(test_dataset, n_way, k_shot, q_query, num_tasks)
+
+    train_loader = DataLoader(train_sampler, batch_size=batch_size)
+    test_loader = DataLoader(test_sampler, batch_size=batch_size)
+
+    return train_loader, test_loader
+
+
+def visualize_n_way_k_shot_task(
+    task_batch: Tuple[List[Tuple[torch.Tensor, torch.Tensor]],  # support: list of N*k tuples of (batched_image, batched_label)
+                      List[Tuple[torch.Tensor, torch.Tensor]]   # query: list of N*k tuples of (batched_image, batched_label)
+                      ],
+    n_way: int,
+    k_shot: int,
+    q_query: int
+):
+    """
+    Visualize a single N-way K-shot task from a batch.
+
+    Args:
+        task_batch (Tuple[List[Tuple[torch.Tensor, torch.Tensor]], List[Tuple[torch.Tensor, torch.Tensor]]]):
+            A batch containing a single task, where:
+            - The first element is the support set: a list of N*k tuples, each containing
+              (batched_image, batched_label) for support examples.
+            - The second element is the query set: a list of N*q tuples, each containing
+              (batched_image, batched_label) for query examples.
+        n_way (int): Number of classes in the task.
+        k_shot (int): Number of support examples per class.
+        q_query (int): Number of query examples per class.
+    """
+
+    support_set, query_set = task_batch
+
+    batch_ix = 0
+
+    total_rows = k_shot + 1
+    fig, axes = plt.subplots(total_rows, n_way, figsize=(3 * n_way, 3 * total_rows))
+    fig.suptitle(f"{n_way}-way {k_shot}-shot Task with {q_query} Query Examples")
+
+    if total_rows == 2:
+        axes = axes.reshape(2, n_way)
+
+    for i in range(n_way):
+        for j in range(k_shot):
+            idx = i * k_shot + j
+            img   = support_set[idx][0][batch_ix]
+            label = support_set[idx][1][batch_ix]
+            ax = axes[j, i]
+            ax.imshow(img.squeeze().numpy(), cmap='gray')
+            ax.axis('off')
+            if j == 0:
+                ax.set_title(f"Class {label}")
+
+    query_examples = {}
+    for img, label in query_set:
+        if label not in query_examples:
+            query_examples[label[batch_ix]] = img[batch_ix]
+
+    for i, (label, img) in enumerate(query_examples.items()):
+        axes[-1, i].imshow(img.squeeze().numpy(), cmap='gray')
+        axes[-1, i].axis('off')
+        axes[-1, i].set_title(f"Query (Class {label})")
+
+    plt.tight_layout()
+    plt.show()
+
+# Usage example
+if False:
+    train_alphabets = ["Latin", "Greek"]
+    test_alphabets = ["Mongolian"]
+    n_way = 5
+    k_shot = 2
+    q_query = 1
+    num_tasks = 100
+    image_size = 28
+    batch_size = 4
+
+    train_loader, test_loader = omniglot_n_way_k_shot(
+        train_alphabets, test_alphabets, n_way, k_shot, q_query, num_tasks, image_size, batch_size
+    )
+
+    print("Visualizing a sample task from the train loader:")
+    visualize_n_way_k_shot_task(next(iter(train_loader)), n_way, k_shot, q_query)
+
+    print("Visualizing a sample task from the test loader:")
+    visualize_n_way_k_shot_task(next(iter(test_loader)), n_way, k_shot, q_query)
+
+
+##################################################
+#
+
+class MiniImageNetDataset(Dataset):
+    def __init__(self, hf_dataset, image_size=84):
+        self.dataset = hf_dataset
+        self.transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        item = self.dataset[idx]
+        image = self.transform(item['image'])
+        return image, item['label']
+
+def mini_imagenet_dataloader(split: str, image_size: int, batch_size: int = 32):
+    # Load the dataset
+    dataset = load_dataset("GATE-engine/mini_imagenet", split=split)
+
+    # Print diagnostics
+    print(f"\n{split.capitalize()} Dataset Diagnostics:")
+    print(f"Number of samples: {len(dataset)}")
+    print(f"Number of batches: {len(dataset) // batch_size + (1 if len(dataset) % batch_size else 0)}")
+    print(f"Size of first batch: {min(batch_size, len(dataset))}")
+    print(f"Number of unique image labels: {len(set(dataset['label']))}")
+
+    # Convert to MiniImageNetDataset
+    dataset = MiniImageNetDataset(dataset, image_size)
+
+    # Create DataLoader
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=(split == 'train'))
+
+    return dataloader
+
+def visualize_samples(dataloader, num_samples=5):
+    # Get a batch of data
+    images, labels = next(iter(dataloader))
+
+    # Create a figure with subplots
+    fig, axes = plt.subplots(1, num_samples, figsize=(15, 3))
+    fig.suptitle("Sample Images from Mini-ImageNet Dataset")
+
+    # Denormalize the images
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+    images = images * std + mean
+
+    for i in range(num_samples):
+        # Get the image and label
+        img = images[i].permute(1, 2, 0).numpy()
+        label = labels[i].item()
+
+        # Display the image
+        axes[i].imshow(img)
+        axes[i].axis('off')
+        axes[i].set_title(f"Label: {label}")
+
+    plt.tight_layout()
+    plt.show()
+
+# Usage Example
+if False:
+    # Create dataloaders for each split
+    train_loader = mini_imagenet_dataloader('train', image_size=84, batch_size=32)
+    val_loader = mini_imagenet_dataloader('validation', image_size=84, batch_size=32)
+    test_loader = mini_imagenet_dataloader('test', image_size=84, batch_size=32)
+
+    # Visualize samples from the train loader
+    print("Visualizing samples from the train loader:")
+    visualize_samples(train_loader)
+
+    # Visualize samples from the validation loader
+    print("Visualizing samples from the validation loader:")
+    visualize_samples(val_loader)
 
     # Visualize samples from the test loader
     print("Visualizing samples from the test loader:")
