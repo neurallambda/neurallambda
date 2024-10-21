@@ -245,6 +245,13 @@ def process_false_lit(false_lit: FalseLit, next_address: int, memory: Dict[Addre
     return next_address, false_lit_addr, memory
 
 
+def process_null_lit(null_lit: NullLit, next_address: int, memory: Dict[Address, Block]) -> (int, Address, Dict[Address, Block]):
+    null_lit_addr = Address(next_address)
+    next_address += 1
+    memory[null_lit_addr] = ('NullLit',)
+    return next_address, null_lit_addr, memory
+
+
 def process_term(term: Term, next_address: int, memory: Dict[Address, Block], var_addresses: Dict[str, Address]) -> (int, Address, Dict[Address, Block]):
     if isinstance(term, Var):
         return process_var(term, next_address, memory, var_addresses)
@@ -278,6 +285,8 @@ def process_term(term: Term, next_address: int, memory: Dict[Address, Block], va
         return process_true_lit(term, next_address, memory)
     elif isinstance(term, FalseLit):
         return process_false_lit(term, next_address, memory)
+    elif isinstance(term, NullLit):
+        return process_null_lit(term, next_address, memory)
 
     else:
         raise NotImplementedError(f"Term type {type(term)} not implemented in process_term")
@@ -471,9 +480,12 @@ def memory_to_terms(memory: Dict[Address, Block], address: Address,
     elif block_type == 'FalseLit':
         return FalseLit()
 
+    elif block_type == 'NullLit':
+        return NullLit()
+
     # null
-    elif block_type == 'NULL':
-        return Null()
+    elif block_type == 'UNRECOGNIZED':
+        return Unrecognized()
 
     else:
         raise ValueError(f"Unknown block type {block_type}")
@@ -486,16 +498,29 @@ def str_tup(tup, left_is_reduced, right_is_reduced):
     ''' A helper function for `print_mem` that. It is for printing references in
     expressions, and coloring them red if they have not been recorded as reduced
     yet, and green if they have been reduced.'''
-    s = "("
-    for i, (t, ir_color) in enumerate(zip(tup, [None, left_is_reduced.item(), right_is_reduced.item()])):
-        s += D.colorize(str(t), value=ir_color)
-        # br()
+    if (left_is_reduced is not None and
+        right_is_reduced is not None):
+        s = "("
+        for i, (t, ir_color) in enumerate(zip(tup, [None, left_is_reduced.item(), right_is_reduced.item()])):
+            s += D.colorize(str(t), value=ir_color)
+            # br()
 
-        # add commas
-        if i < len(tup)-1:
-            s += ', '
-    s += ")"
-    return s
+            # add commas
+            if i < len(tup)-1:
+                s += ', '
+        s += ")"
+        return s
+    else:
+        s = "("
+        for i, t in enumerate(tup):
+            s += str(t)
+
+            # add commas
+            if i < len(tup)-1:
+                s += ', '
+        s += ")"
+        return s
+
 
 def print_mem(mem, ir1, ir2, resugar_app=False, resugar_fn=False):
     '''Print a human-readable version of the neurallabda's memory. Useful for
@@ -511,7 +536,10 @@ def print_mem(mem, ir1, ir2, resugar_app=False, resugar_fn=False):
     ss = sorted(mem.items(), key=lambda item: item[0].i)
     for i, (a, x) in enumerate(ss):
         terms = memory_to_terms(mem, a, resugar_app=resugar_app, resugar_fn=resugar_fn)
-        if terms != Null():
-            print(f'A({a.i :> 3d}) {str_tup(x, ir1[i], ir2[i])}  ::  {pretty_print(terms)}')
+        if terms != Unrecognized():
+            if ir1 is not None and ir2 is not None:
+                print(f'A({a.i :> 3d}) {str_tup(x, ir1[i], ir2[i])}  ::  {pretty_print(terms)}')
+            else:
+                print(f'A({a.i :> 3d}) {str_tup(x, None, None)}  ::  {pretty_print(terms)}')
 
 pm = print_mem
