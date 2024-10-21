@@ -39,6 +39,8 @@ TODO:
 - [ ] metalearn lors
 
 
+RESULTS: didn't build metalearning of lors, moved on to variant _2 where I try N-way k-shot learning on omniglot/mini-imagenet, a standard dataset. Should probably revisit this one though and add metalearning!
+
 '''
 
 import os

@@ -149,7 +149,7 @@ IDEAS:
 
 '''
 
-PAUSED, pending experiment with t14_homoiconic_llm_test_metalearning
+PAUSED, pending experiment with t14_homoiconic_llm_test_metalearning_2
 
 
 # import os
