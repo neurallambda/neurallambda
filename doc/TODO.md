@@ -1,4 +1,4 @@
-# TODO
+# TODO v1 (differentiable lambda calc)
 
 - Roadmap as of May 2024
   - [ ] E001: Get Neuralstack + Sum Sequence working. `[t04_addition](./experiments/)`.
@@ -21,6 +21,7 @@ SOCIAL DEMOS
 - [ ] ESOCIAL: Write up palindrome
 - [ ] ESOCIAL: Move current README to a neurallambda-specific writeup
 - [ ] ESOCIAL: Tighten up current README
+
 
 QUEUE
 - [ ] E004: Sorting using queues

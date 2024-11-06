@@ -64,6 +64,10 @@ class TrueLit:
 class FalseLit:
     pass
 
+@dataclass
+class NullLit:
+    pass
+
 
 ##########
 # List Literals
@@ -99,7 +103,7 @@ class ListP:
 # Error Types
 
 @dataclass
-class Null:
+class Unrecognized:
     pass
 
 @dataclass
@@ -136,6 +140,7 @@ s_expression: atomic_symbol
 
             | true
             | false
+            | null
 
             | cons
             | car
@@ -152,6 +157,7 @@ FUNC: /[a-z]+/
 
 true: "true"
 false: "false"
+null: "null"
 
 number: NUMBER
 NUMBER: /[0-9]+/
@@ -190,6 +196,9 @@ class LambdaTransformer(Transformer):
 
    def false(self, _):
        return FalseLit()
+
+   def null(self, _):
+       return NullLit()
 
    def list(self, children: List[Term]) -> LinkedList:
        if len(children) == 0:
@@ -280,8 +289,10 @@ def pretty_print(term):
             return 'true'
         case FalseLit():
             return 'false'
-        case Null():
-            return 'NULL'
+        case NullLit():
+            return 'null'
+        case Unrecognized():
+            return 'Unrecognized'
         case _:
             return f'UnknownTerm: {str(term)}'
 

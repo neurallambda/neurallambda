@@ -418,3 +418,116 @@ class Choice(nn.Module):
             outs = torch.sigmoid(outs * self.scale)
 
         return outs
+
+
+
+##################################################
+#
+
+def get_last_attended_token(token_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+    """
+    Get the last attended token for each sequence in the batch.
+
+    Args:
+    token_ids (torch.Tensor): Tensor of token IDs with shape [batch_size, seq_len]
+    attention_mask (torch.Tensor): Boolean tensor with shape [batch_size, seq_len]
+
+    Returns:
+    torch.Tensor: Tensor of last attended tokens with shape [batch_size]
+                  Contains -1 for sequences with no attended tokens or empty sequences
+    """
+    batch_size, seq_len = attention_mask.shape
+
+    # Handle empty sequences
+    if seq_len == 0:
+        return torch.full((batch_size,), -1, dtype=torch.long, device=token_ids.device)
+
+    # Find the position of the last attended token
+    last_attended_pos = (seq_len - 1) - torch.fliplr(attention_mask).argmax(dim=1)
+
+    # Create a range tensor for batch indexing
+    batch_range = torch.arange(batch_size, device=token_ids.device)
+
+    # Get the last attended token, use -1 to represent None
+    last_tokens = torch.where(
+        attention_mask.any(dim=1),
+        token_ids[batch_range, last_attended_pos],
+        torch.tensor(-1, device=token_ids.device)
+    )
+
+    return last_tokens
+
+
+def test_get_last_attended_token():
+    # Test 1: Basic case
+    token_ids = torch.tensor([[1, 2, 3, 4, 5], [6, 7, 8, 9, 10]])
+    attention_mask = torch.tensor([[1, 1, 1, 0, 0], [1, 1, 1, 1, 0]])
+    result = get_last_attended_token(token_ids, attention_mask)
+    assert torch.all(result == torch.tensor([3, 9])), f"Test 1 failed. Expected [3, 9], got {result}"
+
+    # Test 2: No attended tokens in one sequence
+    token_ids = torch.tensor([[1, 2, 3, 4, 5], [6, 7, 8, 9, 10]])
+    attention_mask = torch.tensor([[1, 1, 1, 1, 1], [0, 0, 0, 0, 0]])
+    result = get_last_attended_token(token_ids, attention_mask)
+    assert torch.all(result == torch.tensor([5, -1])), f"Test 2 failed. Expected [5, -1], got {result}"
+
+    # Test 3: Arbitrary attention patterns
+    token_ids = torch.tensor([[1, 2, 3], [4, 5, 6]])
+    attention_mask = torch.tensor([[1, 0, 1], [0, 1, 0]])
+    result = get_last_attended_token(token_ids, attention_mask)
+    assert torch.all(result == torch.tensor([3, 5])), f"Test 3 failed. Expected [3, 5], got {result}"
+
+    # Test 4: Empty sequences
+    token_ids = torch.tensor([[], []], dtype=torch.long)
+    attention_mask = torch.tensor([[], []], dtype=torch.long)
+    result = get_last_attended_token(token_ids, attention_mask)
+    assert torch.all(result == torch.tensor([-1, -1])), f"Test 4 failed. Expected [-1, -1], got {result}"
+
+    # Test 5: Mixed cases
+    token_ids = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]])
+    attention_mask = torch.tensor([[0, 0, 0, 1], [1, 0, 1, 0], [0, 0, 0, 0]])
+    result = get_last_attended_token(token_ids, attention_mask)
+    assert torch.all(result == torch.tensor([4, 7, -1])), f"Test 5 failed. Expected [4, 7, -1], got {result}"
+
+    # Test 6: Single element sequences
+    token_ids = torch.tensor([[1], [2]])
+    attention_mask = torch.tensor([[1], [0]])
+    result = get_last_attended_token(token_ids, attention_mask)
+    assert torch.all(result == torch.tensor([1, -1])), f"Test 6 failed. Expected [1, -1], got {result}"
+
+    # Test 7: Large sequence length
+    token_ids = torch.arange(1, 1001).unsqueeze(0).repeat(2, 1)
+    attention_mask = torch.ones(2, 1000, dtype=torch.long)
+    attention_mask[0, 500:] = 0
+    result = get_last_attended_token(token_ids, attention_mask)
+    assert torch.all(result == torch.tensor([500, 1000])), f"Test 7 failed. Expected [500, 1000], got {result}"
+
+    # Test 8: Random attention patterns
+    torch.manual_seed(42)
+    token_ids = torch.randint(1, 1000, (5, 20))
+    attention_mask = torch.randint(0, 2, (5, 20))
+    result = get_last_attended_token(token_ids, attention_mask)
+    expected = torch.tensor([
+        token_ids[0, attention_mask[0].nonzero().max()] if attention_mask[0].any() else -1,
+        token_ids[1, attention_mask[1].nonzero().max()] if attention_mask[1].any() else -1,
+        token_ids[2, attention_mask[2].nonzero().max()] if attention_mask[2].any() else -1,
+        token_ids[3, attention_mask[3].nonzero().max()] if attention_mask[3].any() else -1,
+        token_ids[4, attention_mask[4].nonzero().max()] if attention_mask[4].any() else -1,
+    ])
+    assert torch.all(result == expected), f"Test 8 failed. Expected {expected}, got {result}"
+
+    # Test 9: Edge case - all tokens attended
+    token_ids = torch.tensor([[1, 2, 3], [4, 5, 6]])
+    attention_mask = torch.ones_like(token_ids, dtype=torch.long)
+    result = get_last_attended_token(token_ids, attention_mask)
+    assert torch.all(result == torch.tensor([3, 6])), f"Test 9 failed. Expected [3, 6], got {result}"
+
+    # Test 10: Edge case - no tokens attended
+    token_ids = torch.tensor([[1, 2, 3], [4, 5, 6]])
+    attention_mask = torch.zeros_like(token_ids, dtype=torch.long)
+    result = get_last_attended_token(token_ids, attention_mask)
+    assert torch.all(result == torch.tensor([-1, -1])), f"Test 10 failed. Expected [-1, -1], got {result}"
+
+    print("All tests for get_last_attended_token passed!")
+
+# test_get_last_attended_token()
