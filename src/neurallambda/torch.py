@@ -163,30 +163,9 @@ class Fn(nn.Module):
         else:
             self.parameters = nn.ParameterList(parameters)
     def forward(self, input):
-        if self.nargs == 1:
-            return self.f(input)
-        if self.nargs == 2:
-            x, y = input
-            return self.f(x, y)
-        if self.nargs == 3:
-            x, y, z = input
-            return self.f(x, y, z)
-        if self.nargs == 4:
-            a, b, c, d = input
-            return self.f(a, b, c, d)
-        if self.nargs == 5:
-            a, b, c, d, e = input
-            return self.f(a, b, c, d, e)
-        if self.nargs == 6:
-            a, b, c, d, e, f = input
-            return self.f(a, b, c, d, e, f)
-        if self.nargs == 7:
-            a, b, c, d, e, f, g = input
-            return self.f(a, b, c, d, e, f, g)
-        if self.nargs == 8:
-            a, b, c, d, e, f, g, h = input
-            return self.f(a, b, c, d, e, f, g, h)
-
+        if len(input) != self.nargs:
+            raise ValueError(f"num inputs must match number of set args {self.nargs}")
+        return self.f(*input)
 
 class GumbelSoftmax(nn.Module):
     def __init__(self, temperature=1.0, hard=False, dim=-1):
